@@ -506,6 +506,7 @@ impl eframe::App for Shell {
     /// Tab belongs to the text session (it nests list items): take it out of the input before egui
     /// uses it to move keyboard focus between widgets.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.cityos.open {return;}
         if self.app.plugins.open {
             return;
         }
@@ -578,7 +579,11 @@ impl Shell {
 
     /// One frame of the home screen (file browser): files dropped on the window are imported.
     fn home_frame(&mut self, ui: &mut egui::Ui, ctx: &Context) {
-        if ui.button("CityOS Catalog · browse repository L0–L9").clicked() { self.cityos.open=true; }
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(16,8)).show(ui, |ui| {
+            let response=ui.button("CityOS design library  →");
+            crate::widgets::record(ui,"open-cityos-catalog",response.rect);
+            if response.clicked() { self.cityos.open=true; }
+        });
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() && self.app.dialog.is_none() {
             let target = self.app.home_target().or_else(|| self.app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))));
@@ -586,7 +591,8 @@ impl Shell {
                 self.app.import_into_library(&dropped, &p, f.as_deref());
             }
         }
-        crate::home::show(&mut self.app, ui);
+        // Home paints its whole max_rect; reserve the catalog launcher above it.
+        ui.scope_builder(egui::UiBuilder::new().max_rect(ui.available_rect_before_wrap()), |ui| crate::home::show(&mut self.app, ui));
         crate::home::dialog::show(&mut self.app, ctx);
         let full = ui.max_rect();
         self.toast(ui, full);
@@ -597,12 +603,12 @@ impl Shell {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.app.now = ctx.input(|i| i.time);
-        self.app.poll_plugins();
         self.drive_screenshot(&ctx);
         if self.cityos.open {
             self.cityos.show(ui,&ctx);
             return;
         }
+        self.app.poll_plugins();
         if ctx.input(|i| i.viewport().close_requested()) {
             crate::decks::ui::flush_notes(&mut self.app);
             self.app.save_close_version();

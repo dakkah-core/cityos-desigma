@@ -435,6 +435,9 @@ impl Library {
         }
         let (m, _) = self.find_file(id)?;
         let bytes = std::fs::read(self.file_path(&m.project.id, id))?;
+        if serde_json::from_slice::<serde_json::Value>(&bytes)?.get("schemaVersion").is_some_and(|v|v=="desigma.document.v2"){
+            return Ok(Document::from_json(&String::from_utf8_lossy(&bytes))?.kind);
+        }
         Ok(serde_json::from_slice::<Probe>(&bytes)?.kind)
     }
 
@@ -866,6 +869,14 @@ mod tests {
         assert!(names.contains(&format!("{}.desigma.tmp",e.id)));
         assert!(names.iter().all(|name|!name.contains(".tmp-")));
         assert_eq!(std::fs::read_to_string(path.with_extension("desigma.tmp")).unwrap(),"garbage");
+    }
+
+    #[test]
+    fn interrupted_document_manifest_commit_recovers_on_reopen(){
+        let (_t,lib)=Tmp::new();let project=lib.create_project("P").unwrap();let file=lib.create_file(&project.id,None,"File",&doc("before",1)).unwrap();
+        let mut manifest=lib.load_manifest(&project.id).unwrap();manifest.files[0].modified=now_ms();let pending=PendingSave{file_id:file.id.clone(),document:doc("accepted-new",2).to_json().unwrap(),manifest};
+        write_atomic(&lib.project_dir(&project.id).join(".save.pending.json"),serde_json::to_string(&pending).unwrap().as_bytes()).unwrap();
+        let reopened=Library::open(lib.root()).unwrap();assert_eq!(reopened.load_file(&file.id).unwrap().name,"accepted-new");assert!(!lib.project_dir(&project.id).join(".save.pending.json").exists());
     }
 
     #[test]

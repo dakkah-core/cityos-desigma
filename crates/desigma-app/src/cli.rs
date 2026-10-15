@@ -210,6 +210,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
 pub const USAGE: &str = "usage: desigma [FILE] [--screenshot OUT.png] [--size WxH] [--scale FACTOR] [--select LAYER|none] [--menu main|main/File|shape|palette] [--panel interaction|present-variables|variables|variables-floating|libraries|picker|picker-page|fill-d9|picker-gradient|effects-menu|stroke-settings|type-details|effect-noise|effect-texture|effect-glass|version-history|dev-annotate|dev-compare]\n               [--zoom PERCENT] [--rulers] [--grid] [--gpu] [--home] [--library DIR] [--layout-grid grid|columns|rows] [--edit-text LAYER [--select-text START-END]]\n  FILE  .fig, .json (Figma REST or native), .svg or .desigma; without a file the projects home screen opens
   --scale    with --screenshot: device pixel ratio (2 writes a PNG twice --size, rendered crisp rather than upscaled)
   --home     show the home screen (also in --screenshot mode)
+  --cityos-repository PATH  open the read-only CityOS L0–L9 catalog
+  --cityos-reader PATH      absolute packaged reader.mjs path
+  --cityos-node PATH        Node executable (default: node)
+  --cityos-cache PATH       application-owned repository cache
+  --cityos-canonical-ref SHA  explicit full committed-source pin for reproducible trials
   --present  open presentation preview; --fullscreen starts it in native fullscreen (F11 toggles, Esc returns)
   --gpu      draw the canvas on the GPU; --screenshot uses the CPU renderer unless this is given
   --library  use DIR as the projects library instead of the default location

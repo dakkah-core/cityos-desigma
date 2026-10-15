@@ -99,23 +99,21 @@ impl App {
         self.show_toast("Version restored. Undo brings the previous state back", false);
     }
 
-    fn write_after_restore(&mut self) {
-        if let Err(e) = self.save_library_file() {
-            self.show_toast(e, true);
-        }
-    }
-
     /// Undo with nothing left to undo steps back over a restore.
     pub fn try_undo_restore(&mut self) -> bool {
         if self.hist.can_undo() || self.history.viewing.is_some() {
             return false;
         }
         let Some(snap) = self.history.restore_undo.take() else { return false };
+        if let (Some(lib),Some(lf))=(self.lib.clone(),self.lib_file.clone()) {
+            if let Err(e)=lib.save_file(&lf.id,&snap.doc){self.history.restore_undo=Some(snap);self.show_toast(format!("Cannot undo restore: {e}"),true);return false;}
+        }
         let now = self.take_snapshot();
         self.install(snap.doc, snap.hist, Some(snap.page), snap.selection);
         let expected = doc_hash(&self.doc);
         self.history.restore_redo = Some((now, expected));
-        self.write_after_restore();
+        self.autosave.saved_hash=doc_hash(&self.doc);
+        self.autosave.changed_at=None;
         true
     }
 
@@ -128,10 +126,14 @@ impl App {
         if doc_hash(&self.doc) != expected {
             return false;
         }
+        if let (Some(lib),Some(lf))=(self.lib.clone(),self.lib_file.clone()) {
+            if let Err(e)=lib.save_file(&lf.id,&snap.doc){self.history.restore_redo=Some((snap,expected));self.show_toast(format!("Cannot redo restore: {e}"),true);return false;}
+        }
         let before = self.take_snapshot();
         self.install(snap.doc, snap.hist, Some(snap.page), snap.selection);
         self.history.restore_undo = Some(before);
-        self.write_after_restore();
+        self.autosave.saved_hash=doc_hash(&self.doc);
+        self.autosave.changed_at=None;
         true
     }
 }

@@ -32,6 +32,48 @@ fn home_sim() -> (Sim, TmpDir) {
     (s, dir)
 }
 
+#[test]
+fn cityos_temporary_views_cannot_save_autosave_or_create_history(){
+    let (mut s,_dir)=home_sim();
+    open(&mut s,"Welcome");
+    let library=lib(&s);let files=library.all_files().len();
+    let id=s.app().lib_file.as_ref().unwrap().id.clone();
+    let saved=library.load_file(&id).unwrap().to_json().unwrap();
+    let versions=library.list_versions(&id).len();
+    // An actual editor document underneath the catalog must stay dirty and unsaved.
+    s.shell.app.doc.name="Unsaved editor underneath catalog".into();
+    let document=s.app().doc.to_json().unwrap();let saved_hash=s.app().autosave.saved_hash;
+    s.shell.cityos=crate::cityos_catalog::tests::populated_browser();
+    for key in [Key::S,Key::Z,Key::Y,Key::D]{s.cmd_key(key);}
+    s.mods=Modifiers::COMMAND|Modifiers::ALT;s.key(Key::S);s.mods=Modifiers::NONE;
+    for _ in 0..120{s.frame(vec![]);}
+    assert_eq!(library.all_files().len(),files);assert_eq!(s.app().doc.to_json().unwrap(),document);assert!(s.app().history.save_modal.is_none());assert_eq!(s.app().autosave.saves,0);
+    assert_eq!(s.app().lib_file.as_ref().unwrap().id,id);
+    assert_eq!(s.app().autosave.saved_hash,saved_hash);
+    assert_eq!(library.load_file(&id).unwrap().to_json().unwrap(),saved);
+    assert_eq!(library.list_versions(&id).len(),versions);
+}
+
+#[test]
+fn failed_flush_retains_dirty_revision_for_retry(){
+    let (mut s,_dir)=home_sim();let library=lib(&s);let id=library.all_files()[0].id.clone();s.shell.app.open_library_file(&id);
+    let project=s.app().lib_file.as_ref().unwrap().project_id.clone();let blocked=library.path("projects").join(project).join(".save.pending.json");std::fs::create_dir(&blocked).unwrap();
+    let previous=s.app().autosave.saved_hash;s.shell.app.doc.name="unsaved edit".into();s.shell.app.flush_autosave();
+    assert_eq!(s.app().autosave.saved_hash,previous);assert!(s.app().autosave.changed_at.is_some());
+    std::fs::remove_dir(blocked).unwrap();s.shell.app.flush_autosave();assert_ne!(s.app().autosave.saved_hash,previous);assert!(s.app().autosave.changed_at.is_none());
+}
+
+#[test]
+fn catalog_launcher_and_back_preserve_the_home_library() {
+    let (mut s,_dir)=home_sim();
+    let library=lib(&s);let files=library.all_files().len();
+    s.shell.cityos=crate::cityos_catalog::tests::populated_browser();s.shell.cityos.open=false;
+    s.frame(vec![]);click_rect(&mut s,"open-cityos-catalog");
+    assert!(s.shell.cityos.open);assert!(s.app().home.is_some());
+    click_rect(&mut s,"catalog-back");
+    assert!(!s.shell.cityos.open);assert!(s.app().home.is_some());assert_eq!(library.all_files().len(),files);
+}
+
 fn lib(s: &Sim) -> Library {
     s.app().lib.clone().expect("a library")
 }

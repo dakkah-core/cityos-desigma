@@ -1,20 +1,36 @@
 //! Temporary catalog views live outside App.doc and never enter editor save/history.
 use desigma_cityos_catalog::{Client, Entry, Filters, Page, ReaderConfig};
-use egui::{Context, Ui};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
+mod preview;
+#[cfg(test)]
+pub(crate) mod tests;
+mod ui;
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum DetailTab {
+    #[default]
+    Preview,
+    Source,
+    Inspector,
+}
 
 enum Job {
-    Scan(u64, ReaderConfig, String),
+    Scan(u64, ReaderConfig, String, bool),
     Query(u64, Filters, usize),
     Materialize(u64, String),
 }
 enum Reply {
-    Scan(u64, Result<Value,String>),
-    Query(u64, Result<Page,String>),
-    Materialize(u64, Result<Value,String>),
+    Scan(u64, Result<Value, String>),
+    Query(u64, Filters, usize, Result<Page, String>),
+    Materialize(u64, String, Result<Value, String>),
+    SourceChanged,
 }
 pub struct Browser {
     pub open: bool,
@@ -38,93 +54,268 @@ pub struct Browser {
     error: Option<String>,
     last_refresh: Instant,
     filter_changed: Option<Instant>,
+    cancelled: Arc<AtomicBool>,
+    source_changed: bool,
+    activity: &'static str,
+    displayed_filters: Filters,
+    pending_selection: bool,
+    detail_tab: DetailTab,
+    settings_open: bool,
+    coverage_open: bool,
+    filters_open: bool,
+    products_open: bool,
+    source_text: String,
+    last_interaction: Instant,
+    preview_error: Option<String>,
+    refresh_failures: u32,
 }
 
 impl Browser {
     pub fn new(repository: Option<PathBuf>, reader: Option<PathBuf>, node: Option<PathBuf>, cache: Option<PathBuf>, canonical_ref: Option<String>) -> Self {
-        let (jobs, requests)=mpsc::channel(); let (responses,replies)=mpsc::channel();
+        let (jobs, requests) = mpsc::channel();
+        let (responses, replies) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancelled.clone();
         std::thread::spawn(move || {
-            let mut client: Option<Client>=None;
-            while let Ok(job)=requests.recv() {
-                let reply=match job {
-                    Job::Scan(epoch,config,mode)=>{
-                        // Each scan gets a new session; stale responses cannot escape the old child.
-                        client=None;
-                        let result=Client::connect(&config).and_then(|mut c|{let result=c.scan(&config,&mode);client=Some(c);result});
-                        Reply::Scan(epoch,result)
+            let mut client: Option<Client> = None;
+            let mut previous_config: Option<ReaderConfig> = None;
+            let mut previous_mode = String::new();
+            loop {
+                let job = match requests.recv_timeout(Duration::from_millis(100)) {
+                    Ok(job) => job,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if client.as_mut().is_some_and(|c| c.take_source_changed()) {
+                            if responses.send(Reply::SourceChanged).is_err() {
+                                break;
+                            }
+                        }
+                        continue;
                     }
-                    Job::Query(epoch,filters,offset)=>Reply::Query(epoch,client.as_mut().ok_or_else(||"Refresh the repository first".to_string()).and_then(|c|c.query(&filters,offset))),
-                    Job::Materialize(epoch,id)=>Reply::Materialize(epoch,client.as_mut().ok_or_else(||"Refresh the repository first".to_string()).and_then(|c|c.materialize(&id))),
+                    Err(_) => break,
                 };
-                if responses.send(reply).is_err(){break;}
+                let reply = match job {
+                    Job::Scan(epoch, config, mode, prefer_cache) => {
+                        // Preserve a healthy session for incremental refresh. Configuration
+                        // changes replace the child and cannot reuse its old generations.
+                        let result = if previous_config.as_ref() == Some(&config) && previous_mode == mode && client.is_some() {
+                            client.as_mut().unwrap().scan(&config, &mode)
+                        } else {
+                            client = None;
+                            Client::connect_with_cancel(&config, worker_cancel.clone()).and_then(|mut c| {
+                                let result = c.scan_with_cache(&config, &mode, prefer_cache);
+                                client = Some(c);
+                                result
+                            })
+                        };
+                        previous_config = Some(config);
+                        previous_mode = mode;
+                        if result.is_err() {
+                            client = None;
+                            previous_config = None;
+                        }
+                        Reply::Scan(epoch, result)
+                    }
+                    Job::Query(epoch, filters, offset) => {
+                        let result = client.as_mut().ok_or_else(|| "Refresh the repository first".to_string()).and_then(|c| c.query(&filters, offset));
+                        Reply::Query(epoch, filters, offset, result)
+                    }
+                    Job::Materialize(epoch, id) => {
+                        let result = client.as_mut().ok_or_else(|| "Refresh the repository first".to_string()).and_then(|c| c.materialize(&id));
+                        Reply::Materialize(epoch, id, result)
+                    }
+                };
+                if responses.send(reply).is_err() {
+                    break;
+                }
             }
         });
-        let open=repository.is_some();
-        let reader=reader.or_else(||std::env::current_exe().ok().map(|p|p.with_file_name("cityos-reader").join("reader.mjs")));
-        let mut browser=Self {open,repository:repository.map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),reader:reader.map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),
-            node:node.map(|p|p.to_string_lossy().into_owned()).unwrap_or_else(||"node".into()),cache,canonical_ref,mode:"committed".into(),filters:Filters::default(),jobs,replies,epoch:0,busy:false,
-            summary:None,entries:vec![],total:0,next:None,selected:None,specimen:None,error:None,last_refresh:Instant::now(),filter_changed:None};
-        if open {browser.refresh();} browser
+        let open = repository.is_some();
+        let reader = reader.or_else(|| std::env::current_exe().ok().map(|p| p.with_file_name("cityos-reader").join("reader.mjs")));
+        let mut browser = Self {
+            open,
+            repository: repository.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            reader: reader.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            node: node.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "node".into()),
+            cache,
+            canonical_ref,
+            mode: "committed".into(),
+            filters: Filters { collection: "design".into(), ..Default::default() },
+            jobs,
+            replies,
+            epoch: 0,
+            busy: false,
+            summary: None,
+            entries: vec![],
+            total: 0,
+            next: None,
+            selected: None,
+            specimen: None,
+            error: None,
+            last_refresh: Instant::now(),
+            filter_changed: None,
+            cancelled,
+            source_changed: false,
+            activity: "",
+            displayed_filters: Filters::default(),
+            pending_selection: false,
+            detail_tab: DetailTab::default(),
+            settings_open: !open,
+            coverage_open: false,
+            filters_open: false,
+            products_open: false,
+            source_text: String::new(),
+            last_interaction: Instant::now(),
+            preview_error: None,
+            refresh_failures: 0,
+        };
+        if open {
+            browser.refresh();
+        }
+        browser
     }
-    fn refresh(&mut self){
-        if self.busy{return;}
-        self.epoch+=1;self.busy=true;self.error=None;self.last_refresh=Instant::now();
-        let config=ReaderConfig {node:self.node.clone().into(),reader:self.reader.clone().into(),repository:self.repository.clone().into(),cache:self.cache.clone(),canonical_ref:self.canonical_ref.clone()};
-        let _=self.jobs.send(Job::Scan(self.epoch,config,self.mode.clone()));
+    fn refresh(&mut self) {
+        if self.busy {
+            return;
+        }
+        self.cancelled.store(false, Ordering::Release);
+        self.epoch += 1;
+        self.busy = true;
+        self.activity = if self.summary.is_some() { "Refreshing repository" } else { "Reading repository" };
+        self.error = None;
+        self.last_refresh = Instant::now();
+        let config = ReaderConfig {
+            node: self.node.clone().into(),
+            reader: self.reader.clone().into(),
+            repository: self.repository.clone().into(),
+            cache: self.cache.clone(),
+            canonical_ref: self.canonical_ref.clone(),
+        };
+        let _ = self.jobs.send(Job::Scan(self.epoch, config, self.mode.clone(), self.summary.is_none()));
     }
-    fn query(&mut self,offset:usize){self.epoch+=1;self.busy=true;let _=self.jobs.send(Job::Query(self.epoch,self.filters.clone(),offset));}
-    fn poll(&mut self){while let Ok(reply)=self.replies.try_recv(){match reply {
-        Reply::Scan(epoch,result) if epoch==self.epoch=>{self.busy=false;match result {Ok(summary)=>{self.summary=Some(summary);self.query(0);},Err(e)=>self.error=Some(e)}}
-        Reply::Query(epoch,result) if epoch==self.epoch=>{self.busy=false;match result {Ok(page)=>{self.entries=page.entries;self.total=page.total;self.next=page.next_offset;},Err(e)=>self.error=Some(e)}}
-        Reply::Materialize(epoch,result) if epoch==self.epoch=>{self.busy=false;match result {Ok(value)=>self.specimen=Some(value),Err(e)=>self.error=Some(e)}}
-        _=>{}
-    }}}
-    pub fn show(&mut self,ui:&mut Ui,ctx:&Context){
-        self.poll();ctx.request_repaint_after(Duration::from_millis(100));
-        if !self.busy&&self.summary.is_some()&&self.last_refresh.elapsed()>=Duration::from_secs(60){self.refresh();}
-        if !self.busy&&self.filter_changed.is_some_and(|t|t.elapsed()>=Duration::from_millis(750)){self.filter_changed=None;self.query(0);}
-        ui.horizontal(|ui|{if ui.button("← Back to files").clicked(){self.open=false;} ui.heading("CityOS Catalog");ui.label("Read-only · data-only views");});
-        ui.separator();
-        ui.horizontal(|ui|{ui.label("Repository");ui.text_edit_singleline(&mut self.repository);if ui.button("Choose repository…").clicked(){if let Some(p)=rfd::FileDialog::new().pick_folder(){self.repository=p.to_string_lossy().into_owned();}}});
-        ui.horizontal(|ui|{ui.label("Packaged reader");ui.text_edit_singleline(&mut self.reader);if ui.button("Choose reader…").clicked(){if let Some(p)=rfd::FileDialog::new().add_filter("CityOS reader",&["mjs"]).pick_file(){self.reader=p.to_string_lossy().into_owned();}}});
-        ui.horizontal(|ui|{
-            egui::ComboBox::from_id_salt("cityos-source").selected_text(if self.mode=="local"{"Local preview"}else{"Committed CityOS"}).show_ui(ui,|ui|{ui.selectable_value(&mut self.mode,"committed".into(),"Committed CityOS");ui.selectable_value(&mut self.mode,"local".into(),"Local preview");});
-            if ui.add_enabled(!self.busy,egui::Button::new("Refresh")).clicked(){self.refresh();}
-            if self.busy{ui.spinner();ui.label("Capturing source…");}
-            if let Some(summary)=&self.summary{let sha=summary["snapshot"]["canonicalCommit"].as_str().unwrap_or("");ui.label(format!("{} · {} entries",sha.get(..12).unwrap_or(sha),summary["entryCount"]));
-                ui.label(if summary["accountingComplete"]==true{"Source accounting complete"}else{"Source accounting incomplete"});}
-        });
-        if let Some(error)=&self.error{ui.colored_label(egui::Color32::from_rgb(190,85,70),format!("Refresh/view error: {error}. Previous view retained."));}
-        let mut changed=false;
-        ui.horizontal_wrapped(|ui|{
-            changed|=ui.add(egui::TextEdit::singleline(&mut self.filters.search).hint_text("Search components, shells, tokens and sources").desired_width(300.0)).changed();
-            egui::ComboBox::from_id_salt("cityos-level").selected_text(if self.filters.level.is_empty(){"All L0–L9"}else{&self.filters.level}).show_ui(ui,|ui|{changed|=ui.selectable_value(&mut self.filters.level,String::new(),"All levels").changed();if let Some(levels)=self.summary.as_ref().and_then(|s|s["levels"].as_array()){for level in levels {let id=level["id"].as_str().unwrap_or("");changed|=ui.selectable_value(&mut self.filters.level,id.into(),format!("{id} {}",level["name"].as_str().unwrap_or(""))).changed();}}});
-            for (label,value) in [("Product",&mut self.filters.product),("Target",&mut self.filters.target),("Owner",&mut self.filters.owner),("Package",&mut self.filters.package),("Locale",&mut self.filters.locale),("Status",&mut self.filters.status)]{
-                ui.label(label);changed|=ui.add(egui::TextEdit::singleline(value).desired_width(110.0)).changed();}
-        });if changed{self.filter_changed=Some(Instant::now());}
-        ui.separator();
-        let available=ui.available_size();
-        ui.columns(2,|columns|{
-            columns[0].label(format!("{} matching entries",self.total));
-            egui::ScrollArea::vertical().id_salt("cityos-entries").max_height((available.y-80.0).max(120.0)).show(&mut columns[0],|ui|{
-                let mut selection=None;
-                for entry in &self.entries{let label=format!("{}  {}  · {}",entry.level.as_deref().unwrap_or("?"),entry.label,entry.product.as_deref().unwrap_or(&entry.family));
-                    if ui.selectable_label(self.selected.as_ref().is_some_and(|s|s.id==entry.id),label).clicked(){selection=Some(entry.clone());}}
-                if let Some(entry)=selection{self.epoch+=1;self.busy=true;self.specimen=None;let _=self.jobs.send(Job::Materialize(self.epoch,entry.id.clone()));self.selected=Some(entry);}
-            });
-            if let Some(offset)=self.next{if columns[0].add_enabled(!self.busy,egui::Button::new("Next 256 entries →")).clicked(){self.query(offset);}}
-            if columns[0].add_enabled(!self.busy,egui::Button::new("First page")).clicked(){self.query(0);}
-            egui::ScrollArea::vertical().id_salt("cityos-inspector").max_height((available.y-40.0).max(120.0)).show(&mut columns[1],|ui|{
-                if let Some(entry)=&self.selected{
-                    ui.heading(&entry.label);ui.monospace(&entry.semantic_id);ui.label(format!("{} · {} · {}",entry.kind,entry.owner,entry.classification_status));
-                    ui.monospace(format!("{}#{}",entry.source_path,entry.source_pointer));ui.label(format!("Observed generation: {}",entry.generation_status));
-                    ui.monospace(&entry.source_digest);ui.label(format!("Targets: {}",entry.targets.join(", ")));ui.label("Persistent drafts, edits and target rendering: unqualified");
-                    ui.collapsing("Dependencies",|ui|{for dep in &entry.dependencies{ui.monospace(dep);}});
-                    for finding in &entry.diagnostics{ui.label(finding["message"].as_str().unwrap_or("Source diagnostic"));}
-                    if let Some(specimen)=&self.specimen{ui.separator();ui.strong("Temporary data-only view");let mut text=serde_json::to_string_pretty(&specimen["data"]).unwrap_or_default();ui.add(egui::TextEdit::multiline(&mut text).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).interactive(false));}
-                }else{ui.label("Select a source item to inspect its captured contract.");}
-                if let Some(summary)=&self.summary{ui.collapsing("Source accounting and capability evidence",|ui|{ui.monospace(serde_json::to_string_pretty(&serde_json::json!({"snapshot":summary["snapshot"],"census":summary["census"],"capabilities":summary["capabilities"],"diagnostics":summary["diagnostics"],"native":summary["native"]})).unwrap_or_default());});}
-            });
-        });
+    fn query(&mut self, offset: usize) {
+        if self.busy {
+            return;
+        }
+        self.cancelled.store(false, Ordering::Release);
+        self.epoch += 1;
+        self.busy = true;
+        self.activity = "Finding items";
+        let _ = self.jobs.send(Job::Query(self.epoch, self.filters.clone(), offset));
+    }
+    fn poll(&mut self) {
+        while let Ok(reply) = self.replies.try_recv() {
+            match reply {
+                Reply::Scan(epoch, result) if epoch == self.epoch => {
+                    self.busy = false;
+                    self.last_refresh = Instant::now();
+                    self.refresh_failures = if result.as_ref().is_ok_and(|summary| summary["stale"] != true || summary["restoredCache"] == true) {
+                        0
+                    } else {
+                        self.refresh_failures.saturating_add(1)
+                    };
+                    match result {
+                        Ok(summary) => {
+                            if summary["snapshot"]["mode"].as_str() != Some(self.mode.as_str()) {
+                                self.error = Some("The reader returned a different source mode. The previous catalog is still shown; refresh to retry.".into());
+                            } else {
+                                let changed = self.summary.as_ref().is_none_or(|old| old["generationId"] != summary["generationId"]);
+                                self.summary = Some(summary);
+                                if changed {
+                                    self.specimen = None;
+                                    self.source_text.clear();
+                                    self.pending_selection = self.selected.is_some();
+                                    self.query(0);
+                                }
+                            }
+                        }
+                        Err(e) => self.error = Some(e),
+                    }
+                }
+                Reply::Query(epoch, filters, offset, result) if epoch == self.epoch => {
+                    self.busy = false;
+                    match result {
+                        Ok(page) if filters == self.filters => {
+                            if offset == 0 {
+                                self.entries = page.entries;
+                            } else {
+                                self.entries.extend(page.entries);
+                            }
+                            self.displayed_filters = filters;
+                            self.total = page.total;
+                            self.next = page.next_offset;
+                        }
+                        Ok(_) => {} // The user changed filters while the request was in flight.
+                        Err(e) => self.error = Some(e),
+                    }
+                }
+                Reply::Materialize(epoch, id, result) if epoch == self.epoch => {
+                    self.busy = false;
+                    if self.selected.as_ref().is_none_or(|entry| entry.id != id) {
+                        continue;
+                    }
+                    match result {
+                        Ok(value) => {
+                            // A refresh may have changed metadata for the same occurrence.
+                            if let Ok(entry) = serde_json::from_value(value["entry"].clone()) {
+                                self.selected = Some(entry);
+                            }
+                            self.source_text = preview::source_text(&value);
+                            self.specimen = Some(value);
+                            self.preview_error = None;
+                        }
+                        Err(e) => self.preview_error = Some(e),
+                    }
+                }
+                Reply::SourceChanged => self.source_changed = true,
+                _ => {}
+            }
+        }
+    }
+    fn filters_changed(&mut self) {
+        self.last_interaction = Instant::now();
+        self.filter_changed = Some(Instant::now());
+        self.selected = None;
+        self.specimen = None;
+        self.source_text.clear();
+        self.preview_error = None;
+        self.pending_selection = false;
+    }
+    fn select(&mut self, entry: Entry) {
+        self.last_interaction = Instant::now();
+        self.selected = Some(entry);
+        self.specimen = None;
+        self.source_text.clear();
+        self.preview_error = None;
+        self.pending_selection = true;
+        self.detail_tab = DetailTab::Preview;
+    }
+    fn tick(&mut self) {
+        self.poll();
+        if self.busy {
+            return;
+        }
+        if self.filter_changed.is_some_and(|t| t.elapsed() >= Duration::from_millis(250)) {
+            self.filter_changed = None;
+            if self.summary.is_some() {
+                self.query(0);
+            }
+        } else if self.pending_selection {
+            self.pending_selection = false;
+            if let Some(entry) = &self.selected {
+                self.cancelled.store(false, Ordering::Release);
+                self.epoch += 1;
+                self.busy = true;
+                self.activity = "Loading preview";
+                let _ = self.jobs.send(Job::Materialize(self.epoch, entry.id.clone()));
+            }
+        } else if self.source_changed && self.mode == "local" {
+            self.source_changed = false;
+            self.refresh();
+        } else if self.summary.is_some()
+            && self.last_refresh.elapsed() >= Duration::from_secs((60_u64 << self.refresh_failures.min(4)).min(900))
+            && self.last_interaction.elapsed() >= Duration::from_secs(10)
+        {
+            self.refresh();
+        }
     }
 }

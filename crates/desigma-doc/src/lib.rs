@@ -253,6 +253,9 @@ impl Document {
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
+        if self.cityos.is_some(){
+            return serde_json::to_string_pretty(&serde_json::json!({"schemaVersion":"desigma.document.v2","document":self}));
+        }
         let mut value=serde_json::to_value(self)?;
         value["schemaVersion"]=serde_json::Value::String("desigma.document.v1".into());
         serde_json::to_string_pretty(&value)
@@ -261,9 +264,10 @@ impl Document {
     /// Parses a native document. Text written by older versions that emulated lists with
     /// literal bullet and "1. " prefixes is converted to real lists.
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
-        let value: serde_json::Value=serde_json::from_str(s)?;
+        let mut value: serde_json::Value=serde_json::from_str(s)?;
         if let Some(version)=value.get("schemaVersion") {
-            if version!="desigma.document.v1" {return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));}
+            if version=="desigma.document.v2" {value=value.get("document").cloned().ok_or_else(||<serde_json::Error as serde::de::Error>::custom("Bound document payload missing"))?;}
+            else if version!="desigma.document.v1" {return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));}
         }
         let mut doc: Self = serde_json::from_value(value)?;
         if let Some(binding)=&doc.cityos {binding.validate().map_err(<serde_json::Error as serde::de::Error>::custom)?;}
