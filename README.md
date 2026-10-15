@@ -277,7 +277,11 @@ Build the local server with `cargo build --locked -p desigma-mcp`, then configur
 
 ## Native plugin installation
 
-Open **Plugins** from the editor rail or main menu, choose **Install plugin**, and paste a manifest URL from [desigma-plugins](https://github.com/deepfounder-ai/desigma-plugins). GitHub `blob` and raw URLs are supported, for example:
+Open **Plugins** from the editor rail or main menu, choose **Install plugin**, then **Install Icon Browser**. This included plugin provides 12 Lucide icons offline and requires no account or token. Choose **Open** in the plugin library to use it in your browser, then select an icon to insert editable vectors into the open document.
+
+To install another native plugin from disk, choose **Choose manifest…** and select `manifest.json` from an extracted bundle containing its declared assets and sibling `LICENSE`. Installation copies the validated bundle into the current library; it does not execute the plugin. You can move the original folder afterward.
+
+For the optional private [desigma-plugins](https://github.com/deepfounder-ai/desigma-plugins) registry, paste a manifest URL and choose **Install URL**. GitHub `blob` and raw URLs are supported, for example:
 
 ```text
 https://github.com/deepfounder-ai/desigma-plugins/blob/main/plugins/icon-browser/manifest.json

@@ -1,4 +1,4 @@
-//! Native plugin library and URL installation dialog.
+//! Native plugin library and included, local, or registry installation dialog.
 
 use crate::{
     app::App,
@@ -17,7 +17,7 @@ pub fn show(app: &mut App, ctx: &Context) {
     let screen = ctx.content_rect();
     let rect = Rect::from_center_size(
         screen.center(),
-        Vec2::new(560.0_f32.min((screen.width() - 24.0).max(200.0)), 440.0_f32.min((screen.height() - 24.0).max(200.0))),
+        Vec2::new(560.0_f32.min((screen.width() - 24.0).max(200.0)), 560.0_f32.min((screen.height() - 24.0).max(200.0))),
     );
     let url_id = Id::new("plugin-url");
     let focused = ctx.memory(|m| m.has_focus(url_id));
@@ -26,6 +26,8 @@ pub fn show(app: &mut App, ctx: &Context) {
     let mut launch = None;
     let mut stop = false;
     let mut cancel = false;
+    let mut included = false;
+    let mut local = false;
     let mut submit = enter && app.plugins.install_form && !app.plugins.pending && !app.plugins.url.trim().is_empty();
     if escape {
         if app.plugins.install_form && !app.plugins.pending {
@@ -55,9 +57,22 @@ pub fn show(app: &mut App, ctx: &Context) {
             ui.set_width(width);
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 12.0);
             if app.plugins.install_form {
-                paragraph(ui, "Paste a manifest URL from deepfounder-ai/desigma-plugins.", theme::TEXT_SECONDARY);
-                ui.add_space(4.0);
-                paragraph(ui, "Plugin URL", theme::TEXT);
+                paragraph(ui, "Start with Icon Browser", theme::TEXT);
+                paragraph(ui, "12 included Lucide icons. Works offline, with no account or token. Inserts editable SVG with Undo.", theme::TEXT_SECONDARY);
+                let (choices, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
+                let add = Rect::from_min_size(choices.min, Vec2::new(190.0, 34.0));
+                let already_installed = app.plugins.installed.iter().any(|p| p.id == "desigma-icon-browser" && p.version == "1.0.0");
+                if buttons::button(ui, add, "plugin-install-included", if already_installed { "Icon Browser installed" } else { "Install Icon Browser" }, true, !app.plugins.pending && !already_installed).clicked() {
+                    included = true;
+                }
+                widgets::record(ui, "plugin-install-included", add);
+                let choose = Rect::from_min_size(Pos2::new(add.right() + 12.0, add.top()), Vec2::new(160.0, 34.0));
+                if buttons::button(ui, choose, "plugin-install-local", "Choose manifest…", false, !app.plugins.pending).clicked() {
+                    local = true;
+                }
+                widgets::record(ui, "plugin-install-local", choose);
+                paragraph(ui, "Local plugins: choose manifest.json from an extracted native plugin folder with its assets and LICENSE.", theme::TEXT_TERTIARY);
+                paragraph(ui, "Private registry URL (optional)", theme::TEXT);
                 let (field, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::hover());
                 ui.painter().rect_filled(field, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
                 let output = ui
@@ -70,7 +85,7 @@ pub fn show(app: &mut App, ctx: &Context) {
                                 .text_color(theme::TEXT)
                                 .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 0)))
                                 .vertical_align(egui::Align::Center)
-                                .hint_text("https://github.com/deepfounder-ai/desigma-plugins/blob/main/plugins/icon-browser/manifest.json")
+                                .hint_text("Paste a native plugin manifest URL")
                                 .desired_width(field.width())
                                 .min_size(field.size()),
                         )
@@ -83,25 +98,25 @@ pub fn show(app: &mut App, ctx: &Context) {
                 }
                 paragraph(
                     ui,
-                    "For this private repository, set DESIGMA_PLUGINS_TOKEN to a GitHub token with repository read access before starting Desigma.",
+                    "Registry downloads require access to deepfounder-ai/desigma-plugins. Set DESIGMA_PLUGINS_TOKEN before launch if needed. Included and local plugins need no token.",
                     theme::TEXT_TERTIARY,
                 );
                 paragraph(
                     ui,
-                    "Install downloads the bundle. Open launches its browser panel with the permissions listed in your library.",
+                    "Open an installed plugin to launch its browser panel. Permissions are listed in your library.",
                     theme::TEXT_SECONDARY,
                 );
                 if app.plugins.pending {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        paragraph(ui, "Downloading and checking plugin files…", theme::TEXT_BRAND);
+                        paragraph(ui, "Installing and checking plugin files…", theme::TEXT_BRAND);
                     });
                 }
             } else if app.plugins.installed.is_empty() {
                 let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 60.0), Sense::hover());
                 icons::paint(ui.painter(), Icon::Tools, icon_rect.center(), 28.0, theme::ICON_SECONDARY);
                 paragraph(ui, "Your plugin library starts here", theme::TEXT);
-                paragraph(ui, "Install a plugin from deepfounder-ai/desigma-plugins to keep its package on this device.", theme::TEXT_SECONDARY);
+                paragraph(ui, "Choose Install plugin to add the included Icon Browser or a local native plugin bundle.", theme::TEXT_SECONDARY);
                 paragraph(ui, "Browser plugins can insert SVG icons into the open document. Each insertion supports Undo.", theme::TEXT_TERTIARY);
             } else {
                 paragraph(ui, &format!("{} installed on this device", app.plugins.installed.len()), theme::TEXT_SECONDARY);
@@ -159,7 +174,7 @@ pub fn show(app: &mut App, ctx: &Context) {
         let primary_label = if app.plugins.pending {
             "Installing…"
         } else if app.plugins.install_form {
-            "Install"
+            "Install URL"
         } else {
             "Install plugin"
         };
@@ -194,6 +209,12 @@ pub fn show(app: &mut App, ctx: &Context) {
     } else if cancel {
         app.plugins.install_form = false;
         app.plugins.error = None;
+    } else if included {
+        app.install_included_plugin(ctx);
+    } else if local {
+        if let Some(path) = rfd::FileDialog::new().set_title("Choose a native plugin manifest.json").add_filter("Plugin manifest", &["json"]).pick_file() {
+            app.install_local_plugin(path, ctx);
+        }
     } else if submit {
         app.install_plugin(ctx);
     }

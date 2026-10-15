@@ -81,7 +81,8 @@ pub struct FxParams {
     /// Viewport size of the pass (see `fx.wgsl`).
     pub out_w: f32,
     pub out_h: f32,
-    pub pad: [f32; 2],
+    // One scalar completes a 96-byte block in both WGSL and GL std140.
+    pub pad: [f32; 1],
 }
 
 pub struct Layouts {
@@ -359,6 +360,56 @@ impl Pipelines {
             blit: full("blit", &blit_layout, &blit_src, "fs_blit"),
             displace: full("displace", &fx_layout, &fx_src, "fs_displace"),
             glass: full("glass", &fx_layout, &fx_src, "fs_glass"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod uniform_layout_tests {
+    use super::FxParams;
+    use std::mem::{offset_of, size_of};
+
+    #[test]
+    fn fx_uniform_matches_wgsl_layout() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("shaders/fx.wgsl")).expect("valid effects shader");
+        wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+            .validate(&module)
+            .expect("valid effects shader bindings");
+        let (members, span) = module
+            .types
+            .iter()
+            .find_map(|(_, ty)| match &ty.inner {
+                wgpu::naga::TypeInner::Struct { members, span } if ty.name.as_deref() == Some("P") => Some((members, *span)),
+                _ => None,
+            })
+            .expect("effects uniform P");
+        assert_eq!(size_of::<FxParams>(), span as usize, "Rust uploads must match the complete WGSL uniform size");
+        assert_eq!(span % 16, 0, "keep the effects uniform compatible with GL's uniform block alignment");
+
+        let fields = [
+            ("origin", offset_of!(FxParams, origin)),
+            ("size", offset_of!(FxParams, size)),
+            ("mask_origin", offset_of!(FxParams, mask_origin)),
+            ("mask_size", offset_of!(FxParams, mask_size)),
+            ("grid", offset_of!(FxParams, grid)),
+            ("seed", offset_of!(FxParams, seed)),
+            ("has_mask", offset_of!(FxParams, has_mask)),
+            ("amp", offset_of!(FxParams, amp)),
+            ("cell", offset_of!(FxParams, cell)),
+            ("ss", offset_of!(FxParams, ss)),
+            ("depth", offset_of!(FxParams, depth)),
+            ("light", offset_of!(FxParams, light)),
+            ("intensity", offset_of!(FxParams, intensity)),
+            ("refraction", offset_of!(FxParams, refraction)),
+            ("dispersion", offset_of!(FxParams, dispersion)),
+            ("out_w", offset_of!(FxParams, out_w)),
+            ("out_h", offset_of!(FxParams, out_h)),
+            ("p1", offset_of!(FxParams, pad)),
+        ];
+        assert_eq!(members.len(), fields.len());
+        for (member, (name, offset)) in members.iter().zip(fields) {
+            assert_eq!(member.name.as_deref(), Some(name));
+            assert_eq!(member.offset as usize, offset, "uniform field {name}");
         }
     }
 }

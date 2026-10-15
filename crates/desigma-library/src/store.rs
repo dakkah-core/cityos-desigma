@@ -12,6 +12,7 @@ use crate::{new_id, Library, LibraryError, Result};
 use desigma_doc::{Document, DocumentKind, Vec2};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -101,6 +102,10 @@ pub fn now_ms() -> u64 {
 }
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+static RECOVERY_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Serialize,Deserialize)]
+struct PendingSave { file_id:String, document:String, manifest:Manifest }
 
 /// Serialises manifest read-modify-write cycles within the process (the app saves
 /// thumbnails on a background thread while the UI thread keeps editing the index).
@@ -115,9 +120,18 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".tmp-{}",new_id()));
     let tmp = PathBuf::from(tmp);
-    let res = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
+    let res = (|| {
+        let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp,path)?;
+        #[cfg(not(windows))]
+        if let Some(parent)=path.parent(){std::fs::File::open(parent)?.sync_all()?;}
+        Ok::<(),std::io::Error>(())
+    })();
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -192,6 +206,8 @@ impl Library {
     }
 
     fn load_manifest(&self, id: &str) -> Result<Manifest> {
+        let _recovery=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        self.recover_project_save(id)?;
         let p = self.project_dir(id).join(MANIFEST);
         let text = std::fs::read_to_string(&p).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -206,6 +222,33 @@ impl Library {
     fn save_manifest(&self, m: &Manifest) -> Result<()> {
         let p = self.project_dir(&m.project.id).join(MANIFEST);
         write_atomic(&p, serde_json::to_string_pretty(m)?.as_bytes())
+    }
+
+    fn recover_project_save(&self,project:&str)->Result<()> {
+        let journal=self.project_dir(project).join(".save.pending.json");
+        let text=match std::fs::read_to_string(&journal){Ok(t)=>t,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(e)=>return Err(e.into())};
+        let pending:PendingSave=serde_json::from_str(&text)?;
+        if pending.manifest.project.id!=project||pending.file_id.contains(['/', '\\'])||!pending.manifest.files.iter().any(|f|f.id==pending.file_id){return Err(LibraryError::Invalid("Invalid pending document save".into()));}
+        Document::from_json(&pending.document)?;
+        write_atomic(&self.file_path(project,&pending.file_id),pending.document.as_bytes())?;
+        self.save_manifest(&pending.manifest)?;
+        std::fs::remove_file(journal)?;
+        Ok(())
+    }
+
+    fn commit_document(&self,file_id:&str,doc:&Document,manifest:Manifest)->Result<()> {
+        let _recovery=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let project=manifest.project.id.clone();
+        let pending=PendingSave{file_id:file_id.into(),document:doc.to_json()?,manifest};
+        write_atomic(&self.project_dir(&project).join(".save.pending.json"),serde_json::to_string(&pending)?.as_bytes())?;
+        self.recover_project_save(&project)
+    }
+
+    pub(crate) fn recover_pending_saves(&self)->Result<()> {
+        let projects=self.path("projects");
+        if !projects.exists(){return Ok(());}
+        for entry in std::fs::read_dir(projects)?{let entry=entry?;if entry.file_type()?.is_dir(){let id=entry.file_name().to_string_lossy().into_owned();let _guard=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());self.recover_project_save(&id)?;}}
+        Ok(())
     }
 
     /// Finds the manifest holding `file` and the file's index in it.
@@ -365,10 +408,9 @@ impl Library {
             starred: false,
             thumbnail: None,
         };
-        write_atomic(&self.file_path(project, &entry.id), doc.to_json()?.as_bytes())?;
         m.files.push(entry.clone());
         m.project.modified = now;
-        self.save_manifest(&m)?;
+        self.commit_document(&entry.id,doc,m)?;
         Ok(entry)
     }
 
@@ -376,11 +418,10 @@ impl Library {
     pub fn save_file(&self, id: &str, doc: &Document) -> Result<()> {
         let _guard = write_lock();
         let (mut m, i) = self.find_file(id)?;
-        write_atomic(&self.file_path(&m.project.id, id), doc.to_json()?.as_bytes())?;
         let now = now_ms();
         m.files[i].modified = now;
         m.project.modified = now;
-        self.save_manifest(&m)
+        self.commit_document(id,doc,m)
     }
 
     /// Whether the file is a design file or a board, read from the document itself (the manifest
@@ -821,7 +862,10 @@ mod tests {
         lib.save_file(&e.id, &doc("A", 3)).unwrap();
         assert_eq!(lib.load_file(&e.id).unwrap().nodes.len(), 4);
         let names: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, vec![format!("{}.desigma", e.id)]);
+        assert!(names.contains(&format!("{}.desigma", e.id)));
+        assert!(names.contains(&format!("{}.desigma.tmp",e.id)));
+        assert!(names.iter().all(|name|!name.contains(".tmp-")));
+        assert_eq!(std::fs::read_to_string(path.with_extension("desigma.tmp")).unwrap(),"garbage");
     }
 
     #[test]

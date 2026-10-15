@@ -81,6 +81,12 @@ impl App {
             self.show_toast(format!("Cannot keep the current version, restore cancelled: {e}"), true);
             return;
         }
+        // Persist before installing the historical projection. A failed disk write
+        // must not turn a memory-only restore into a success notification.
+        if let Err(e)=lib.save_file(&lf.id,&old) {
+            self.show_toast(format!("Cannot restore; current document retained: {e}"),true);
+            return;
+        }
         let before = self.take_snapshot();
         let page = Some(before.page);
         self.install(old, History::default(), page, vec![]);
@@ -88,7 +94,8 @@ impl App {
         self.history.restore_redo = None;
         self.history.dirty = true;
         self.history.last_version_hash = doc_hash(&self.doc);
-        self.write_after_restore();
+        self.autosave.saved_hash=doc_hash(&self.doc);
+        self.autosave.changed_at=None;
         self.show_toast("Version restored. Undo brings the previous state back", false);
     }
 

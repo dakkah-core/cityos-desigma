@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn plugin_install_form_rejects_figma_links_and_blocks_editor_shortcuts() {
@@ -139,6 +140,10 @@ fn plugin_runtime_fixture(s: &mut Sim) -> String {
 }
 
 fn plugin_http_insert(url: &str) -> Result<serde_json::Value, String> {
+    plugin_http_insert_svg(url, PLUGIN_TEST_SVG, "HTTP icon")
+}
+
+fn plugin_http_insert_svg(url: &str, svg: &str, name: &str) -> Result<serde_json::Value, String> {
     let url = url::Url::parse(url).unwrap();
     let token = url.path_segments().unwrap().next().unwrap();
     let endpoint = url.join("insert-svg").unwrap();
@@ -149,9 +154,60 @@ fn plugin_http_insert(url: &str) -> Result<serde_json::Value, String> {
         .set("Origin", &url.origin().ascii_serialization())
         .set("X-Desigma-Token", token)
         .set("Content-Type", "application/json")
-        .send_string(&serde_json::json!({"svg": PLUGIN_TEST_SVG, "name":"HTTP icon"}).to_string())
+        .send_string(&serde_json::json!({"svg": svg, "name":name}).to_string())
         .map_err(|e| e.to_string())?;
     serde_json::from_reader(response.into_reader()).map_err(|e| e.to_string())
+}
+
+#[test]
+fn plugin_included_install_button_loads_panel_and_inserts_an_undoable_icon() {
+    let mut s = Sim::new();
+    let root = std::env::temp_dir().join(format!("desigma-included-ui-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+    s.shell.app.plugins.root = Some(root.clone());
+    let before = s.app().doc.nodes.len();
+    s.shell.app.open_plugins();
+    s.frame(vec![]);
+    s.frame(vec![]);
+    s.click(s.rect_of("plugin-install-new").center());
+    s.frame(vec![]);
+    assert!(s.app().plugins.url.is_empty());
+    s.click(s.rect_of("plugin-install-submit").center());
+    assert!(!s.app().plugins.pending, "Empty optional URL cannot start a download");
+    s.click(s.rect_of("plugin-install-included").center());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while s.app().plugins.installed.is_empty() {
+        s.frame(vec![]);
+        assert!(s.app().plugins.error.is_none(), "{:?}", s.app().plugins.error);
+        assert!(std::time::Instant::now() < deadline, "Included plugin installation did not complete");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!s.app().plugins.install_form);
+    assert!(!s.app().plugins.pending);
+    assert_eq!(s.app().doc.nodes.len(), before);
+    let plugin = crate::plugins::store::list(&root).unwrap().remove(0);
+    s.shell.app.plugins.open = false;
+    let ctx = s.ctx.clone();
+    s.shell.app.start_plugin(&plugin, &ctx).unwrap();
+    let url = s.app().plugins.runtime.as_ref().unwrap().url().to_string();
+    let base = url::Url::parse(&url).unwrap();
+    let response = ureq::get(base.join("icons.json").unwrap().as_str()).call().unwrap();
+    assert_eq!(response.header("Content-Type"), Some("application/json; charset=utf-8"));
+    let icons: std::collections::BTreeMap<String, String> = serde_json::from_reader(response.into_reader()).unwrap();
+    let svg = icons["search"].clone();
+    let worker = std::thread::spawn(move || plugin_http_insert_svg(&url, &svg, "Lucide / search"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !worker.is_finished() {
+        s.frame(vec![]);
+        assert!(std::time::Instant::now() < deadline, "Included icon insertion timed out");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(worker.join().unwrap().unwrap()["ok"], true);
+    assert_eq!(s.app().doc.get(s.app().selection[0]).unwrap().name, "Lucide / search");
+    assert!(s.app().doc.nodes.len() > before);
+    s.cmd_key(Key::Z);
+    assert_eq!(s.app().doc.nodes.len(), before);
+    s.shell.app.stop_plugin();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

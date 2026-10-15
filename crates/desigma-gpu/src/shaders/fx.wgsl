@@ -21,7 +21,6 @@ struct P {
     out_w: f32,
     out_h: f32,
     p1: f32,
-    p2: f32,
     // tex2 origin/size for soft mask share mask_origin/size
 };
 

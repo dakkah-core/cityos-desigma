@@ -30,6 +30,7 @@ pub struct Shell {
     app: App,
     shot: Option<Shot>,
     title: String,
+    cityos: crate::cityos_catalog::Browser,
 }
 
 impl Shell {
@@ -55,6 +56,7 @@ impl Shell {
     }
 
     pub fn build(ctx: &Context, opts: Options) -> Self {
+        let cityos=crate::cityos_catalog::Browser::new(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone(),opts.cityos_canonical_ref.clone());
         theme::install_fonts(ctx);
         theme::apply(ctx);
         let mut app = App::new(match opts.fixture.as_deref() {
@@ -217,7 +219,7 @@ impl Shell {
             frames: 0,
             requested: false,
         });
-        Self { app, shot, title: String::new() }
+        Self { app, shot, title: String::new(), cityos }
     }
 
     fn drive_screenshot(&mut self, ctx: &Context) {
@@ -576,6 +578,7 @@ impl Shell {
 
     /// One frame of the home screen (file browser): files dropped on the window are imported.
     fn home_frame(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        if ui.button("CityOS Catalog · browse repository L0–L9").clicked() { self.cityos.open=true; }
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() && self.app.dialog.is_none() {
             let target = self.app.home_target().or_else(|| self.app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))));
@@ -596,6 +599,10 @@ impl Shell {
         self.app.now = ctx.input(|i| i.time);
         self.app.poll_plugins();
         self.drive_screenshot(&ctx);
+        if self.cityos.open {
+            self.cityos.show(ui,&ctx);
+            return;
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
             crate::decks::ui::flush_notes(&mut self.app);
             self.app.save_close_version();

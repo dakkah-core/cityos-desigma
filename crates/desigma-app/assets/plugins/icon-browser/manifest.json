@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "id": "desigma-icon-browser",
+  "name": "Icon Browser",
+  "version": "1.0.0",
+  "license": "MIT AND ISC",
+  "main": "main.js",
+  "panel": "index.html",
+  "files": ["index.html", "main.js", "style.css", "icons.json"],
+  "permissions": ["document:insert-svg"],
+  "network": []
+}

@@ -4,7 +4,7 @@ pub mod demo;
 
 use desigma_diff::{diff_image, DiffOptions, DiffReport};
 use desigma_doc::*;
-use desigma_gpu::HeadlessGpu;
+use desigma_gpu::{GpuError, HeadlessGpu};
 use desigma_render::tiny_skia::Pixmap;
 use desigma_render::{render_page, Viewport};
 use image::RgbaImage;
@@ -16,10 +16,11 @@ pub fn gpu() -> Option<HeadlessGpu> {
             eprintln!("GPU: {} ({:?})", g.ctx.adapter_info.name, g.ctx.adapter_info.backend);
             Some(g)
         }
-        Err(e) => {
-            eprintln!("SKIP: no usable GPU adapter ({e}); GPU fidelity checks not run");
+        Err(GpuError::NoAdapter(e)) => {
+            eprintln!("SKIP: no GPU adapter ({e}); GPU fidelity checks not run");
             None
         }
+        Err(e) => panic!("GPU renderer initialization failed: {e}"),
     }
 }
 

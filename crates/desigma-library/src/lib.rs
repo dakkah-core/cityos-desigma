@@ -19,10 +19,12 @@
 mod publish;
 mod store;
 mod versions;
+mod submissions;
 
 pub use publish::*;
 pub use store::*;
 pub use versions::*;
+pub use submissions::*;
 
 use std::path::{Path, PathBuf};
 
@@ -51,7 +53,9 @@ impl Library {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        let library=Self { root };
+        library.recover_pending_saves()?;
+        Ok(library)
     }
 
     pub fn root(&self) -> &Path {

@@ -339,16 +339,38 @@ pub fn install(root: &Path, input: &str) -> Result<InstalledPlugin, String> {
 }
 
 fn check_size(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-    if bytes.len() > MAX_BYTES {
-        Err("Plugin files must be no larger than 2 MiB each.".into())
-    } else {
-        Ok(bytes)
-    }
+    if bytes.len() > MAX_BYTES { Err("Plugin files must be no larger than 2 MiB each.".into()) } else { Ok(bytes) }
 }
 
 fn install_with(root: &Path, input: &str, mut fetch: impl FnMut(&str) -> Result<Vec<u8>, String>) -> Result<InstalledPlugin, String> {
     let manifest_url = validate_url(input)?;
-    let bytes = check_size(fetch(&manifest_url)?)?;
+    let base = manifest_url.strip_suffix("manifest.json").expect("validated manifest URL");
+    install_bundle_with(root, input.trim(), &manifest_url, |path| fetch(&format!("{base}{path}")))
+}
+
+/// Install a native bundle from a user-selected manifest, without network access.
+pub fn install_local(root: &Path, path: &Path) -> Result<InstalledPlugin, String> {
+    if path.file_name().is_none_or(|name| name != "manifest.json") {
+        return Err("Choose the plugin's manifest.json file.".into());
+    }
+    let path = std::path::absolute(path).map_err(|e| format!("Cannot locate plugin manifest: {e}"))?;
+    let directory = path.parent().ok_or("Cannot locate plugin folder.")?;
+    let manifest_url = Url::from_file_path(&path).map_err(|()| "Cannot locate plugin manifest.")?.to_string();
+    install_bundle_with(root, &manifest_url, &manifest_url, |relative| read_bundle_file(directory, relative))
+}
+
+/// The included bundle uses exactly the same validation and storage as other plugins.
+pub fn install_icon_browser(root: &Path) -> Result<InstalledPlugin, String> {
+    install_bundle_with(root, "Included with Desigma", "bundled:icon-browser/manifest.json", super::bundled::file)
+}
+
+fn install_bundle_with(
+    root: &Path,
+    source: &str,
+    manifest_url: &str,
+    mut fetch: impl FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<InstalledPlugin, String> {
+    let bytes = check_size(fetch("manifest.json")?)?;
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| format!("Invalid native plugin manifest: {e}"))?;
     validate_manifest(&manifest)?;
     let plugins = root.join("plugins");
@@ -356,19 +378,18 @@ fn install_with(root: &Path, input: &str, mut fetch: impl FnMut(&str) -> Result<
     if destination.exists() {
         return Err(format!("{} {} is already installed.", manifest.name, manifest.version));
     }
-    let base = manifest_url.strip_suffix("manifest.json").expect("validated manifest URL");
     let paths = if manifest.schema_version == 2 { manifest.files.clone() } else { vec![manifest.main.clone()] };
     let mut assets = BTreeMap::new();
     let mut total = bytes.len();
     for path in paths {
-        let content = check_size(fetch(&format!("{base}{path}"))?)?;
+        let content = check_size(fetch(&path)?)?;
         total += content.len();
         if total > MAX_TOTAL_BYTES {
             return Err("Plugin bundle exceeds 8 MiB.".into());
         }
         assets.insert(path, content);
     }
-    let license = check_size(fetch(&format!("{base}LICENSE"))?)?;
+    let license = check_size(fetch("LICENSE")?)?;
     if total + license.len() > MAX_TOTAL_BYTES {
         return Err("Plugin bundle exceeds 8 MiB.".into());
     }
@@ -380,8 +401,8 @@ fn install_with(root: &Path, input: &str, mut fetch: impl FnMut(&str) -> Result<
         name: manifest.name.clone(),
         version: manifest.version.clone(),
         license: manifest.license.clone(),
-        source_url: input.trim().into(),
-        manifest_url,
+        source_url: source.into(),
+        manifest_url: manifest_url.into(),
         main: manifest.main.clone(),
         permissions: manifest.permissions.clone(),
         runtime_supported: manifest.schema_version == 2,
@@ -457,6 +478,93 @@ mod tests {
     fn root() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("desigma-plugins-test-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)))
     }
+    fn local_fixture(directory: &Path) -> PathBuf {
+        fs::create_dir_all(directory).unwrap();
+        for name in ["manifest.json", "index.html", "main.js", "style.css", "icons.json", "LICENSE"] {
+            fs::write(directory.join(name), super::super::bundled::file(name).unwrap()).unwrap();
+        }
+        directory.join("manifest.json")
+    }
+    #[test]
+    fn included_plugin_installs_offline_with_valid_icons_and_license() {
+        let root = root();
+        let plugin = install_icon_browser(&root).unwrap();
+        assert_eq!(plugin.id, "desigma-icon-browser");
+        assert_eq!(plugin.source_url, "Included with Desigma");
+        let bundle = load_bundle(&root, &list(&root).unwrap()[0]).unwrap();
+        assert!(bundle.network.is_empty());
+        assert_eq!(bundle.plugin.permissions, ["document:insert-svg"]);
+        let icons: BTreeMap<String, String> = serde_json::from_slice(&bundle.files["icons.json"]).unwrap();
+        assert_eq!(icons.len(), 12);
+        for svg in icons.values() {
+            super::super::svg::validate(svg).unwrap();
+        }
+        let license = fs::read_to_string(bundle_directory(&root, &plugin.id, &plugin.version).join("LICENSE")).unwrap();
+        assert!(license.contains("Lucide Contributors"));
+        assert!(license.contains("MIT License"));
+        assert!(install_icon_browser(&root).unwrap_err().contains("already installed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn local_install_copies_validated_bundle_and_survives_source_removal() {
+        let source = root().join("local plugin with spaces العربية");
+        let path = local_fixture(&source);
+        let root = root();
+        let plugin = install_local(&root, &path).unwrap();
+        assert!(plugin.manifest_url.starts_with("file:///"));
+        assert!(install_local(&root, &path).unwrap_err().contains("already installed"));
+        fs::remove_dir_all(source.parent().unwrap()).unwrap();
+        assert_eq!(list(&root).unwrap().len(), 1);
+        assert_eq!(load_bundle(&root, &plugin).unwrap().files.len(), 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn invalid_local_bundles_leave_no_install() {
+        let source = root();
+        let path = local_fixture(&source);
+        let root = root();
+        assert!(install_local(&root, &source.join("main.js")).unwrap_err().contains("manifest.json"));
+        fs::write(&path, b"not json").unwrap();
+        assert!(install_local(&root, &path).unwrap_err().contains("Invalid native plugin manifest"));
+        for (key, value) in [("files", serde_json::json!(["index.html", "main.js", "../outside.js"])), ("permissions", serde_json::json!(["document:read"]))] {
+            let mut manifest: serde_json::Value = serde_json::from_slice(&super::super::bundled::file("manifest.json").unwrap()).unwrap();
+            manifest[key] = value;
+            fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(install_local(&root, &path).is_err());
+        }
+        fs::write(&path, super::super::bundled::file("manifest.json").unwrap()).unwrap();
+        fs::write(source.join("LICENSE"), b"").unwrap();
+        assert!(install_local(&root, &path).unwrap_err().contains("LICENSE"));
+        fs::write(source.join("LICENSE"), b"MIT").unwrap();
+        fs::write(source.join("main.js"), vec![0; MAX_BYTES + 1]).unwrap();
+        assert!(install_local(&root, &path).unwrap_err().contains("oversized"));
+        fs::remove_file(source.join("main.js")).unwrap();
+        assert!(install_local(&root, &path).is_err());
+        assert!(!root.exists());
+        fs::remove_dir_all(source).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn local_install_rejects_junction_assets() {
+        let source = root();
+        let path = local_fixture(&source);
+        let outside = root();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("escape.js"), b"void 0;").unwrap();
+        let link = source.join("linked");
+        let output = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&outside).output().unwrap();
+        assert!(output.status.success(), "Cannot create test junction");
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["files"].as_array_mut().unwrap().push(serde_json::json!("linked/escape.js"));
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let root = root();
+        let error = install_local(&root, &path).unwrap_err();
+        assert!(error.contains("reparse points") || error.contains("symbolic links"), "{error}");
+        assert!(!root.exists());
+        fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
     #[test]
     fn only_native_repository_manifests_are_accepted() {
         let raw = validate_url(URL).unwrap();
@@ -515,7 +623,9 @@ mod tests {
         let mut m: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
         // A directory/file collision forces failure after writing the downloaded script.
         m["main"] = serde_json::json!("manifest.json/main.js");
-        assert!(install_with(&root, URL, |url| Ok(if url.ends_with("manifest.json") { serde_json::to_vec(&m).unwrap() } else { b"void 0;".to_vec() })).is_err());
+        assert!(
+            install_with(&root, URL, |url| Ok(if url.ends_with("manifest.json") { serde_json::to_vec(&m).unwrap() } else { b"void 0;".to_vec() })).is_err()
+        );
         assert!(!root.join("plugins").exists());
         assert!(list(&root).unwrap().is_empty());
         if root.exists() {

@@ -2,6 +2,7 @@ mod app;
 mod board;
 mod canvas;
 mod cli;
+mod cityos_catalog;
 mod clipboard;
 mod comments;
 mod comp_ops;

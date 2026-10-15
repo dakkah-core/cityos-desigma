@@ -4,6 +4,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Options {
+    pub cityos_repository: Option<PathBuf>,
+    pub cityos_reader: Option<PathBuf>,
+    pub cityos_node: Option<PathBuf>,
+    pub cityos_cache: Option<PathBuf>,
+    pub cityos_canonical_ref: Option<String>,
     pub file: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub size: Option<(u32, u32)>,
@@ -120,6 +125,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--cityos-repository" => o.cityos_repository = Some(it.next().ok_or("--cityos-repository needs a path")?.into()),
+            "--cityos-reader" => o.cityos_reader = Some(it.next().ok_or("--cityos-reader needs the packaged reader path")?.into()),
+            "--cityos-node" => o.cityos_node = Some(it.next().ok_or("--cityos-node needs a Node executable")?.into()),
+            "--cityos-cache" => o.cityos_cache = Some(it.next().ok_or("--cityos-cache needs a path")?.into()),
+            "--cityos-canonical-ref" => o.cityos_canonical_ref = Some(it.next().ok_or("--cityos-canonical-ref needs a full commit SHA")?),
             "--screenshot" => o.screenshot = Some(it.next().ok_or("--screenshot needs an output path")?.into()),
             "--size" => {
                 let v = it.next().ok_or("--size needs WxH")?;

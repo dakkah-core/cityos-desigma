@@ -6,9 +6,9 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
-        Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -116,7 +116,11 @@ impl Server {
         let response = self.request(stream);
         let (status, mime, body) = response
             .unwrap_or_else(|(status, message)| (status, "application/json", serde_json::to_vec(&serde_json::json!({"error":message})).unwrap_or_default()));
-        let headers = format!("HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: {}\r\n\r\n", body.len(), self.policy);
+        let headers = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: {}\r\n\r\n",
+            body.len(),
+            self.policy
+        );
         let _ = stream.write_all(headers.as_bytes()).and_then(|()| stream.write_all(&body));
     }
 
@@ -215,7 +219,7 @@ impl Server {
             match receive.recv_timeout(Duration::from_millis(25)) {
                 Ok(Ok(id)) => return Ok(("200 OK", "application/json", serde_json::to_vec(&serde_json::json!({"ok":true,"node_id":id})).unwrap_or_default())),
                 Ok(Err(message)) => {
-                    return Ok(("422 Unprocessable Entity", "application/json", serde_json::to_vec(&serde_json::json!({"error":message})).unwrap_or_default()))
+                    return Ok(("422 Unprocessable Entity", "application/json", serde_json::to_vec(&serde_json::json!({"error":message})).unwrap_or_default()));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -247,6 +251,7 @@ fn mime(path: &str) -> Option<&'static str> {
         "html" => Some("text/html; charset=utf-8"),
         "js" => Some("text/javascript; charset=utf-8"),
         "css" => Some("text/css; charset=utf-8"),
+        "json" => Some("application/json; charset=utf-8"),
         _ => None,
     }
 }

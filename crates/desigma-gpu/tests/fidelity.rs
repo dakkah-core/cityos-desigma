@@ -21,6 +21,24 @@ fn simple_shapes() {
 }
 
 #[test]
+fn disjoint_composited_layers_preserve_previous_content() {
+    let Some(mut g) = gpu() else { return };
+    let mut t = T::new();
+    // Multiple fills plus opacity force two offscreen layers into one pass;
+    // the later Multiply layer ends that pass to take a backdrop snapshot.
+    let first = t.rect(None, Rect::new(10.0, 10.0, 60.0, 40.0), Color::rgb(0xE0, 0x50, 0x30));
+    t.node(first).fills.push(Paint::solid(Color::rgb(0xE0, 0x50, 0x30)));
+    t.node(first).opacity = 0.5;
+    let second = t.rect(None, Rect::new(110.0, 70.0, 50.0, 30.0), Color::rgb(0x44, 0x88, 0xDD));
+    t.node(second).fills.push(Paint::solid(Color::rgb(0x44, 0x88, 0xDD)));
+    t.node(second).opacity = 0.5;
+    let third = t.rect(None, Rect::new(180.0, 20.0, 40.0, 30.0), Color::rgb(0x30, 0xB0, 0x60));
+    t.node(third).blend = BlendMode::Multiply;
+    let c = compare(&mut g, "disjoint_layers", &t.doc, t.page, Viewport::default(), (240, 120), 8);
+    assert!(c.report.ratio < 0.01, "composited layers mismatch {:.3}%", c.report.ratio * 100.0);
+}
+
+#[test]
 fn render_demo() {
     let Some(mut g) = gpu() else { return };
     let (doc, page) = demo::demo_scene();
@@ -95,6 +113,19 @@ fn effects_and_blends() {
     let Some(mut g) = gpu() else { return };
     let (doc, page) = fx_scene();
     let c = compare(&mut g, "fx", &doc, page, Viewport { offset: Vec2::ZERO, zoom: 1.0, dpr: 2.0 }, (600, 420), 8);
+    assert!(c.report.ratio < 0.03, "mismatch {:.3}%", c.report.ratio * 100.0);
+}
+
+#[test]
+fn effects_without_glass_render() {
+    let Some(mut g) = gpu() else { return };
+    let (mut doc, page) = fx_scene();
+    for node in doc.nodes.values_mut() {
+        if node.effects.iter().any(|e| matches!(e, Effect::Glass(_))) {
+            node.visible = false;
+        }
+    }
+    let c = compare(&mut g, "fx_no_glass", &doc, page, Viewport { offset: Vec2::ZERO, zoom: 1.0, dpr: 2.0 }, (600, 420), 8);
     assert!(c.report.ratio < 0.03, "mismatch {:.3}%", c.report.ratio * 100.0);
 }
 

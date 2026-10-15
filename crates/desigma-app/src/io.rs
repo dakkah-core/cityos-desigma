@@ -54,7 +54,7 @@ pub fn save_path(doc: &Document, path: &Path) -> Result<PathBuf, String> {
         p.set_extension(NATIVE_EXT);
     }
     let json = doc.to_json().map_err(|e| format!("Cannot serialize: {e}"))?;
-    std::fs::write(&p, json).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
+    desigma_library::write_atomic(&p, json.as_bytes()).map_err(|e| format!("Cannot write {}: {e}", p.display()))?;
     Ok(p)
 }
 

@@ -149,10 +149,12 @@ impl Command {
                 collections: std::mem::replace(&mut doc.variable_collections, collections),
             },
             Command::Batch(cmds) => {
+                let mut staged=doc.clone();
                 let mut inv = Vec::with_capacity(cmds.len());
                 for c in cmds {
-                    inv.push(c.apply(doc)?);
+                    inv.push(c.apply(&mut staged)?);
                 }
+                *doc=staged;
                 inv.reverse();
                 Command::Batch(inv)
             }
@@ -183,13 +185,21 @@ impl History {
         Ok(())
     }
     pub fn undo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
-        let Some(c) = self.undo.pop() else { return Ok(false) };
-        self.redo.push(c.apply(doc)?);
+        let Some(c) = self.undo.last().cloned() else { return Ok(false) };
+        let mut staged=doc.clone();
+        let inverse=c.apply(&mut staged)?;
+        *doc=staged;
+        self.undo.pop();
+        self.redo.push(inverse);
         Ok(true)
     }
     pub fn redo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
-        let Some(c) = self.redo.pop() else { return Ok(false) };
-        self.undo.push(c.apply(doc)?);
+        let Some(c) = self.redo.last().cloned() else { return Ok(false) };
+        let mut staged=doc.clone();
+        let inverse=c.apply(&mut staged)?;
+        *doc=staged;
+        self.redo.pop();
+        self.undo.push(inverse);
         Ok(true)
     }
     pub fn can_undo(&self) -> bool {

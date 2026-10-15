@@ -6,6 +6,7 @@
 
 mod board;
 mod comments;
+mod cityos;
 mod components;
 mod dev;
 pub mod find;
@@ -26,6 +27,7 @@ mod vector_fit;
 
 pub use board::*;
 pub use comments::*;
+pub use cityos::*;
 pub use components::*;
 pub use dev::*;
 pub use geom::*;
@@ -64,6 +66,9 @@ pub enum DocError {
 /// A whole file: pages at the root, each page a tree of nodes.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Document {
+    /// Versioned, in-transaction semantic binding. Catalog previews never set this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cityos: Option<CityosBinding>,
     pub name: String,
     /// Design file or board (whiteboard) file; decides the toolbar and panels.
     #[serde(default)]
@@ -248,13 +253,20 @@ impl Document {
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
-        serde_json::to_string_pretty(self)
+        let mut value=serde_json::to_value(self)?;
+        value["schemaVersion"]=serde_json::Value::String("desigma.document.v1".into());
+        serde_json::to_string_pretty(&value)
     }
 
     /// Parses a native document. Text written by older versions that emulated lists with
     /// literal bullet and "1. " prefixes is converted to real lists.
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
-        let mut doc: Self = serde_json::from_str(s)?;
+        let value: serde_json::Value=serde_json::from_str(s)?;
+        if let Some(version)=value.get("schemaVersion") {
+            if version!="desigma.document.v1" {return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));}
+        }
+        let mut doc: Self = serde_json::from_value(value)?;
+        if let Some(binding)=&doc.cityos {binding.validate().map_err(<serde_json::Error as serde::de::Error>::custom)?;}
         doc.migrate_text();
         Ok(doc)
     }

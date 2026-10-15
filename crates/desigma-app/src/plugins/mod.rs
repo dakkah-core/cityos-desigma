@@ -1,4 +1,5 @@
 //! Native plugin bundles and browser panels with scoped document access.
+mod bundled;
 pub mod runtime;
 pub mod store;
 mod svg;
@@ -54,6 +55,21 @@ impl App {
             self.plugins.error = Some(error);
             return;
         }
+        self.begin_plugin_install(ctx, move |root| store::install(root, &url));
+    }
+
+    pub fn install_included_plugin(&mut self, ctx: &egui::Context) {
+        self.begin_plugin_install(ctx, store::install_icon_browser);
+    }
+
+    pub fn install_local_plugin(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.begin_plugin_install(ctx, move |root| store::install_local(root, &path));
+    }
+
+    fn begin_plugin_install(&mut self, ctx: &egui::Context, install: impl FnOnce(&std::path::Path) -> Result<store::InstalledPlugin, String> + Send + 'static) {
+        if self.plugins.pending {
+            return;
+        }
         let root = self.plugin_root();
         let (sender, receiver) = mpsc::channel();
         self.plugins.receiver = Some(receiver);
@@ -61,7 +77,7 @@ impl App {
         self.plugins.error = None;
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = sender.send(store::install(&root, &url));
+            let _ = sender.send(install(&root));
             ctx.request_repaint();
         });
     }
@@ -72,7 +88,7 @@ impl App {
         let result = match receiver.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err("Plugin download stopped. Try installing again.".into()),
+            Err(TryRecvError::Disconnected) => Err("Plugin installation stopped. Try installing again.".into()),
         };
         self.plugins.receiver = None;
         self.plugins.pending = false;

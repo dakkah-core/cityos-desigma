@@ -217,7 +217,10 @@ impl App {
         }
         if self.lib_file.is_some() && doc_hash(&self.doc) != self.autosave.saved_hash {
             if let Err(e) = self.save_library_file() {
+                self.autosave.changed_at=Some(self.now);
+                self.autosave.confirmed=true;
                 self.show_toast(e, true);
+                return;
             }
         }
         self.autosave.changed_at = None;
@@ -248,12 +251,17 @@ impl App {
             }
             self.autosave.confirmed = true;
         } else if self.autosave.confirmed && self.now - t >= AUTOSAVE_IDLE {
-            self.autosave.changed_at = None;
             if doc_hash(&self.doc) != self.autosave.saved_hash {
                 match self.save_library_file() {
                     Ok(()) => self.autosave.saves += 1,
-                    Err(e) => self.show_toast(e, true),
+                    Err(e) => {
+                        self.autosave.changed_at=Some(self.now);
+                        self.show_toast(e, true);
+                        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                    },
                 }
+            }else{
+                self.autosave.changed_at=None;
             }
             return;
         }
