@@ -181,7 +181,7 @@ impl Browser {
                     self.settings_open = true;
                 }
                 ui.checkbox(&mut self.auto_refresh, "Live updates")
-                    .on_hover_text("Off by default to keep the machine quiet. Refresh checks committed changes without rebuilding unchanged snapshots.");
+                    .on_hover_text("Automatic incremental refresh. Low-impact scheduling yields to selected designs; unchanged snapshots are reused.");
                 if self.busy {
                     if ui.button("Cancel").clicked() {
                         self.cancelled.store(true, Ordering::Release);
@@ -479,6 +479,13 @@ impl Browser {
             }
         }
         let composition = self.specimen.as_ref().is_some_and(|value| value["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1");
+        let profile=self.specimen.as_ref().map(|s|s["workspaceProfile"].clone()).filter(|p|p["kind"]=="component-specimen");
+        if let Some(profile)=profile {
+            if let Some(source)=profile["sourcePath"].as_str(){ui.horizontal_wrapped(|ui|{
+                if ui.button("Preview actual component").clicked(){self.workspace_request=Some(super::WorkspaceRequest::selected(source,true));}
+                if ui.button(if self.mode=="local" {"Open canonical draft"}else{"Open on canvas"}).clicked(){self.workspace_request=Some(super::WorkspaceRequest::selected(source,false));}
+            });ui.small("Canonical component fixture · typed local edits · source submission mapping unavailable");}
+        }
         if composition || entry.source_path.ends_with(".input.json") {
             ui.horizontal_wrapped(|ui| {
                 let actual = entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json";

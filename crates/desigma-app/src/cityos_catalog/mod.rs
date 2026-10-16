@@ -130,7 +130,7 @@ impl Browser {
                     Job::Scan(epoch, config, mode, prefer_cache) => {
                         // Preserve a healthy session for incremental refresh. Configuration
                         // changes replace the child and cannot reuse its old generations.
-                        let result = if previous_config.as_ref() == Some(&config) && previous_mode == mode && client.is_some() {
+                        let result = crate::cityos_jobs::run(false,Some(&worker_cancel),|| if previous_config.as_ref() == Some(&config) && previous_mode == mode && client.is_some() {
                             client.as_mut().unwrap().scan(&config, &mode)
                         } else {
                             client = None;
@@ -139,7 +139,7 @@ impl Browser {
                                 client = Some(c);
                                 result
                             })
-                        };
+                        });
                         previous_config = Some(config);
                         previous_mode = mode;
                         if result.is_err() {
@@ -206,7 +206,7 @@ impl Browser {
             last_interaction: Instant::now(),
             preview_error: None,
             refresh_failures: 0,
-            auto_refresh: false,
+            auto_refresh: true,
             specimen_canvas: None,
             theme_mode: "light".into(),
         };
@@ -233,6 +233,9 @@ impl Browser {
             canonical_ref: self.canonical_ref.clone(),
         };
         let _ = self.jobs.send(Job::Scan(self.epoch, config, self.mode.clone(), self.summary.is_none()));
+    }
+    pub fn yield_to_design(&self) {
+        if self.busy && matches!(self.activity,"Reading repository"|"Refreshing repository") {self.cancelled.store(true,Ordering::Release);}
     }
     fn query(&mut self, offset: usize) {
         if self.busy {

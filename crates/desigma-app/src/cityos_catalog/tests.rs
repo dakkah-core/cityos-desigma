@@ -131,12 +131,13 @@ fn failed_refresh_waits_after_completion_instead_of_entering_a_retry_loop() {
     assert!(browser.summary.is_some());
 }
 #[test]
-fn idle_catalog_does_not_schedule_background_scans_by_default() {
+fn paused_catalog_does_not_schedule_background_scans() {
     let (mut browser, _, requests) = fixture();
     browser.last_refresh = Instant::now() - Duration::from_secs(3600);
     browser.last_interaction = Instant::now() - Duration::from_secs(3600);
     browser.source_changed = true;
     browser.mode = "local".into();
+    browser.auto_refresh = false;
     browser.tick();
     assert!(!browser.busy);
     assert!(requests.try_recv().is_err());

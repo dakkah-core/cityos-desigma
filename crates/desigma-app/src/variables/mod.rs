@@ -152,7 +152,8 @@ impl App {
         self.vars.open = true;
         let known = self.vars.collection.as_ref().is_some_and(|c| self.doc.variable_collections.contains_key(c));
         if !known {
-            self.vars.collection = self.doc.variable_collections.keys().next().cloned();
+            self.vars.collection = self.doc.get(self.page).and_then(|page|page.variables.modes.keys().find(|id|self.doc.variable_collections.contains_key(*id))).cloned()
+                .or_else(||self.doc.variable_collections.keys().next().cloned());
         }
         self.ui.menu = None;
     }

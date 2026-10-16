@@ -143,20 +143,21 @@ fn binding(draft: Value, projection: &Value) -> Result<Document, String> {
     }
     let pins = draft["dependencyPins"].as_array().ok_or("Missing dependency pins")?.iter().map(|p| string(p, "digest")).collect::<Result<Vec<_>, _>>()?;
     doc.cityos = Some(CityosBinding {
-        schema_version: "cityos.design-exchange.v2".into(),
+        schema_version: string(&draft,"schemaVersion")?,
         document_id: string(&draft, "documentId")?,
         draft_id: string(&draft, "draftId")?,
         base: CityosBase::CanonicalGit { repository_id: string(&draft["base"], "repositoryId")?, commit: string(&draft["base"], "commit")? },
         semantic_base: draft["semanticBase"].clone(),
         dependency_pins: pins,
         occurrences,
-        exchange_v2: Some(draft),
+        exchange_v2: if draft["schemaVersion"]=="cityos.design-exchange.v2" {Some(draft.clone())} else {None},
+        exchange_v3: if draft["schemaVersion"]=="cityos.design-exchange.v3" {Some(draft)} else {None},
     });
     doc.cityos.as_ref().unwrap().validate()?;
     Ok(doc)
 }
 fn draft(doc: &Document) -> Option<&Value> {
-    doc.cityos.as_ref()?.exchange_v2.as_ref()
+    doc.cityos.as_ref()?.exchange()
 }
 fn revision(doc: &Document) -> Option<(String, u64)> {
     let d = draft(doc)?;
@@ -367,7 +368,7 @@ impl Workspace {
     }
     fn scenario(&self) -> Value {
         json!({"target":"web","locale":self.locale,"theme":self.theme,"themeId":self.theme_id,
-        "viewport":{"width":self.viewport.0,"height":self.viewport.1},"fixture":"cityos-web-frame"})
+        "viewport":{"width":self.viewport.0,"height":self.viewport.1},"fixture":self.resource.as_ref().and_then(|r|r["fixture"].as_str()).unwrap_or("cityos-web-frame")})
     }
     fn poll(&mut self, app: &mut App) {
         let result = self.bridge.as_ref().and_then(|b| b.replies.try_recv().ok());
@@ -734,12 +735,19 @@ impl Workspace {
                 let mut rows=vec![];if let Some(d)=self.active_draft(app){layers(&d["semanticDraft"]["root"],0,&mut rows);}
                 for(node,label)in rows {if ui.selectable_label(self.selected==node,label).clicked(){if self.preview_only {self.selected=node.clone();if let Some(canvas)=self.temporary_canvas.as_mut(){if let Some(id)=canvas.doc.nodes.values().find(|n|n.source_id.as_deref()==Some(&node)).map(|n|n.id){canvas.select_only(id);}}}else{self.select(app,&node);}}}
                 if self.resource.as_ref().is_some_and(|r|r["editable"]==true) {
-                ui.separator();ui.label("material.elevation");
-                let d=self.active_draft(app);let elevation=d.as_ref().and_then(|d|d["semanticDraft"]["root"]["slots"]["material"][0]["props"]["elevation"].as_str()).unwrap_or("flat").to_string();
-                let mut value=elevation.clone();ui.add_enabled_ui(self.validated && self.busy.is_none() && self.selected=="material",|ui|{
-                    ui.horizontal_wrapped(|ui|{for v in ["flat","resting","floating"]{ui.selectable_value(&mut value,v.into(),v);}});});
-                if value!=elevation {if let Some(draft)=d {self.send(json!({"op":"Command","command":{"draftId":draft["draftId"],"expectedRevision":draft["draftRevision"],"operationId":uuid::Uuid::new_v4().to_string(),"operation":"set-property","nodeId":"material","property":"elevation","value":value},"draft":draft}));}}
-                ui.small("Material kind, horizon layout, slots and owner actions are protected.");
+                ui.separator();
+                let fields=self.resource.as_ref().and_then(|r|r["fields"].as_array()).cloned().unwrap_or_default();
+                for field in fields {if let Some(d)=self.active_draft(app){
+                    let pointer=field["sourcePointer"].as_str().unwrap_or("").strip_prefix("/composition").unwrap_or(field["sourcePointer"].as_str().unwrap_or(""));
+                    let previous=d["semanticDraft"].pointer(pointer).cloned().unwrap_or(Value::Null);let mut value=previous.clone();
+                    ui.label(format!("{}.{}",field["nodeId"].as_str().unwrap_or(""),field["property"].as_str().unwrap_or("")));
+                    ui.add_enabled_ui(self.validated&&self.busy.is_none()&&self.selected==field["nodeId"].as_str().unwrap_or(""),|ui|{
+                        if let Some(mut boolean)=value.as_bool(){if ui.checkbox(&mut boolean,"Allow multiple open sections").changed(){value=json!(boolean);}}
+                        else if let Some(values)=field["values"].as_array(){ui.horizontal_wrapped(|ui|{for option in values {ui.selectable_value(&mut value,option.clone(),option.as_str().unwrap_or(""));}});}
+                    });
+                    if value!=previous {self.send(json!({"op":"Command","command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],"operationId":uuid::Uuid::new_v4().to_string(),"operation":"set-property","nodeId":field["nodeId"],"property":field["property"],"value":value},"draft":d}));}
+                }}
+                ui.small("Only the declared properties are editable. Slots and owner actions remain protected.");
                 } else {ui.small("Protected source nodes. No editing adapter is enabled for this file.");}
                 ui.separator();if let Some(d)=self.active_draft(app){ui.label(format!("Draft revision {}",d["draftRevision"]));if let Some(commit)=d["base"]["commit"].as_str(){ui.small(format!("Canonical base {}",&commit[..commit.len().min(12)]));}}
                 ui.small("Canvas geometry is a design projection.");
@@ -756,7 +764,7 @@ impl Workspace {
             } else {
                 ui.label("Waiting for preview");
             }
-            ui.small(if self.harness { "Inert embedded-host diagnostic · no repository code" } else { "CityOS web-frame fixture · owner actions disabled" });
+            ui.small(if self.harness { "Inert embedded-host diagnostic · no repository code" } else { "Registered CityOS renderer · deterministic fixture · owner actions disabled" });
             let old = (self.locale.clone(), self.theme.clone(), self.theme_id.clone());
             egui::ComboBox::from_id_salt("workspace-theme")
                 .width(250.)

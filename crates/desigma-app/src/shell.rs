@@ -547,7 +547,7 @@ impl eframe::App for Shell {
         if self.app.fonts.is_loading() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
-        if !self.workspace.open && !self.cityos.open && self.app.home.is_none() && self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {
+        if !self.workspace.open && !self.cityos.open && self.app.home.is_none() && self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some()) {
             self.workspace.resume(self.cityos.workspace_config(), &self.app);
         }
         if self.workspace.open {
@@ -558,7 +558,7 @@ impl eframe::App for Shell {
             }
         } else {
             self.workspace.hide();
-            self.cityos.has_bound_draft = self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some());
+            self.cityos.has_bound_draft = self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some());
             self.draw(ui);
             if let Some(document) = self.cityos.local_design_request.take() {
                 let preserved = if self.app.lib_file.is_some() {
@@ -589,6 +589,7 @@ impl eframe::App for Shell {
                 self.cityos.open = false;
                 self.workspace.begin_harness(self.cityos.workspace_config());
             } else if let Some(request) = self.cityos.workspace_request.take() {
+                self.cityos.yield_to_design();
                 self.cityos.open = false;
                 if request.resume {
                     self.workspace.resume(self.cityos.workspace_config(), &self.app);
@@ -598,7 +599,7 @@ impl eframe::App for Shell {
                 if let Some(theme) = self.cityos.workspace_theme.take() {
                     self.workspace.set_preview_theme(theme);
                 }
-            } else if self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) && self.app.home.is_none() && !self.cityos.open {
+            } else if self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some()) && self.app.home.is_none() && !self.cityos.open {
                 self.workspace.resume(self.cityos.workspace_config(), &self.app);
             }
         }

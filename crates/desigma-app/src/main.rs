@@ -3,6 +3,7 @@ mod board;
 mod canvas;
 mod cli;
 mod cityos_catalog;
+mod cityos_jobs;
 mod design_workspace;
 mod clipboard;
 mod comments;

@@ -81,8 +81,8 @@ impl Command {
                     return Err(DocError::CityosProtected);
                 }
                 // Undo/redo also creates a new local revision; no stale preview identity is reused.
-                let revision=current.exchange_v2.as_ref().and_then(|d| d["draftRevision"].as_u64()).ok_or(DocError::CityosProtected)?;
-                next.exchange_v2.as_mut().ok_or(DocError::CityosProtected)?["draftRevision"] = serde_json::json!(revision.checked_add(1).ok_or(DocError::CityosProtected)?);
+                let revision=current.exchange().and_then(|d| d["draftRevision"].as_u64()).ok_or(DocError::CityosProtected)?;
+                next.exchange_mut().ok_or(DocError::CityosProtected)?["draftRevision"] = serde_json::json!(revision.checked_add(1).ok_or(DocError::CityosProtected)?);
                 let old=std::mem::replace(doc,*document);
                 Command::CityosInstall { document: Box::new(old) }
             }

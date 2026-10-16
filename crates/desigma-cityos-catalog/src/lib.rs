@@ -14,6 +14,25 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL: &str = "cityos.design-catalog.ipc.v1";
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
 
+/// Limit helper threads and inherited Git children; never constrain the UI/GPU process.
+pub fn limit_background_cpu(child:&Child)->Result<(),String>{
+    #[cfg(windows)] {
+        use std::os::windows::io::AsRawHandle;
+        #[link(name="kernel32")] unsafe extern "system" {
+            fn GetProcessAffinityMask(process:*mut std::ffi::c_void,process_mask:*mut usize,system_mask:*mut usize)->i32;
+            fn SetProcessAffinityMask(process:*mut std::ffi::c_void,mask:usize)->i32;
+            fn SetPriorityClass(process:*mut std::ffi::c_void,class:u32)->i32;
+        }
+        let mut allowed=0usize;let mut system=0usize;
+        // SAFETY: the live child handle and output pointers remain valid for each call.
+        unsafe {if GetProcessAffinityMask(child.as_raw_handle(),&mut allowed,&mut system)==0{return Err("Cannot establish the helper CPU budget".into());}
+            let mut selected=0usize;for _ in 0..2 {if allowed==0{break;}let bit=1usize<<allowed.trailing_zeros();selected|=bit;allowed&=!bit;}
+            if selected==0||SetProcessAffinityMask(child.as_raw_handle(),selected)==0||SetPriorityClass(child.as_raw_handle(),0x00004000)==0{return Err("Cannot apply the helper low-impact profile".into());}}
+    }
+    #[cfg(not(windows))] let _=child;
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReaderConfig {
     pub node: PathBuf,
@@ -103,6 +122,7 @@ impl Client {
             command.creation_flags(0x08000000);
         }
         let mut child = command.spawn().map_err(|e| format!("Cannot start CityOS reader: {e}"))?;
+        if let Err(error)=limit_background_cpu(&child){let _=child.kill();let _=child.wait();return Err(error);}
         let input = child.stdin.take().ok_or("Reader stdin unavailable")?;
         let stdout = child.stdout.take().ok_or("Reader stdout unavailable")?;
         let (tx, output) = mpsc::sync_channel(32);

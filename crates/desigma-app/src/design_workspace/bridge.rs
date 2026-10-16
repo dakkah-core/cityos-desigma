@@ -88,6 +88,7 @@ impl Client {
             cmd.creation_flags(0x08000000);
         }
         let mut child = cmd.spawn().map_err(|e| format!("Cannot start exchange helper: {e}"))?;
+        if let Err(error)=desigma_cityos_catalog::limit_background_cpu(&child){let _=child.kill();let _=child.wait();return Err(error);}
         let input = child.stdin.take().ok_or("Missing exchange stdin")?;
         let stdout = child.stdout.take().ok_or("Missing exchange stdout")?;
         let (tx, output) = mpsc::sync_channel(4);
@@ -137,12 +138,12 @@ impl Bridge {
                     request["repository"] = json!(config.repository);
                     request["cacheRoot"] = json!(config.cache);
                 }
-                let result = (|| {
+                let result = crate::cityos_jobs::run(true,None,|| {
                     if client.is_none() {
                         client = Some(Client::connect(&config)?);
                     }
                     client.as_mut().unwrap().request(request)
-                })();
+                });
                 if result.is_err() {
                     client = None;
                 }

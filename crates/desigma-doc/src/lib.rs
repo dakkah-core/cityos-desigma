@@ -256,7 +256,7 @@ impl Document {
 
     pub fn to_json(&self) -> serde_json::Result<String> {
         if self.cityos.is_some(){
-            let version = if self.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {"desigma.document.v3"} else {"desigma.document.v2"};
+            let version = if self.cityos.as_ref().is_some_and(|b| b.exchange_v3.is_some()) {"desigma.document.v4"} else if self.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {"desigma.document.v3"} else {"desigma.document.v2"};
             return serde_json::to_string_pretty(&serde_json::json!({"schemaVersion":version,"document":self}));
         }
         let mut value=serde_json::to_value(self)?;
@@ -269,10 +269,12 @@ impl Document {
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
         let mut value: serde_json::Value=serde_json::from_str(s)?;
         if let Some(version)=value.get("schemaVersion") {
-            if version=="desigma.document.v2" || version=="desigma.document.v3" {
+            if version=="desigma.document.v2" || version=="desigma.document.v3" || version=="desigma.document.v4" {
                 let v3=version=="desigma.document.v3";
+                let v4=version=="desigma.document.v4";
                 value=value.get("document").cloned().ok_or_else(||<serde_json::Error as serde::de::Error>::custom("Bound document payload missing"))?;
                 if !v3 && value["cityos"]["exchange_v2"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Expanded bindings require container v3")); }
+                if v4 != value["cityos"]["exchange_v3"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Typed bindings require container v4")); }
             }
             else if version!="desigma.document.v1" {return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));}
         }

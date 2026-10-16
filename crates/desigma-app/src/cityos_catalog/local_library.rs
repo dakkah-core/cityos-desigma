@@ -170,6 +170,7 @@ pub(super) fn create(entry: &Entry, specimen: &Value, snapshot: &Value, preferre
                 doc.get_mut(text_id).unwrap().variables.bindings.insert("characters".into(), id.clone());
             }
         }
+        doc.get_mut(page).ok_or("Theme page disappeared")?.variables.modes.insert(collection_id.clone(),mode_id.clone());
         let variables = collection.variables.clone();
         doc.variable_collections.insert(collection_id, collection);
         for id in variables {
