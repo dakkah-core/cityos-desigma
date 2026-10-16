@@ -19,7 +19,7 @@ mod ui;
 const ACTIVE_REPAINT: Duration = Duration::from_millis(100);
 const IDLE_REPAINT: Duration = Duration::from_secs(5);
 const LOCAL_EVENT_POLL: Duration = Duration::from_millis(750);
-const FILTER_DEBOUNCE: Duration = Duration::from_millis(250);
+const FILTER_DEBOUNCE: Duration = Duration::from_millis(75);
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum DetailTab {
@@ -429,7 +429,8 @@ impl Browser {
     }
     fn next_repaint_after(&self, now: Instant) -> Option<Duration> {
         if !self.open { return None; }
-        if self.busy || self.filter_changed.is_some() || self.pending_selection { return Some(ACTIVE_REPAINT); }
+        if self.busy || self.pending_selection { return Some(ACTIVE_REPAINT); }
+        if let Some(changed)=self.filter_changed { return Some(FILTER_DEBOUNCE.saturating_sub(now.saturating_duration_since(changed))); }
         if !self.auto_refresh || self.summary.is_none() { return None; }
         // Source notifications wake the UI through send_reply. This guard also
         // preserves the absolute refresh/backoff deadline rather than adding 5 s.

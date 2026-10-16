@@ -33,6 +33,10 @@ fn profile_matches(profile: &Value, entry: &Entry, specimen: Option<&Value>) -> 
         let named = entry.label == export || data.is_some_and(|d| d["name"] == export);
         let module = source == entry.source_path
             || entry.dependencies.iter().any(|dependency| dependency == source)
+            || (profile["kind"] == "registered-specimen" && profile["sourcePaths"].as_array().is_some_and(|paths| paths.iter().any(|ref_path| {
+                ref_path.as_str().is_some_and(|ref_path| ref_path == entry.source_path || entry.dependencies.iter().any(|dependency| dependency == ref_path)
+                    || data.is_some_and(|d| d["sourcePath"] == ref_path || ref_path.split_once("/src/").is_some_and(|(_,relative)| d["file"] == relative)))
+            })))
             || source.strip_prefix("packages/design-system/src/").is_some_and(|relative|
                 entry.dependencies.iter().any(|dependency| dependency == relative)
                     || data.is_some_and(|d| d["file"].as_str() == Some(relative)));

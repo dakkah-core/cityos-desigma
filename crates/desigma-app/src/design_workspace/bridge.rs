@@ -166,7 +166,11 @@ impl Bridge {
                     if client.is_none() {
                         client = Some(Client::connect(&config,&canceled)?);
                     }
-                    client.as_mut().unwrap().request(request,&canceled)
+                    let result=client.as_mut().unwrap().request(request,&canceled);
+                    // Settle a failed/cancelled process while retaining the heavy
+                    // job lease, so a replacement cannot overlap a live old helper.
+                    if result.is_err() { client=None; }
+                    result
                 });
                 if result.is_err() {
                     client = None;
@@ -203,9 +207,11 @@ mod tests {
     #[ignore="requires the pinned packaged Node runtime"]
     fn obsolete_unresponsive_helpers_release_the_foreground_budget_within_two_seconds(){
         let directory=std::env::temp_dir().join(format!("desigma-cancel-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&directory).unwrap();
-        let script=directory.join("inert.mjs");std::fs::write(&script,"process.stdin.resume();setInterval(()=>{},1000);").unwrap();
+        let script=directory.join("inert.mjs");std::fs::write(&script,"import fs from 'node:fs';process.chdir(import.meta.dirname);fs.writeFileSync('ready','ready');process.stdin.resume();setInterval(()=>{},1000);").unwrap();
         let bridge=Bridge::spawn(Config{node:std::env::var("CITYOS_DESIGN_WORKSPACE_NODE").unwrap().into(),bridge:script,repository:directory.clone(),cache:directory.clone()});
-        bridge.jobs.send(json!({"op":"Resources"})).unwrap();std::thread::sleep(Duration::from_millis(150));
+        bridge.jobs.send(json!({"op":"Resources"})).unwrap();
+        let ready=Instant::now();while !directory.join("ready").is_file() && ready.elapsed()<Duration::from_secs(5){std::thread::sleep(Duration::from_millis(25));}
+        assert!(directory.join("ready").is_file(),"Test helper never acquired the heavy-job lease");
         let start=Instant::now();drop(bridge);
         crate::cityos_jobs::run(true,None,||Ok(())).unwrap();assert!(start.elapsed()<Duration::from_secs(2));
         std::fs::remove_dir_all(directory).unwrap();

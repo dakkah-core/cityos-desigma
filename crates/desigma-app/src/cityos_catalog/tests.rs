@@ -24,7 +24,7 @@ fn registered_default_inline_preview_preserves_the_full_locator_and_requires_mat
     let mut selected=entry("context"); selected.kind="source-file".into();
     selected.source_path="packages/runtime/src/ContextCapsule.tsx".into(); selected.source_digest="b".repeat(64);
     let profile=json!({"kind":"registered-specimen","sourcePath":selected.source_path,"publicExport":"ContextCapsule",
-        "sourceDigest":selected.source_digest,"implementationDigest":selected.source_digest,
+        "sourceDigest":selected.source_digest,"implementationDigest":selected.source_digest,"sourcePaths":[selected.source_path,"packages/ui/src/ContextCapsule.tsx"],
         "componentId":"fixture.context","componentVersion":"1","profileRef":"fixture-profile","targetProfileRef":"web-fixture",
         "resourceId":"fixture-context-ar","fixture":"cityos-shared-leaf","actualWebPreview":true,"editable":false,
         "provenance":{"canonicalResource":false,"temporary":true,"locale":"ar","sourceCommit":"a".repeat(40)}});
@@ -33,6 +33,12 @@ fn registered_default_inline_preview_preserves_the_full_locator_and_requires_mat
     assert!(actions.actual_preview); assert!(!actions.editable);
     assert_eq!(actions.inline_pin,Some(profile.clone()));
     assert!(support::actions(&selected,None,Some(&summary),"local").inline_pin.is_none());
+    let mut registration=selected.clone(); registration.kind="registered-component".into();
+    registration.source_path="registrations.json".into(); registration.source_digest="c".repeat(64); registration.label="ContextCapsule".into();
+    let mut specimen=json!({"entry":registration,"digest":registration.source_digest,"data":{"name":"ContextCapsule","sourcePath":"packages/ui/src/ContextCapsule.tsx"},"workspaceProfile":profile});
+    assert!(support::actions(&registration,Some(&specimen),Some(&summary),"committed").actual_preview);
+    specimen["data"]["name"]=json!("UnrelatedExport"); registration.label="UnrelatedExport".into();
+    assert!(!support::actions(&registration,Some(&specimen),Some(&summary),"committed").actual_preview);
     summary["workspaceProfiles"][0]["implementationDigest"]=json!("c".repeat(64));
     assert!(!support::actions(&selected,None,Some(&summary),"committed").actual_preview);
     summary["workspaceProfiles"][0]=profile;
@@ -226,6 +232,21 @@ fn typing_during_debounce_keeps_one_back_location_and_clears_stale_inline_status
     assert!(browser.inline_status.is_empty());
     browser.navigate_history(false);
     assert!(browser.filters.search.is_empty());
+}
+
+#[test]
+fn search_coalesces_keystrokes_and_dispatches_before_the_interaction_budget() {
+    let (mut browser,_responses,requests)=fixture();
+    browser.summary=Some(json!({})); browser.auto_refresh=false;
+    browser.filters.search="context".into(); browser.filters_changed();
+    browser.filters.search="context capsule".into(); browser.filters_changed();
+    browser.filter_changed=Some(Instant::now()-Duration::from_millis(125));
+    browser.tick();
+    match requests.try_recv().expect("Search should dispatch within the 150 ms interaction budget") {
+        Job::Query(_,filters,offset)=>{assert_eq!(filters.search,"context capsule");assert_eq!(offset,0);},
+        _=>panic!("Only the final query should run"),
+    }
+    assert!(requests.try_recv().is_err());
 }
 
 fn catalog_frame(browser: &mut Browser, ctx: &egui::Context, size: egui::Vec2, events: Vec<egui::Event>) -> egui::FullOutput {
@@ -563,7 +584,8 @@ fn pending_library_work_keeps_fast_repaints_even_with_live_updates_paused() {
     assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
     browser.busy = false;
     browser.filter_changed = Some(now);
-    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(75)));
+    assert_eq!(browser.next_repaint_after(now+Duration::from_millis(50)), Some(Duration::from_millis(25)));
     browser.filter_changed = None;
     browser.pending_selection = true;
     assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
