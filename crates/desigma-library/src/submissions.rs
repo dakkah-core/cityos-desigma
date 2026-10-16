@@ -8,7 +8,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-static SUBMISSION_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static SUBMISSION_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+thread_local! {
+    static DISPATCH_AFTER_PREPARE: std::cell::RefCell<Option<DispatchHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+type DispatchHook = Box<dyn FnOnce(&Library, &SubmissionRecord)>;
 pub fn payload_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -28,8 +34,10 @@ pub struct SubmissionCommand {
     pub resource: String,
     pub scope: BTreeMap<String, String>,
     pub base: CityosBase,
+    /// The owner's original CAS revision (canonical source digest for Git drafts).
     pub expected_revision: String,
     pub semantic_base: Value,
+    /// Exact submitted semantic value, not the enclosing exchange/projection.
     pub submitted_snapshot: Value,
     pub dependency_pins: Vec<String>,
 }
@@ -109,7 +117,7 @@ fn validate(command: &SubmissionCommand) -> Result<()> {
     Ok(())
 }
 impl Library {
-    fn submission_path(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) fn submission_path(&self, id: &str) -> Result<PathBuf> {
         identity(id)?;
         Ok(self.path("cityos/submissions").join(format!("{id}.json")))
     }
@@ -229,12 +237,26 @@ impl Library {
     /// The immutable durable record is the sole dispatch input. An identical retry
     /// retains its original operation/digest; inquiry is the restart entry point.
     pub fn dispatch_prepared<T>(&self, command: SubmissionCommand, dispatch: impl FnOnce(&SubmissionRecord) -> Result<T>) -> Result<T> {
-        let mut record = self.prepare_submission(command)?;
-        if !matches!(record.state, SubmissionState::Prepared | SubmissionState::Pending) {
-            return Err(LibraryError::Invalid("Inquire about the existing outcome before dispatch".into()));
-        }
-        if record.state==SubmissionState::Prepared {record.state=SubmissionState::Pending;write_atomic(&self.submission_path(&record.command.operation_id)?,&serde_json::to_vec(&record)?)?;
-            record=self.load_submission(&record.command.operation_id)?;}
+        let prepared = self.prepare_submission(command)?;
+        #[cfg(test)]
+        if let Some(hook) = DISPATCH_AFTER_PREPARE.with(|slot| slot.borrow_mut().take()) { hook(self, &prepared); }
+        let record = {
+            // Inquiry/synchronization may have advanced the original record while
+            // prepare's lock was released. Never overwrite acceptance with Pending.
+            let _guard = SUBMISSION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut record = self.load_submission(&prepared.command.operation_id)?;
+            if !matches!(record.state, SubmissionState::Prepared | SubmissionState::Pending) {
+                return Err(LibraryError::Invalid("Inquire about the existing outcome before dispatch".into()));
+            }
+            if record.state == SubmissionState::Prepared {
+                record.state = SubmissionState::Pending;
+                write_atomic(&self.submission_path(&record.command.operation_id)?, &serde_json::to_vec(&record)?)?;
+                let saved = self.load_submission(&record.command.operation_id)?;
+                if saved != record { return Err(LibraryError::Invalid("Submission dispatch readback mismatch".into())); }
+                record = saved;
+            }
+            record
+        };
         dispatch(&record)
     }
     /// Called only after the existing owner client authenticates and scopes inquiry.
@@ -265,8 +287,11 @@ impl Library {
     /// unsynchronized records remain retention roots, including after restart.
     pub fn cityos_retention_roots(&self) -> Result<Vec<String>> {
         let mut roots = self.local_document_retention_roots()?;
+        roots.extend(self.submission_sync_retention_roots()?);
         let folder = self.path("cityos/submissions");
         if !folder.exists() {
+            roots.sort();
+            roots.dedup();
             return Ok(roots);
         }
         for item in std::fs::read_dir(folder)? {
@@ -353,6 +378,21 @@ mod tests {
         assert!(lib.dispatch_prepared(command(),|_|{effects+=1;Ok(())}).is_err());assert_eq!(effects,1);
         let mut retirement=observation(&accepted,SubmissionState::Retired);retirement.conclusively_ineligible=true;assert!(lib.record_submission_observation(retirement).is_err());
         assert_eq!(lib.load_submission("operation-1").unwrap().command,pending.command);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn acceptance_arriving_between_prepare_and_pending_is_never_overwritten_or_redispatched() {
+        let root = std::env::temp_dir().join(format!("desigma-dispatch-race-{}", crate::new_id()));
+        let library = Library::open(&root).unwrap();
+        DISPATCH_AFTER_PREPARE.with(|slot| *slot.borrow_mut() = Some(Box::new(|library, prepared| {
+            library.record_submission_observation(observation(prepared, SubmissionState::AcceptedSyncPending)).unwrap();
+        })));
+        let mut sends = 0;
+        assert!(library.dispatch_prepared(command(), |_| { sends += 1; Ok(()) }).is_err());
+        assert_eq!(sends, 0);
+        let stored = Library::open(&root).unwrap().load_submission("operation-1").unwrap();
+        assert_eq!(stored.state, SubmissionState::AcceptedSyncPending);
+        assert_eq!(stored.outcome, Some(serde_json::to_value(observation(&stored, SubmissionState::AcceptedSyncPending)).unwrap()));
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn successor_remains_blocked_until_original_retirement_is_conclusive(){

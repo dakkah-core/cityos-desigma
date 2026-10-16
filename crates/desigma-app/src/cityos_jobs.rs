@@ -6,6 +6,23 @@ static HEAVY: Mutex<()> = Mutex::new(());
 static INTERACTIVE: AtomicUsize = AtomicUsize::new(0);
 static BACKGROUND_PAUSED: AtomicBool = AtomicBool::new(false);
 static LAST_INTERACTION: Mutex<Option<Instant>> = Mutex::new(None);
+/// Job events and bounded polls drive progress; background indexing must not
+/// animate a spinner at the display refresh rate.
+pub(crate) fn progress_marker(ui: &mut egui::Ui) { ui.label("…"); }
+
+#[cfg(test)]
+#[test]
+fn progress_marker_does_not_schedule_animation_frames() {
+    let ctx = egui::Context::default();
+    for _ in 0..8 { let _ = ctx.run_ui(Default::default(), progress_marker); }
+    let immediate = std::sync::Arc::new(AtomicUsize::new(0));
+    let observed = immediate.clone();
+    ctx.set_request_repaint_callback(move |info| {
+        if info.delay.is_zero() { observed.fetch_add(1, Ordering::SeqCst); }
+    });
+    for _ in 0..8 { let _ = ctx.run_ui(Default::default(), progress_marker); }
+    assert_eq!(immediate.load(Ordering::SeqCst), 0);
+}
 /// Window state affects speculative/refresh jobs, never saves or user commands.
 pub fn set_background_paused(paused: bool) { BACKGROUND_PAUSED.store(paused, Ordering::Release); }
 pub fn note_interaction() { *LAST_INTERACTION.lock().unwrap_or_else(|e|e.into_inner())=Some(Instant::now()); }

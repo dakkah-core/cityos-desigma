@@ -20,12 +20,14 @@ mod publish;
 mod store;
 mod versions;
 mod submissions;
+mod submission_sync;
 mod checkpoint;
 
 pub use publish::*;
 pub use store::*;
 pub use versions::*;
 pub use submissions::*;
+pub use submission_sync::*;
 pub use checkpoint::CheckpointSaveReceipt;
 
 use std::path::{Path, PathBuf};

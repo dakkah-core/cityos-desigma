@@ -25,6 +25,7 @@ fn registered_availability_reason(resource: &Value) -> String {
             "registered-fixture-props-unavailable" => "The component owner has not declared default fixture properties.",
             "owner-input-fixture-unavailable" => "This definition needs a declared owner-data fixture.",
             "registered-composition-inputs-required" => "Select an authored composition supplying its required slots.",
+            "requires-registered-composition-root" => "Select the complete registered frame composition to inspect this member.",
             "renderer-adapter-unavailable" => "No actual-renderer adapter is registered for this definition.",
             "renderer-pins-unavailable" => "Install matching renderer dependencies to preview this definition.",
             "semantic-catalog-entry-unavailable" => "The registered semantic catalog entry is unavailable.",
@@ -711,8 +712,10 @@ impl Workspace {
         self.invalidate_specimen_request();
         let Some(request) = self.captured_specimen_request() else { return; };
         self.current = false;
-        self.preview = None;
-        self.host.hide();
+        // Keep the previous receipt and view while regenerating. Removing its
+        // status/viewport rows changes panel height, invalidates the captured
+        // viewport and creates an endless resize -> request -> resize cycle.
+        // prepare_resource clears it when the selected definition changes.
         self.render_started = None;
         self.pending = None;
         self.send(request.job());
@@ -996,7 +999,11 @@ impl Workspace {
         // registered definition visible without compiling its defaults eagerly.
         for selection in value["specimenSelections"].as_array().into_iter().flatten() {
             let id = selection["resourceId"].as_str().filter(|id| !id.is_empty());
-            if id.is_none() || self.resources.iter().any(|r| r["kind"] == "registered-specimen" && r["resourceId"].as_str() == id) { continue; }
+            if id.is_none() { continue; }
+            if let Some(resource) = self.resources.iter_mut().find(|r| r["kind"] == "registered-specimen" && r["resourceId"].as_str() == id) {
+                for key in ["level", "target"] { if selection[key].is_string() { resource[key] = selection[key].clone(); } }
+                continue;
+            }
             let mut resource = selection.clone();
             resource["kind"] = json!("registered-specimen");
             resource["actualWebPreview"] = json!(false);
@@ -1268,7 +1275,7 @@ impl Workspace {
             egui::Panel::top("cityos-workspace-busy").exact_size(38.).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(operation) = &self.busy {
-                        ui.spinner();
+                        crate::cityos_jobs::progress_marker(ui);
                         ui.label(format!("{operation}…"));
                     } else {
                         ui.label(if self.harness {
@@ -1305,10 +1312,16 @@ impl Workspace {
                                     specimen_locator(resource).is_some() && specimen_locator(r) == specimen_locator(resource)
                                 } else { r["kind"] != "registered-specimen" && r["sourcePath"] == path }
                             });
-                            if ui.selectable_label(row_selected, label).on_hover_text(path).clicked() {
+                            let detail = if resource["kind"] == "registered-specimen" {
+                                format!("{} · {}", resource["componentId"].as_str().unwrap_or("Registered definition"), resource["profileRef"].as_str().unwrap_or(""))
+                            } else { path.to_owned() };
+                            if ui.selectable_label(row_selected, label).on_hover_text(detail).clicked() {
                                 selected = Some(resource.clone());
                             }
                         });
+                        if let (Some(level), Some(target)) = (resource["level"].as_str(), resource["target"].as_str()) {
+                            ui.small(format!("{level} · {target} · {}", resource["componentVersion"].as_str().unwrap_or("")));
+                        }
                         if let Some(reason)=resource["previewNotice"].as_str(){ui.small(reason);}
                         ui.small(if resource["kind"] == "registered-specimen" && resource["actualWebPreview"] != true {
                             "Registered definition · preview unavailable · source retained"
@@ -1480,7 +1493,7 @@ impl Workspace {
                 ui.heading(if !self.validated { "Selected design" } else if self.actual_preview() { "Native canvas" } else { "Protected composition structure" });
                 if !self.validated {
                     if self.busy.is_some() {
-                        ui.spinner();
+                        crate::cityos_jobs::progress_marker(ui);
                     }
                     if self.is_specimen() && self.busy.is_none() {
                         ui.label("Preview and canvas availability");
@@ -1803,6 +1816,19 @@ mod tests {
         assert!(workspace.error.is_some());
         assert!(workspace.pending.is_none() && workspace.specimen_request.is_none());
         assert!(workspace.preview.is_none() && workspace.render_started.is_none());
+    }
+    #[test]
+    fn specimen_regeneration_retains_previous_receipt_and_panel_geometry_even_if_helper_is_unavailable() {
+        let mut workspace = specimen_workspace();
+        let receipt = specimen_receipt(&workspace);
+        assert!(workspace.accept_specimen_preview(receipt.clone(), "FixturePreview"));
+        workspace.host.url = receipt["url"].as_str().map(str::to_owned);
+        workspace.viewport.1 += 24;
+        workspace.request_specimen_preview();
+        assert_eq!(workspace.preview, Some(receipt.clone()), "Status and viewport rows must remain present during regeneration");
+        assert_eq!(workspace.host.url.as_deref(), receipt["url"].as_str());
+        assert!(!workspace.current);
+        assert!(workspace.error.is_some(), "This fixture deliberately has no configured helper");
     }
     #[test]
     #[ignore = "requires the matching packaged renderer; exercised by the Windows delivery check"]

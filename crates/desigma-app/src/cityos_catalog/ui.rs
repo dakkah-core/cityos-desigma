@@ -223,7 +223,7 @@ impl Browser {
                     if ui.button("Cancel").clicked() {
                         self.cancelled.store(true, Ordering::Release);
                     }
-                    ui.spinner();
+                    crate::cityos_jobs::progress_marker(ui);
                 } else if ui.button("Refresh").clicked() {
                     self.refresh();
                 }
@@ -442,13 +442,13 @@ impl Browser {
                 if ui.button("Connection settings").clicked() { self.settings_open = true; }
                 return;
             }
-            ui.spinner();
+            crate::cityos_jobs::progress_marker(ui);
             ui.label("Reading your repository…");
             ui.label(RichText::new("The library will appear here when the first capture is ready.").color(theme::TEXT_SECONDARY));
             return;
         }
         if waiting {
-            ui.spinner();
+            crate::cityos_jobs::progress_marker(ui);
             return;
         }
         if self.entries.is_empty() {
@@ -635,7 +635,7 @@ impl Browser {
                             preview::show(ui, &entry, &specimen["data"]);
                         }
                     } else {
-                        ui.spinner();
+                        crate::cityos_jobs::progress_marker(ui);
                         ui.label(if self.activity == "Refreshing repository" {
                             "Preview queued while the repository refreshes…"
                         } else {
@@ -701,7 +701,7 @@ impl Browser {
     fn status(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             if self.busy {
-                ui.spinner();
+                crate::cityos_jobs::progress_marker(ui);
                 ui.label(crate::cityos_jobs::resource_status().unwrap_or(self.activity));
             } else if self.error.is_some() {
                 ui.label("Refresh unavailable · previous catalog retained").on_hover_text(self.error.as_deref().unwrap_or(""));

@@ -130,6 +130,11 @@ impl Library {
     /// Recovered new baselines also fence out stale autosaves in the library.
     pub fn save_checkpoint_reconciled(&self, id: &str, candidate: &DocumentCheckpoint) -> Result<CheckpointSaveReceipt> {
         let _guard = crate::store::write_lock();
+        self.save_checkpoint_reconciled_locked(id, candidate)
+    }
+
+    /// Caller retains the writer lock through its compare/install/readback transaction.
+    pub(crate) fn save_checkpoint_reconciled_locked(&self, id: &str, candidate: &DocumentCheckpoint) -> Result<CheckpointSaveReceipt> {
         let expected = DocumentCheckpoint::from_json(&candidate.to_json()?)?.to_json()?;
         let outcome = self.save_checkpoint_payloads_locked(id, candidate, BTreeMap::new());
         match self.load_checkpoint_locked(id) {

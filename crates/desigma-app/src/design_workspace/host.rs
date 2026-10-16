@@ -3,6 +3,21 @@ use serde_json::Value;
 use std::cell::Cell;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+
+/// Convert one layout observation consistently at every supported Windows DPI.
+/// Reject invalid geometry before touching a live child window.
+#[cfg(any(windows, test))]
+fn physical_bounds(rect: egui::Rect, scale: f32) -> Result<[i32; 4], String> {
+    if !scale.is_finite() || scale <= 0. || !rect.is_finite() || rect.width() <= 0. || rect.height() <= 0. {
+        return Err("Preview panel geometry is unavailable".into());
+    }
+    let values = [rect.min.x * scale, rect.min.y * scale, rect.width() * scale, rect.height() * scale];
+    if values.iter().any(|value| !value.is_finite() || *value >= i32::MAX as f32 || *value <= i32::MIN as f32) {
+        return Err("Preview panel geometry exceeds platform bounds".into());
+    }
+    Ok([values[0].round() as i32, values[1].round() as i32,
+        values[2].round().max(1.) as i32, values[3].round().max(1.) as i32])
+}
 #[derive(Default)]
 pub struct Host {
     #[cfg(windows)]
@@ -33,6 +48,7 @@ impl Host {
         #[cfg(windows)]
         if let Some(view) = &self.view {
             if self.visible.replace(false) {
+                let _ = view.evaluate_script("window.dispatchEvent(new CustomEvent('cityos-preview-visibility',{detail:false}))");
                 let _ = view.set_visible(false);
             }
         }
@@ -56,16 +72,11 @@ impl Host {
     pub fn show(&mut self, frame: &eframe::Frame, url: &str, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> Result<(), String> {
         #[cfg(windows)]
         {
+            let bounds_key = physical_bounds(rect, scale)?;
             let bounds = wry::Rect {
-                position: wry::dpi::PhysicalPosition::new((rect.min.x * scale).round() as i32, (rect.min.y * scale).round() as i32).into(),
-                size: wry::dpi::PhysicalSize::new((rect.width() * scale).max(1.).round() as u32, (rect.height() * scale).max(1.).round() as u32).into(),
+                position: wry::dpi::PhysicalPosition::new(bounds_key[0], bounds_key[1]).into(),
+                size: wry::dpi::PhysicalSize::new(bounds_key[2] as u32, bounds_key[3] as u32).into(),
             };
-            let bounds_key = [
-                (rect.min.x * scale).round() as i32,
-                (rect.min.y * scale).round() as i32,
-                (rect.width() * scale).max(1.).round() as i32,
-                (rect.height() * scale).max(1.).round() as i32,
-            ];
             let parsed = url::Url::parse(url).map_err(|e: url::ParseError| e.to_string())?;
             if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") || parsed.port().is_none() {
                 return Err("Preview origin rejected".into());
@@ -126,6 +137,7 @@ impl Host {
                 }
                 if !self.visible.replace(true) {
                     view.set_visible(true).map_err(|e| e.to_string())?;
+                    view.evaluate_script("window.dispatchEvent(new CustomEvent('cityos-preview-visibility',{detail:true}))").map_err(|e| e.to_string())?;
                 }
             }
             Ok(())
@@ -141,6 +153,24 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn child_bounds_use_the_same_rounding_at_each_required_dpi() {
+        let rect = egui::Rect::from_min_size(egui::pos2(80., 120.), egui::vec2(640., 480.));
+        for (scale, expected) in [(1., [80,120,640,480]), (1.25,[100,150,800,600]),
+            (1.5,[120,180,960,720]), (2.,[160,240,1280,960])] {
+            assert_eq!(physical_bounds(rect, scale).unwrap(), expected);
+        }
+        assert_eq!(physical_bounds(egui::Rect::from_min_size(egui::pos2(0.25, 0.75), egui::vec2(0.1, 0.1)), 1.5).unwrap(), [0,1,1,1]);
+    }
+    #[test]
+    fn invalid_layout_never_reaches_the_native_child_window() {
+        let valid = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640., 480.));
+        for scale in [0., -1., f32::NAN, f32::INFINITY, f32::MAX] { assert!(physical_bounds(valid, scale).is_err()); }
+        for rect in [egui::Rect::NOTHING, egui::Rect::EVERYTHING,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.,480.))] {
+            assert!(physical_bounds(rect, 1.).is_err());
+        }
+    }
     #[test]
     fn preview_storage_uses_the_application_cache_and_survives_view_reset() {
         let mut host = Host::default();
