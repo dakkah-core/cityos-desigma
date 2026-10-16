@@ -237,13 +237,13 @@ fn typing_during_debounce_keeps_one_back_location_and_clears_stale_inline_status
 #[test]
 fn search_coalesces_keystrokes_and_dispatches_before_the_interaction_budget() {
     let (mut browser,_responses,requests)=fixture();
-    browser.summary=Some(json!({})); browser.auto_refresh=false;
+    browser.auto_refresh=false;
     browser.filters.search="context".into(); browser.filters_changed();
     browser.filters.search="context capsule".into(); browser.filters_changed();
     browser.filter_changed=Some(Instant::now()-Duration::from_millis(125));
     browser.tick();
     match requests.try_recv().expect("Search should dispatch within the 150 ms interaction budget") {
-        Job::Query(_,filters,offset)=>{assert_eq!(filters.search,"context capsule");assert_eq!(offset,0);},
+        Job::Query(_,filters,offset,binding)=>{assert_eq!(filters.search,"context capsule");assert_eq!(offset,0);assert_eq!(binding.generation,"first");},
         _=>panic!("Only the final query should run"),
     }
     assert!(requests.try_recv().is_err());
@@ -436,6 +436,7 @@ fn fixture() -> (Browser, Sender<Reply>, Receiver<Job>) {
     browser.summary = Some(
         json!({"generationId":"first","snapshot":{"mode":"committed","canonicalCommit":"1234567890"},"entryCount":1,"navigation":{"levels":[{"id":"L0","name":"Foundation","count":1}],"products":[]}}),
     );
+    browser.catalog_binding = Some(CatalogBinding { config: browser.reader_config(), mode: browser.mode.clone(), generation: "first".into() });
     browser.entries = vec![entry("one")];
     browser.total = 1;
     browser.displayed_filters = browser.filters.clone();
@@ -477,6 +478,183 @@ fn newer_selection_wins_when_materialization_is_in_flight() {
     browser.tick();
     assert!(browser.busy);
     assert_eq!(browser.epoch, 5);
+}
+
+#[test]
+fn catalog_refresh_filters_wait_for_cancellation_then_query_the_retained_generation() {
+    let (mut browser, tx, requests) = fixture();
+    // Local notifications can keep arriving while a debounced search is pending.
+    browser.mode = "local".into();
+    browser.summary.as_mut().unwrap()["snapshot"]["mode"] = json!("local");
+    browser.catalog_binding.as_mut().unwrap().mode = "local".into();
+    browser.refresh();
+    let scan_epoch = browser.epoch;
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, false))));
+    browser.filters.search = "latest search".into();
+    browser.filters_changed();
+    assert!(browser.cancelled.load(Ordering::Acquire));
+    tx.send(Reply::SourceChanged).unwrap();
+    tx.send(Reply::Scan(scan_epoch.wrapping_sub(1), Ok(json!({"generationId":"stale","snapshot":{"mode":"local"}})))).unwrap();
+    browser.tick();
+    assert!(browser.busy && browser.cancelled.load(Ordering::Acquire));
+    assert_eq!(browser.epoch, scan_epoch);
+    assert!(requests.try_recv().is_err());
+    tx.send(Reply::Scan(scan_epoch, Err("Catalog request cancelled; previous generation retained".into()))).unwrap();
+    browser.tick();
+    assert!(!browser.busy && !browser.cancelled.load(Ordering::Acquire));
+    assert!(requests.try_recv().is_err(), "Debounce must finish before another refresh or read");
+    browser.filter_changed = Some(Instant::now() - FILTER_DEBOUNCE);
+    browser.tick();
+    match requests.try_recv().unwrap() {
+        Job::Query(epoch, filters, 0, binding) => {
+            assert_eq!(binding.generation, "first");
+            assert_eq!(binding.mode, "local");
+            assert_eq!(binding.config, browser.reader_config());
+            assert_eq!(filters.search, "latest search");
+            tx.send(Reply::Query(epoch, filters, 0, Ok(Page { entries: vec![entry("matching")], total: 1, next_offset: None }))).unwrap();
+        }
+        _ => panic!("Changed filters must precede another background scan"),
+    }
+    browser.poll();
+    assert_eq!(browser.entries[0].id, "matching");
+    assert_eq!(browser.displayed_filters, browser.filters);
+    assert_eq!(browser.summary.as_ref().unwrap()["generationId"], "first");
+    assert_eq!(browser.refresh_failures, 0);
+    assert!(browser.error.is_none());
+}
+
+#[test]
+fn catalog_refresh_latest_selection_materializes_only_after_scan_settlement() {
+    let (mut browser, tx, requests) = fixture();
+    browser.refresh();
+    let scan_epoch = browser.epoch;
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(..))));
+    browser.select(entry("two"));
+    browser.select(entry("three"));
+    browser.tick();
+    assert!(browser.busy && browser.pending_selection);
+    assert!(browser.cancelled.load(Ordering::Acquire));
+    assert!(requests.try_recv().is_err());
+    tx.send(Reply::Scan(scan_epoch, Err("CityOS background work cancelled; previous generation retained".into()))).unwrap();
+    browser.tick();
+    match requests.try_recv().unwrap() {
+        Job::Materialize(epoch, id, binding) => {
+            assert_eq!(id, "three");
+            assert_eq!(binding.generation, "first");
+            assert!(!browser.cancelled.load(Ordering::Acquire));
+            tx.send(Reply::Scan(scan_epoch, Ok(json!({"generationId":"late","snapshot":{"mode":"committed"}})))).unwrap();
+            tx.send(Reply::Materialize(epoch, id, Ok(json!({"entry":entry("three"),"digest":"digest","data":{"$value":3}})))).unwrap();
+        }
+        _ => panic!("The latest selection must read the retained session"),
+    }
+    browser.poll();
+    assert_eq!(browser.selected.as_ref().unwrap().id, "three");
+    assert!(browser.specimen.is_some());
+    assert_eq!(browser.summary.as_ref().unwrap()["generationId"], "first");
+    assert!(!browser.busy && browser.error.is_none());
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn catalog_refresh_initial_read_without_a_generation_is_not_cancelled_by_interaction() {
+    for selection in [false, true] {
+        let (mut browser, tx, requests) = fixture();
+        let first = browser.summary.take().unwrap();
+        browser.catalog_binding = None;
+        browser.entries.clear();
+        browser.refresh();
+        assert_eq!(browser.activity, "Reading repository");
+        assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
+        if selection { browser.select(entry("one")); }
+        else { browser.filters.search = "initial search".into(); browser.filters_changed(); }
+        browser.tick();
+        assert!(browser.busy);
+        assert!(!browser.cancelled.load(Ordering::Acquire));
+        assert!(requests.try_recv().is_err());
+        tx.send(Reply::Scan(browser.epoch, Ok(first))).unwrap();
+        browser.tick();
+        assert!(matches!(requests.try_recv(), Ok(Job::Query(_, _, 0, binding)) if binding.generation == "first"));
+        assert!(browser.usable_generation().is_some());
+    }
+}
+
+#[test]
+fn catalog_refresh_retention_requires_cancellation_and_a_matching_last_good_session() {
+    for message in ["Catalog request cancelled; previous generation retained", "CityOS background work cancelled; previous generation retained"] {
+        let result = Err(message.to_string());
+        assert!(retain_cancelled_refresh(&result, true, true, true));
+        assert!(!retain_cancelled_refresh(&result, false, true, true));
+        assert!(!retain_cancelled_refresh(&result, true, false, true));
+        assert!(!retain_cancelled_refresh(&result, true, true, false));
+    }
+    for message in ["Reader timed out", "Catalog request cancelled but protocol failed", "GENERATION_OBSOLETE"] {
+        assert!(!retain_cancelled_refresh(&Err(message.into()), true, true, true));
+    }
+    assert!(!retain_cancelled_refresh(&Ok(json!({})), true, true, true));
+}
+
+#[test]
+fn catalog_refresh_changed_configuration_or_mode_cannot_reuse_a_displayed_generation() {
+    for change in 0..7 {
+        let (mut browser, _, requests) = fixture();
+        match change {
+            0 => browser.repository = "different-repository".into(),
+            1 => browser.reader = "different-reader".into(),
+            2 => browser.node = "different-node".into(),
+            3 => browser.cache = Some(PathBuf::from("different-cache")),
+            4 => browser.canonical_ref = Some("different-commit".into()),
+            5 => browser.mode = "local".into(),
+            _ => browser.summary.as_mut().unwrap()["generationId"] = json!("different-generation"),
+        }
+        assert!(browser.usable_generation().is_none());
+        browser.query(0);
+        browser.select(entry("one"));
+        browser.tick();
+        assert!(requests.try_recv().is_err());
+        browser.refresh();
+        assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
+        assert_eq!(browser.activity, "Reading repository");
+        browser.filters.search = "new".into();
+        browser.filters_changed();
+        assert!(!browser.cancelled.load(Ordering::Acquire));
+    }
+}
+
+#[test]
+fn catalog_refresh_config_change_during_scan_rejects_its_result_and_old_reads() {
+    let (mut browser, tx, requests) = fixture();
+    browser.refresh();
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(..))));
+    browser.reader = "new-reader".into();
+    tx.send(Reply::Scan(browser.epoch, Ok(json!({"generationId":"wrong-config","snapshot":{"mode":"committed"}})))).unwrap();
+    browser.poll();
+    assert_eq!(browser.summary.as_ref().unwrap()["generationId"], "first");
+    assert!(browser.usable_generation().is_none() && browser.error.is_some());
+    browser.query(0);
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn catalog_refresh_failure_preserves_display_and_explicit_refresh_reconnects_with_cache() {
+    let (mut browser, tx, requests) = fixture();
+    let previous = browser.summary.clone();
+    browser.refresh();
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(..))));
+    browser.filters.search = "changed".into();
+    browser.filters_changed();
+    tx.send(Reply::Scan(browser.epoch, Err("Reader timed out".into()))).unwrap();
+    browser.poll();
+    assert_eq!(browser.summary, previous);
+    assert_eq!(browser.entries[0].id, "one");
+    assert!(browser.catalog_binding.is_none());
+    assert_eq!(browser.refresh_failures, 1);
+    browser.query(0);
+    assert!(requests.try_recv().is_err());
+    browser.refresh();
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
+    tx.send(Reply::Scan(browser.epoch, Ok(previous.unwrap()))).unwrap();
+    browser.poll();
+    assert!(matches!(requests.try_recv(), Ok(Job::Query(_, filters, 0, binding)) if filters.search == "changed" && binding.generation == "first"));
 }
 #[test]
 fn pagination_appends_and_unchanged_refresh_preserves_selection() {

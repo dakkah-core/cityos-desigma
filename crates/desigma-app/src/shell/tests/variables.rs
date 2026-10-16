@@ -88,6 +88,27 @@ fn open_view(s: &mut Sim, full: bool) {
     }
 }
 
+#[test]
+fn variables_panel_keeps_document_save_shortcut_available() {
+    let mut s = Sim::new();
+    let path = std::env::temp_dir().join(format!("desigma-variable-save-{}.desigma", uuid::Uuid::new_v4()));
+    crate::io::save_path(&s.app().doc, &path).unwrap();
+    s.shell.app.file_path = Some(path.clone());
+    open_view(&mut s, false);
+    let variable = var(s.app(), "Surface/Card").id.clone();
+    let (_, light, _) = theme_ids(s.app());
+    let expected = VariableValue::Color(Color::rgb(0, 55, 77));
+    assert!(s.shell.app.edit_variables(|store| {
+        assert!(store.set_value(&variable, &light, expected.clone()));
+        (vec![], vec![])
+    }));
+    assert_ne!(crate::io::load_path(&path).unwrap().variables[&variable].values[&light], expected);
+    s.cmd_key(Key::S);
+    assert_eq!(crate::io::load_path(&path).unwrap().variables[&variable].values[&light], expected);
+    assert!(s.app().vars.open, "Saving does not dismiss the variables panel");
+    std::fs::remove_file(path).unwrap();
+}
+
 fn row_order(s: &Sim) -> Vec<String> {
     let c = s.app().vars.collection.clone().unwrap();
     s.app().doc.variable_collections[&c].variables.iter().map(|id| s.app().doc.variables[id].name.clone()).collect()

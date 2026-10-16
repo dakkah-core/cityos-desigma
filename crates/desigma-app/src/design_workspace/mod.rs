@@ -45,6 +45,34 @@ fn specimen_locator(resource: &Value) -> Option<Value> {
     Some(Value::Object(locator))
 }
 
+fn semantic_change_label(change: &Value) -> String {
+    let field = change.get("field").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let node = change.get("nodeId").and_then(Value::as_str).filter(|s| !s.is_empty());
+    match (node, field) {
+        (Some(node), Some(field)) => format!("{node}.{field}"),
+        (_, Some(field)) => field.into(),
+        _ => change.get("sourcePointer").and_then(Value::as_str).unwrap_or("Semantic change").into(),
+    }
+}
+
+fn semantic_change_value_text(value: Option<&Value>, document: Option<&Value>) -> String {
+    let Some(value) = value else { return "Unavailable (value not provided)".into(); };
+    let reference = value.get("resource").is_some()
+        && (value.get("nodeId").is_some() || value.get("pointer").is_some());
+    let resolved = if reference {
+        let resolved = document.and_then(|document| {
+            let resource = value.get("resource")?;
+            let id = resource.get("id")?.as_str()?;
+            let revision = resource.get("revision")?.as_str()?;
+            if document.get("id")?.as_str()? != id || document.get("revision")?.as_str()? != revision { return None; }
+            document.pointer(value.get("pointer")?.as_str()?)
+        });
+        let Some(resolved) = resolved else { return format!("Unavailable (unresolved reference: {value})"); };
+        resolved
+    } else { value };
+    resolved.as_str().map(str::to_owned).unwrap_or_else(|| resolved.to_string())
+}
+
 pub struct Workspace {
     pub open: bool,
     config: Option<Config>,
@@ -929,6 +957,13 @@ impl Workspace {
         self.resources.extend(value["specimens"].as_array().into_iter().flatten()
             .filter(|r| r["kind"] == "registered-specimen").cloned());
     }
+    fn choose_design_file(&mut self) {
+        self.picker_open = self.changes_mode || !self.picker_open;
+        self.changes_mode = false;
+        if self.resources.is_empty() {
+            self.send(json!({"op":"Resources"}));
+        }
+    }
     pub fn show(&mut self, app: &mut App, ui: &mut egui::Ui, frame: &eframe::Frame) {
         ui.spacing_mut().item_spacing = egui::vec2(10., 8.);
         ui.spacing_mut().button_padding = egui::vec2(12., 8.);
@@ -988,10 +1023,7 @@ impl Workspace {
                 }
                 ui.strong(if self.preview_only { "Design preview" } else { "CityOS workspace" });
                 if ui.add_enabled(self.busy.is_none()&&!self.recovery_pending, egui::Button::new("Choose design file…")).clicked() {
-                    self.picker_open = !self.picker_open;
-                    if self.resources.is_empty() {
-                        self.send(json!({"op":"Resources"}));
-                    }
+                    self.choose_design_file();
                 }
                 if self.preview_only && !self.harness {
                     if ui
@@ -1153,8 +1185,10 @@ impl Workspace {
                             ui.label(format!("{} authored operations",export["operationCount"]));
                             if let Some(changes)=export["changeset"]["changes"].as_array() {for change in changes {
                                 ui.group(|ui| {
-                                    ui.strong(change["sourcePointer"].as_str().or_else(||change["field"].as_str()).unwrap_or("Semantic change"));
-                                    ui.label(format!("{} → {}",change["before"],change["after"]));
+                                    ui.strong(semantic_change_label(change));
+                                    ui.label(format!("{} → {}",
+                                        semantic_change_value_text(change.get("before"), export.get("base")),
+                                        semantic_change_value_text(change.get("after"), export.get("candidate"))));
                                 });
                             }}
                             ui.collapsing("Complete semantic export",|ui|{ui.monospace(compare);});
@@ -1487,6 +1521,64 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn semantic_change_display_resolves_frame_references_and_rfc6901_pointers() {
+        let base = json!({"id":"frame","revision":"1","root":{"slots":{"material":[{"props":{"elevation":"flat","a/b~c":"before"}}]}}});
+        let candidate = json!({"id":"frame","revision":"2","root":{"slots":{"material":[{"props":{"elevation":"resting","a/b~c":"after"}}]}}});
+        let change = json!({"nodeId":"material","field":"elevation",
+            "before":{"resource":{"id":"frame","revision":"1"},"nodeId":"material","pointer":"/root/slots/material/0/props/elevation"},
+            "after":{"resource":{"id":"frame","revision":"2"},"nodeId":"material","pointer":"/root/slots/material/0/props/elevation"}});
+        let export = json!({"base":base,"candidate":candidate,"changeset":{"changes":[change]}});
+        let original = export.clone();
+        let change = &export["changeset"]["changes"][0];
+        assert_eq!(semantic_change_label(change), "material.elevation");
+        assert_eq!(semantic_change_value_text(change.get("before"), export.get("base")), "flat");
+        assert_eq!(semantic_change_value_text(change.get("after"), export.get("candidate")), "resting");
+        let escaped = json!({"resource":{"id":"frame","revision":"1"},"nodeId":"material","pointer":"/root/slots/material/0/props/a~1b~0c"});
+        assert_eq!(semantic_change_value_text(Some(&escaped), export.get("base")), "before");
+        assert_eq!(export, original, "Display must leave the complete raw export untouched");
+    }
+    #[test]
+    fn semantic_change_display_preserves_accordion_scalar_values() {
+        let change = json!({"sourcePointer":"/root/props/allowMultiple","before":false,"after":true});
+        assert_eq!(semantic_change_label(&change), "/root/props/allowMultiple");
+        assert_eq!(semantic_change_value_text(change.get("before"), None), "false");
+        assert_eq!(semantic_change_value_text(change.get("after"), None), "true");
+        assert_eq!(semantic_change_value_text(Some(&Value::Null), None), "null");
+    }
+    #[test]
+    fn semantic_change_display_marks_missing_or_unknown_references_unavailable() {
+        let document = json!({"id":"frame","revision":"1","root":{"props":{"elevation":"flat"}}});
+        for reference in [
+            json!({"resource":{"id":"frame","revision":"1"},"nodeId":"material","pointer":"/root/props/missing"}),
+            json!({"resource":{"id":"frame","revision":"1"},"nodeId":"material"}),
+            json!({"resource":{"id":"frame","revision":"1"},"nodeId":"material","pointer":"root/props/elevation"}),
+            json!({"resource":{"id":"other","revision":"1"},"nodeId":"material","pointer":"/root/props/elevation"}),
+            json!({"resource":{"id":"frame","revision":"2"},"nodeId":"material","pointer":"/root/props/elevation"}),
+        ] {
+            assert_eq!(semantic_change_value_text(Some(&reference), Some(&document)),
+                format!("Unavailable (unresolved reference: {reference})"));
+        }
+        assert_eq!(semantic_change_value_text(None, Some(&document)), "Unavailable (value not provided)");
+    }
+    #[test]
+    fn global_design_chooser_exits_changes_and_preserves_design_toggle() {
+        for (changes_mode, picker_open, expected_open) in [
+            (true, false, true),
+            (true, true, true),
+            (false, false, true),
+            (false, true, false),
+        ] {
+            let mut workspace = Workspace::default();
+            workspace.changes_mode = changes_mode;
+            workspace.picker_open = picker_open;
+            workspace.resources = vec![json!({"sourcePath":"selected.json"})];
+            workspace.choose_design_file();
+            assert!(!workspace.changes_mode, "The global chooser must reveal Design");
+            assert_eq!(workspace.picker_open, expected_open, "changes={changes_mode}, picker={picker_open}");
+            assert!(workspace.busy.is_none(), "Cached choices need no bridge request");
+        }
+    }
     fn registered_specimen(component: &str, locale: &str) -> Value {
         json!({"kind":"registered-specimen","resourceId":format!("web-fixture/{component}@1/{locale}"),
             "componentId":component,"componentVersion":"1","profileRef":"fixture-profile","targetProfileRef":"web-fixture",

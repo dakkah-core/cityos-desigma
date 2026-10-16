@@ -40,8 +40,51 @@ struct Location {
 
 enum Job {
     Scan(u64, ReaderConfig, String, bool),
-    Query(u64, Filters, usize),
-    Materialize(u64, String),
+    Query(u64, Filters, usize, CatalogBinding),
+    Materialize(u64, String, CatalogBinding),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CatalogBinding {
+    config: ReaderConfig,
+    mode: String,
+    generation: String,
+}
+
+fn scan_cancelled(error: &str) -> bool {
+    matches!(error, "Catalog request cancelled; previous generation retained"
+        | "CityOS background work cancelled; previous generation retained")
+}
+
+fn retain_cancelled_refresh(result: &Result<Value, String>, cancelled: bool, same_session: bool, had_generation: bool) -> bool {
+    cancelled && same_session && had_generation && result.as_ref().is_err_and(|error| scan_cancelled(error))
+}
+
+fn read_catalog<T>(client: &mut Option<Client>, session: &mut Option<CatalogBinding>, fence: &mut bool,
+    binding: &CatalogBinding, read: impl FnOnce(&mut Client) -> Result<T, String>) -> Result<T, String> {
+    let result = (|| {
+        let current = client.as_mut().ok_or("Refresh the repository first")?;
+        if session.as_ref() != Some(binding) || current.generation.as_deref() != Some(binding.generation.as_str()) {
+            return Err("Catalog session changed; refresh the repository before reading".into());
+        }
+        if *fence {
+            // Client's cancellation error does not distinguish an ack from a killed
+            // helper. This no-op Cancel is ordered after the original Cancel and
+            // Client validates its reply against the retained generation. The
+            // reader fences retired scan callbacks before acknowledging Cancel;
+            // worker termination/cleanup may still be finishing asynchronously.
+            current.request("Cancel", serde_json::json!({"targetRequestId":"settled-refresh"}), Duration::from_secs(2))?;
+            *fence = false;
+        }
+        read(current)
+    })();
+    if let Err(error) = result {
+        *client = None;
+        *session = None;
+        *fence = false;
+        return Err(format!("{error}. Previous catalog retained. Use Refresh to reconnect from cache."));
+    }
+    result
 }
 enum Reply {
     Scan(u64, Result<Value, String>),
@@ -80,6 +123,8 @@ pub struct Browser {
     epoch: u64,
     busy: bool,
     summary: Option<Value>,
+    catalog_binding: Option<CatalogBinding>,
+    scanning: Option<(ReaderConfig, String)>,
     entries: Vec<Entry>,
     total: usize,
     next: Option<usize>,
@@ -144,12 +189,12 @@ impl Browser {
         let worker_cancel = cancelled.clone();
         std::thread::spawn(move || {
             let mut client: Option<Client> = None;
-            let mut previous_config: Option<ReaderConfig> = None;
-            let mut previous_mode = String::new();
+            let mut session: Option<CatalogBinding> = None;
+            let mut fence = false;
             loop {
                 // Job sends interrupt this wait immediately. Only local source
                 // notifications require the bounded 750 ms drain interval.
-                let interval = if previous_mode == "local" { LOCAL_EVENT_POLL } else { IDLE_REPAINT };
+                let interval = if session.as_ref().is_some_and(|binding| binding.mode == "local") { LOCAL_EVENT_POLL } else { IDLE_REPAINT };
                 let job = match requests.recv_timeout(interval) {
                     Ok(job) => job,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -166,7 +211,11 @@ impl Browser {
                     Job::Scan(epoch, config, mode, prefer_cache) => {
                         // Preserve a healthy session for incremental refresh. Configuration
                         // changes replace the child and cannot reuse its old generations.
-                        let result = crate::cityos_jobs::run(false,Some(&worker_cancel),|| if previous_config.as_ref() == Some(&config) && previous_mode == mode && client.is_some() {
+                        let same_session = session.as_ref().is_some_and(|binding| binding.config == config && binding.mode == mode)
+                            && client.is_some();
+                        let had_generation = client.as_ref().is_some_and(|c| session.as_ref().is_some_and(|binding|
+                            c.generation.as_deref() == Some(binding.generation.as_str())));
+                        let result = crate::cityos_jobs::run(false,Some(&worker_cancel),|| if same_session {
                             client.as_mut().unwrap().scan(&config, &mode)
                         } else {
                             client = None;
@@ -176,20 +225,30 @@ impl Browser {
                                 result
                             })
                         });
-                        previous_config = Some(config);
-                        previous_mode = mode;
-                        if result.is_err() {
+                        let result = result.and_then(|summary| {
+                            if summary["snapshot"]["mode"].as_str() != Some(mode.as_str()) {
+                                return Err("The reader returned a different source mode".into());
+                            }
+                            let generation = summary["generationId"].as_str().filter(|id| !id.is_empty()).ok_or("Missing generation identity")?;
+                            session = Some(CatalogBinding { config, mode, generation: generation.into() });
+                            fence = false;
+                            Ok(summary)
+                        });
+                        if retain_cancelled_refresh(&result, worker_cancel.load(Ordering::Acquire), same_session, had_generation) {
+                            fence = true;
+                        } else if result.is_err() {
                             client = None;
-                            previous_config = None;
+                            session = None;
+                            fence = false;
                         }
                         Reply::Scan(epoch, result)
                     }
-                    Job::Query(epoch, filters, offset) => {
-                        let result = client.as_mut().ok_or_else(|| "Refresh the repository first".to_string()).and_then(|c| c.query(&filters, offset));
+                    Job::Query(epoch, filters, offset, binding) => {
+                        let result = read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.query(&filters, offset));
                         Reply::Query(epoch, filters, offset, result)
                     }
-                    Job::Materialize(epoch, id) => {
-                        let result = client.as_mut().ok_or_else(|| "Refresh the repository first".to_string()).and_then(|c| c.materialize(&id));
+                    Job::Materialize(epoch, id, binding) => {
+                        let result = read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize(&id));
                         Reply::Materialize(epoch, id, result)
                     }
                 };
@@ -223,6 +282,8 @@ impl Browser {
             epoch: 0,
             busy: false,
             summary: None,
+            catalog_binding: None,
+            scanning: None,
             entries: vec![],
             total: 0,
             next: None,
@@ -259,37 +320,54 @@ impl Browser {
         }
         browser
     }
+    fn reader_config(&self) -> ReaderConfig {
+        ReaderConfig { node: self.node.clone().into(), reader: self.reader.clone().into(), repository: self.repository.clone().into(),
+            cache: self.cache.clone(), canonical_ref: self.canonical_ref.clone() }
+    }
+    fn usable_generation(&self) -> Option<&CatalogBinding> {
+        self.catalog_binding.as_ref().filter(|binding| binding.config == self.reader_config() && binding.mode == self.mode
+            && self.summary.as_ref().is_some_and(|summary| summary["generationId"].as_str() == Some(binding.generation.as_str())
+                && summary["snapshot"]["mode"].as_str() == Some(binding.mode.as_str())))
+    }
+    fn yield_to_catalog_read(&self) {
+        if self.busy && self.activity == "Refreshing repository" && self.usable_generation().is_some() {
+            // Keep the epoch and busy flag until Scan settles. Clearing cancellation
+            // or queueing a read here could revive the scan while it is cancelling.
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
     fn refresh(&mut self) {
         if self.busy {
             return;
         }
+        let prefer_cache = self.usable_generation().is_none();
         self.cancelled.store(false, Ordering::Release);
         self.epoch += 1;
         self.busy = true;
-        self.activity = if self.summary.is_some() { "Refreshing repository" } else { "Reading repository" };
+        self.activity = if prefer_cache { "Reading repository" } else { "Refreshing repository" };
         self.error = None;
         self.last_refresh = Instant::now();
-        let config = ReaderConfig {
-            node: self.node.clone().into(),
-            reader: self.reader.clone().into(),
-            repository: self.repository.clone().into(),
-            cache: self.cache.clone(),
-            canonical_ref: self.canonical_ref.clone(),
-        };
-        let _ = self.jobs.send(Job::Scan(self.epoch, config, self.mode.clone(), self.summary.is_none()));
+        let config = self.reader_config();
+        self.scanning = Some((config.clone(), self.mode.clone()));
+        let _ = self.jobs.send(Job::Scan(self.epoch, config, self.mode.clone(), prefer_cache));
     }
     pub fn yield_to_design(&self) {
         if self.busy && matches!(self.activity,"Reading repository"|"Refreshing repository") {self.cancelled.store(true,Ordering::Release);}
     }
     fn query(&mut self, offset: usize) {
         if self.busy {
+            self.yield_to_catalog_read();
             return;
         }
+        let Some(binding) = self.usable_generation().cloned() else {
+            self.error = Some("Refresh the repository before reading this source configuration".into());
+            return;
+        };
         self.cancelled.store(false, Ordering::Release);
         self.epoch += 1;
         self.busy = true;
         self.activity = "Finding items";
-        let _ = self.jobs.send(Job::Query(self.epoch, self.filters.clone(), offset));
+        let _ = self.jobs.send(Job::Query(self.epoch, self.filters.clone(), offset, binding));
     }
     fn poll(&mut self) {
         while let Ok(reply) = self.replies.try_recv() {
@@ -297,6 +375,17 @@ impl Browser {
                 Reply::Scan(epoch, result) if epoch == self.epoch => {
                     self.busy = false;
                     self.last_refresh = Instant::now();
+                    let scan = self.scanning.take();
+                    let cancelled_refresh = self.cancelled.load(Ordering::Acquire) && self.usable_generation().is_some()
+                        && scan.as_ref().is_some_and(|(config, mode)| *config == self.reader_config() && *mode == self.mode)
+                        && result.as_ref().is_err_and(|error| scan_cancelled(error));
+                    // The worker has returned from Scan (including its cancellation
+                    // handshake). Only now may an interactive read reset this flag.
+                    self.cancelled.store(false, Ordering::Release);
+                    if cancelled_refresh {
+                        self.error = None;
+                        continue;
+                    }
                     self.refresh_failures = if result.as_ref().is_ok_and(|summary| summary["stale"] != true || summary["restoredCache"] == true) {
                         0
                     } else {
@@ -304,25 +393,37 @@ impl Browser {
                     };
                     match result {
                         Ok(summary) => {
-                            if summary["snapshot"]["mode"].as_str() != Some(self.mode.as_str()) {
+                            if summary["snapshot"]["mode"].as_str() != Some(self.mode.as_str())
+                                || scan.as_ref().is_some_and(|(config, mode)| *config != self.reader_config() || *mode != self.mode) {
+                                self.catalog_binding = None;
                                 self.error = Some("The reader returned a different source mode. The previous catalog is still shown; refresh to retry.".into());
                             } else {
+                                let Some(generation) = summary["generationId"].as_str().filter(|id| !id.is_empty()) else {
+                                    self.catalog_binding = None;
+                                    self.error = Some("Missing generation identity; refresh to retry".into());
+                                    continue;
+                                };
+                                self.catalog_binding = Some(CatalogBinding { config: self.reader_config(), mode: self.mode.clone(), generation: generation.into() });
                                 let changed = self.summary.as_ref().is_none_or(|old| old["generationId"] != summary["generationId"]);
+                                let needs_query = changed || self.displayed_filters != self.filters || self.filter_changed.is_some();
                                 self.summary = Some(summary);
                                 if changed {
                                     self.clear_preview();
                                     self.pending_selection = self.selected.is_some();
+                                }
+                                if needs_query {
+                                    self.filter_changed = None;
                                     self.query(0);
                                 }
                             }
                         }
-                        Err(e) => self.error = Some(e),
+                        Err(e) => { self.catalog_binding = None; self.error = Some(e); },
                     }
                 }
                 Reply::Query(epoch, filters, offset, result) if epoch == self.epoch => {
                     self.busy = false;
                     match result {
-                        Ok(page) if filters == self.filters => {
+                        Ok(page) if filters == self.filters && self.usable_generation().is_some() => {
                             if offset == 0 {
                                 self.entries = page.entries;
                             } else {
@@ -333,12 +434,15 @@ impl Browser {
                             self.next = page.next_offset;
                         }
                         Ok(_) => {} // The user changed filters while the request was in flight.
-                        Err(e) => self.error = Some(e),
+                        Err(e) => { self.catalog_binding = None; self.error = Some(e); },
                     }
                 }
                 Reply::Materialize(epoch, id, result) if epoch == self.epoch => {
                     self.busy = false;
-                    if self.selected.as_ref().is_none_or(|entry| entry.id != id) {
+                    if result.is_err() { self.catalog_binding = None; }
+                    if let Err(error) = &result { self.error = Some(error.clone()); }
+                    if self.usable_generation().is_none() || self.selected.as_ref().is_none_or(|entry| entry.id != id) {
+                        if let Err(error) = result { self.preview_error = Some(error); }
                         continue;
                     }
                     match result {
@@ -357,7 +461,7 @@ impl Browser {
                             self.specimen = Some(value);
                             self.preview_error = None;
                         }
-                        Err(e) => self.preview_error = Some(e),
+                        Err(e) => { self.catalog_binding = None; self.preview_error = Some(e); },
                     }
                 }
                 Reply::SourceChanged => self.source_changed = true,
@@ -383,6 +487,7 @@ impl Browser {
         self.results_visible = true;
         self.clear_preview();
         self.pending_selection = false;
+        self.yield_to_catalog_read();
     }
     fn clear_preview(&mut self) {
         self.specimen_canvas = None;
@@ -413,6 +518,7 @@ impl Browser {
         self.pending_selection = self.selected.is_some();
         self.filter_changed = Some(Instant::now());
         self.last_interaction = Instant::now();
+        self.yield_to_catalog_read();
     }
     fn select(&mut self, entry: Entry) {
         self.last_interaction = Instant::now();
@@ -421,6 +527,7 @@ impl Browser {
         self.clear_preview();
         self.pending_selection = true;
         self.detail_tab = DetailTab::Preview;
+        self.yield_to_catalog_read();
     }
     fn refresh_delay(&self, now: Instant) -> Duration {
         let interval = Duration::from_secs((60_u64 << self.refresh_failures.min(4)).min(900));
@@ -439,9 +546,11 @@ impl Browser {
     fn tick(&mut self) {
         self.poll();
         if self.busy {
+            if self.filter_changed.is_some() || self.pending_selection { self.yield_to_catalog_read(); }
             return;
         }
-        if self.filter_changed.is_some_and(|t| t.elapsed() >= FILTER_DEBOUNCE) {
+        if let Some(changed) = self.filter_changed {
+            if changed.elapsed() < FILTER_DEBOUNCE { return; }
             self.filter_changed = None;
             if self.summary.is_some() {
                 self.query(0);
@@ -449,11 +558,15 @@ impl Browser {
         } else if self.pending_selection {
             self.pending_selection = false;
             if let Some(entry) = &self.selected {
+                let Some(binding) = self.usable_generation().cloned() else {
+                    self.preview_error = Some("Refresh the repository before loading this source configuration".into());
+                    return;
+                };
                 self.cancelled.store(false, Ordering::Release);
                 self.epoch += 1;
                 self.busy = true;
                 self.activity = "Loading preview";
-                let _ = self.jobs.send(Job::Materialize(self.epoch, entry.id.clone()));
+                let _ = self.jobs.send(Job::Materialize(self.epoch, entry.id.clone(), binding));
             }
         } else if self.auto_refresh && self.source_changed && self.mode == "local" {
             self.source_changed = false;
