@@ -8,6 +8,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+struct DraftTab {
+    document:Document,history:desigma_doc::History,path:Option<std::path::PathBuf>,file:Option<crate::home::LibFile>,
+    autosave:crate::home::Autosave,page:desigma_doc::NodeId,resource:Option<Value>,locale:String,theme:String,theme_id:String,
+}
+
 pub struct Workspace {
     pub open: bool,
     config: Option<Config>,
@@ -44,6 +49,11 @@ pub struct Workspace {
     requested_source: Option<String>,
     open_after_preview: bool,
     temporary_canvas: Option<Box<App>>,
+    tabs:BTreeMap<String,DraftTab>,
+    changes_mode:bool,
+    incoming:Option<Value>,
+    inline_identity:Option<String>,
+    requested_pin:Option<Value>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -83,6 +93,11 @@ impl Default for Workspace {
             requested_source: None,
             open_after_preview: false,
             temporary_canvas: None,
+            tabs:BTreeMap::new(),
+            changes_mode:false,
+            incoming:None,
+            inline_identity:None,
+            requested_pin:None,
         }
     }
 }
@@ -211,6 +226,7 @@ impl Workspace {
         self.pending = Some(Instant::now());
     }
     pub fn begin(&mut self, config: Config, source: Option<String>, preview_only: bool) {
+        self.inline_identity=None;self.requested_pin=None;self.changes_mode=false;
         self.host.reset();
         self.bridge = Some(bridge::Bridge::spawn(config.clone()));
         self.config = Some(config);
@@ -240,6 +256,7 @@ impl Workspace {
         self.send(json!({"op":"Resources"}));
     }
     fn open_resource(&mut self, resource: Value) {
+        self.changes_mode=false;self.incoming=None;
         self.host.reset();
         self.preview_only = true;
         self.validated = false;
@@ -257,8 +274,52 @@ impl Workspace {
         self.themes_loaded = false;
         self.send(json!({"op":"Open","resource":resource}));
     }
+    pub fn show_inline(&mut self,app:&mut App,frame:&eframe::Frame,config:Config,pin:Value,rect:egui::Rect,scale:f32)->String {
+        let key=serde_json::to_string(&pin).unwrap_or_default();
+        if self.inline_identity.as_deref()!=Some(&key){
+            let Some(source)=pin["sourcePath"].as_str() else{return "Preview source unavailable".into();};
+            self.begin(config,Some(source.into()),true);self.requested_pin=Some(pin);self.open=false;self.inline_identity=Some(key);
+        }
+        self.poll(app);
+        if let Some(error)=&self.error{self.host.hide();return error.clone();}
+        if let Some(url)=self.preview.as_ref().and_then(|p|p["url"].as_str()){
+            if let Err(error)=self.host.show(frame,url,rect,scale){return error;}
+        }
+        if self.current{format!("Current · revision {}",self.preview.as_ref().map(|p|p["draftRevision"].clone()).unwrap_or(Value::Null))}
+        else if let Some(operation)=&self.busy{format!("{operation}…")}else{"Preparing actual preview…".into()}
+    }
     fn actual_preview(&self) -> bool {
         self.harness || self.resource.as_ref().is_some_and(|r| r["actualWebPreview"] == true)
+    }
+    fn save_before_switch(app:&mut App)->Result<(),String>{
+        if app.home.is_some(){return Ok(());}
+        if app.lib_file.is_some(){return app.save_library_file();}
+        if let Some(path)=&app.file_path{return crate::io::save_path(&app.doc,path).map(|_|());}
+        if app.doc.cityos.is_some(){
+            let lib=app.lib.clone().ok_or("The library is unavailable. Save this draft before switching.")?;
+            let project=lib.list_projects().into_iter().find(|p|p.name=="CityOS drafts").map(Ok).unwrap_or_else(||lib.create_project("CityOS drafts")).map_err(|e|e.to_string())?;
+            let file=lib.create_file(&project.id,None,&app.doc.name,&app.doc).map_err(|e|e.to_string())?;
+            app.lib_file=Some(crate::home::LibFile{id:file.id,project_id:project.id,project:project.name,name:file.name});
+            app.autosave=crate::home::Autosave{seen_rev:app.canvas.tiles.rev(),saved_hash:crate::home::doc_hash(&app.doc),..Default::default()};
+            return Ok(());
+        }
+        if app.hist.can_undo(){return Err("Save your current design before opening a bound draft.".into());}Ok(())
+    }
+    fn suspend_current(&mut self,app:&mut App)->Result<(),String>{
+        let id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
+        if id.is_some()&&self.tabs.len()>=3{return Err("Four drafts are already loaded. Save and close an inactive tab before opening another.".into());}
+        Self::save_before_switch(app)?;
+        if let Some(id)=id{self.tabs.insert(id,DraftTab{document:app.doc.clone(),history:std::mem::take(&mut app.hist),path:app.file_path.clone(),file:app.lib_file.clone(),
+            autosave:std::mem::take(&mut app.autosave),page:app.page,resource:self.resource.clone(),locale:self.locale.clone(),theme:self.theme.clone(),theme_id:self.theme_id.clone()});}
+        Ok(())
+    }
+    fn activate_tab(&mut self,app:&mut App,id:&str){
+        let Some(tab)=self.tabs.remove(id) else{return;};
+        if let Err(error)=self.suspend_current(app){self.tabs.insert(id.into(),tab);self.error=Some(error);return;}
+        app.replace_document(tab.document,tab.path);app.hist=tab.history;app.lib_file=tab.file;app.autosave=tab.autosave;app.page=tab.page;app.home=None;
+        self.resource=tab.resource;self.locale=tab.locale;self.theme=tab.theme;self.theme_id=tab.theme_id;
+        self.changes_mode=false;self.incoming=None;
+        if let Some(config)=self.config.clone(){self.resume(config,app);}
     }
     fn install_staged(&mut self, app: &mut App) {
         if self.staged.is_none() {
@@ -270,23 +331,12 @@ impl Workspace {
         }
         // Previewing another file never replaces the editor document. An explicit
         // open must preserve the current document, including failed saves.
-        if app.home.is_none() && (app.doc.cityos.is_some() || app.hist.can_undo()) {
-            let saved = if app.lib_file.is_some() {
-                app.save_library_file().map(|_| ())
-            } else if let Some(path) = &app.file_path {
-                crate::io::save_path(&app.doc, path).map(|_| ())
-            } else {
-                Err("Save the current draft before opening another file. Its preview remains available.".into())
-            };
-            if let Err(error) = saved {
-                self.error = Some(error);
-                return;
-            }
-        }
+        if let Err(error)=self.suspend_current(app){self.error=Some(error);return;}
         let doc = self.staged.take().unwrap();
         app.replace_document(doc, None);
         app.home = None;
         self.preview_only = false;
+        self.changes_mode=false;self.incoming=None;
         self.temporary_canvas = None;
         self.observed = None;
         self.error = None;
@@ -306,6 +356,7 @@ impl Workspace {
         self.send(json!({"op":"Harness"}));
     }
     pub fn resume(&mut self, config: Config, app: &App) {
+        self.inline_identity=None;self.requested_pin=None;
         self.host.reset();
         self.config = Some(config);
         self.bridge = None;
@@ -390,6 +441,7 @@ impl Workspace {
                             self.resource_diagnostics = value["diagnostics"].as_array().cloned().unwrap_or_default();
                             if let Some(source) = self.requested_source.take() {
                                 if let Some(resource) = self.resources.iter().find(|r| r["sourcePath"] == source).cloned() {
+                                    let resource=self.requested_pin.take().unwrap_or(resource);
                                     self.open_resource(resource);
                                 } else {
                                     self.error = Some(format!("No canonical composition found at {source}. No substitute was opened."));
@@ -408,6 +460,7 @@ impl Workspace {
                         "Open" | "Command" | "Project" => match binding(value["draft"].clone(), &value["projection"]) {
                             Err(e) => self.error = Some(e),
                             Ok(document) => {
+                                self.incoming=None;
                                 self.resource = Some(value["resource"].clone());
                                 if self.preview_only {
                                     self.temporary_canvas = Some(Box::new(App::new(document.clone())));
@@ -454,8 +507,9 @@ impl Workspace {
                         }
                         "Export" => {
                             self.compare = Some(serde_json::to_string_pretty(&value).unwrap_or_default());
-                            self.compare_open = true;
+                            self.compare_open = !self.changes_mode;
                         }
+                        "Incoming"=>self.incoming=Some(value),
                         _ => {}
                     }
                 }
@@ -586,8 +640,13 @@ impl Workspace {
         }
         egui::Panel::top("cityos-workspace-actions").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("← Design library").clicked() {
+                if ui.button("Library").clicked() {
                     self.open = false;
+                }
+                if ui.selectable_label(!self.changes_mode,"Design").clicked(){self.changes_mode=false;}
+                if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Changes").selected(self.changes_mode)).clicked(){
+                    self.changes_mode=true;self.compare_open=false;
+                    if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Export","draft":draft}));}
                 }
                 ui.heading(if self.preview_only { "CityOS · Design preview" } else { "CityOS · Bound design workspace" });
                 if ui.add_enabled(self.busy.is_none(), egui::Button::new("Choose design file…")).clicked() {
@@ -651,6 +710,38 @@ impl Workspace {
                 }
             });
         });
+        let active_id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
+        if active_id.is_some()||!self.tabs.is_empty(){
+            let tabs:Vec<_>=self.tabs.iter().map(|(id,t)|(id.clone(),t.document.name.clone())).collect();
+            let mut activate=None;let mut close=None;
+            egui::Panel::top("cityos-draft-tabs").show(ui,|ui|{ui.horizontal_wrapped(|ui|{
+                if active_id.is_some()&&ui.selectable_label(!self.preview_only,format!("{} · {}",app.doc.name,if app.autosave.pending(){"unsaved"}else{"local draft"})).clicked(){
+                    if let Some(config)=self.config.clone(){self.resume(config,app);}
+                }
+                for(id,name)in tabs {if ui.add_enabled(self.busy.is_none(),egui::Button::new(name)).clicked(){activate=Some(id.clone());}
+                    if ui.small_button("×").on_hover_text("Close saved inactive draft").clicked(){close=Some(id);}}
+                ui.small("One active canvas / renderer");
+            });});
+            if let Some(id)=close{self.tabs.remove(&id);}
+            if let Some(id)=activate{self.activate_tab(app,&id);}
+        }
+        if self.changes_mode {
+            self.host.hide();
+            egui::CentralPanel::default().show(ui,|ui|{
+                ui.heading("Changes");ui.label("Your draft keeps its canonical base until a reviewed reconciliation is qualified.");
+                if let Some(error)=&self.error{ui.colored_label(ui.visuals().error_fg_color,error);}
+                ui.horizontal_wrapped(|ui|{
+                    if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Review incoming changes")).clicked(){if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Incoming","draft":draft}));}}
+                    if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Compare local edits")).clicked(){if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Export","draft":draft}));}}
+                    ui.add_enabled(false,egui::Button::new("Submit proposal")).on_hover_text("Engineering owner acceptance and recovery qualification is required.");
+                    ui.add_enabled(false,egui::Button::new("Check outcome")).on_hover_text("No qualified owner submission adapter is installed.");
+                });
+                egui::ScrollArea::both().id_salt("cityos-changes-content").show(ui,|ui|{
+                    if let Some(incoming)=&self.incoming{ui.heading("Incoming source");ui.monospace(serde_json::to_string_pretty(incoming).unwrap_or_default());}
+                    ui.heading("Semantic edits");if let Some(compare)=&self.compare {ui.monospace(compare);}else{ui.label("Choose Compare local edits.");}
+                });
+            });return;
+        }
         if let Some(error) = self.error.clone() {
             egui::Panel::top("cityos-workspace-error").show(ui, |ui| {
                 ui.colored_label(ui.visuals().error_fg_color, &error);
@@ -912,6 +1003,48 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn tab_document(id:&str)->Document{
+        let semantic=json!({"id":id,"revision":"1","root":{"id":"material","props":{}}});
+        let draft=json!({"schemaVersion":"cityos.design-exchange.v3","semanticContract":"fixture.component","profileRef":"fixture","draftId":id,"documentId":id,
+            "draftRevision":0,"base":{"kind":"canonical-git","repositoryId":"fixture","commit":"a".repeat(40),"sourcePath":"fixture.json","sourceDigest":"b".repeat(64)},
+            "semanticBase":semantic,"semanticDraft":semantic,"semanticDigest":"c".repeat(64),"dependencyPins":[{"path":"fixture.json","digest":"b".repeat(64)}],"commandReceipts":[]});
+        binding(draft,&json!({"draftId":id,"draftRevision":0,"semanticDigest":"c".repeat(64),"nodes":[{"id":"native","sourceNodeId":"material","definitionId":"fixture","parent":null,"slot":null,"x":0,"y":0,"width":100,"height":100,"label":id,"fill":"#ffffff"}]})).unwrap()
+    }
+    #[test]
+    fn draft_tabs_save_before_switch_and_restore_undo_with_the_correct_library_file(){
+        let root=std::env::temp_dir().join(format!("desigma-tabs-{}",uuid::Uuid::new_v4()));
+        let mut app=App::new(tab_document("first"));app.lib=Some(desigma_library::Library::open(&root).unwrap());app.home=None;
+        let mut next=app.doc.clone();next.name="First edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
+        let mut workspace=Workspace::default();workspace.suspend_current(&mut app).unwrap();let first_file=app.lib_file.clone().unwrap().id;
+        app.replace_document(tab_document("second"),None);app.home=None;
+        workspace.activate_tab(&mut app,"first");assert_eq!(draft(&app.doc).unwrap()["draftId"],"first");assert_eq!(app.lib_file.as_ref().unwrap().id,first_file);assert!(app.hist.can_undo());
+        assert_ne!(workspace.tabs["second"].file.as_ref().unwrap().id,first_file);app.hist.undo(&mut app.doc).unwrap();
+        assert_eq!(app.lib.as_ref().unwrap().load_file(&first_file).unwrap().name,"First edited");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn failed_tab_save_preserves_the_current_document_and_history(){
+        let mut app=App::new(tab_document("first"));app.home=None;app.lib=None;
+        let mut next=app.doc.clone();next.name="Edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
+        let before=app.doc.to_json().unwrap();let mut workspace=Workspace::default();assert!(workspace.suspend_current(&mut app).is_err());
+        assert_eq!(app.doc.to_json().unwrap(),before);assert!(app.hist.can_undo());assert!(workspace.tabs.is_empty());
+    }
+    #[test]
+    #[ignore="requires the packaged canonical Accordion bundle; exercised by the Windows delivery check"]
+    fn canonical_accordion_native_save_reopen_and_boolean_export(){
+        let directory=std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_EVIDENCE").unwrap());
+        let bundle:Value=serde_json::from_slice(&std::fs::read(directory.join("accordion-bundle.json")).unwrap()).unwrap();
+        let edited:Value=serde_json::from_slice(&std::fs::read(directory.join("accordion-edited-bundle.json")).unwrap()).unwrap();
+        let document=binding(bundle["draft"].clone(),&bundle["projection"]).unwrap();let path=crate::io::save_path(&document,&directory.join("native-accordion.desigma")).unwrap();
+        let mut reopened=crate::io::load_path(&path).unwrap();let mut history=desigma_doc::History::default();
+        history.exec(&mut reopened,Command::CityosInstall{document:Box::new(binding(edited["draft"].clone(),&edited["projection"]).unwrap())}).unwrap();
+        crate::io::save_path(&reopened,&path).unwrap();let reopened=crate::io::load_path(&path).unwrap();
+        let bridge=bridge::Bridge::spawn(Config{node:std::env::var("CITYOS_DESIGN_WORKSPACE_NODE").unwrap().into(),bridge:std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_PACKAGE").unwrap()).join("workspace.mjs"),
+            repository:std::env::var("CITYOS_DESIGN_WORKSPACE_REPOSITORY").unwrap().into(),cache:directory.join("canonical-cache")});
+        bridge.jobs.send(json!({"op":"Export","draft":draft(&reopened).unwrap()})).unwrap();
+        let exported=bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();assert_eq!(exported["operationCount"],1);assert_eq!(exported["ownerSubmission"],false);
+        assert_eq!(exported["changeset"]["changes"][0]["sourcePointer"],"/root/props/allowMultiple");
+    }
     #[test]
     fn resource_preview_never_replaces_the_current_document_or_starts_its_autosave() {
         let mut workspace = Workspace::default();

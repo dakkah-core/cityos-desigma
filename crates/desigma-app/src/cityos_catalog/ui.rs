@@ -93,6 +93,7 @@ fn item_row(ui: &mut Ui, entry: &Entry, selected: bool) -> egui::Response {
 
 impl Browser {
     pub fn show(&mut self, ui: &mut Ui, ctx: &Context) {
+        self.inline_preview=None;
         if ctx.input(|input| {
             input.pointer.any_pressed()
                 || input.smooth_scroll_delta != egui::Vec2::ZERO
@@ -159,6 +160,7 @@ impl Browser {
         }
         self.settings(ctx);
         self.coverage(ctx);
+        if self.settings_open||self.coverage_open {self.inline_preview=None;}
     }
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
@@ -521,6 +523,14 @@ impl Browser {
                 canvas.show(ui);
                 return;
             }
+            if self.mode=="committed" {if let Some(profile)=self.specimen.as_ref().map(|s|s["workspaceProfile"].clone()).filter(|p|p["sourceDigest"].is_string()) {
+                let commit=self.summary.as_ref().map(|s|s["snapshot"]["canonicalCommit"].clone()).unwrap_or(Value::Null);
+                ui.label("Actual renderer · pinned captured source · temporary preview");
+                if !self.inline_status.is_empty(){ui.small(&self.inline_status);}
+                let (_,rect)=ui.allocate_space(egui::vec2(ui.available_width().max(1.),ui.available_height().max(1.)));
+                self.inline_preview=Some((serde_json::json!({"sourcePath":profile["sourcePath"],"sourceDigest":profile["sourceDigest"],"commit":commit}),rect));
+                return;
+            }}
         }
         egui::ScrollArea::vertical().id_salt(("catalog-detail", &entry.id, self.detail_tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(theme::CATALOG_GAP);
@@ -615,13 +625,13 @@ impl Browser {
         ui.horizontal_wrapped(|ui| {
             if self.busy {
                 ui.spinner();
-                ui.label(self.activity);
+                ui.label(crate::cityos_jobs::resource_status().unwrap_or(self.activity));
             } else if self.error.is_some() {
                 ui.label("Refresh unavailable · previous catalog retained").on_hover_text(self.error.as_deref().unwrap_or(""));
-            } else if self.summary.as_ref().is_some_and(|s| s["restoredCache"] == true) {
-                ui.label("Saved snapshot · updates checked on refresh");
             } else if self.summary.as_ref().is_some_and(|s| s["stale"] == true) {
                 ui.label("Offline · browsing saved snapshot").on_hover_text(self.summary.as_ref().unwrap()["refreshError"].as_str().unwrap_or(""));
+            } else if self.summary.as_ref().is_some_and(|s| s["restoredCache"] == true) {
+                ui.label("Saved snapshot · automatic updates enabled");
             } else {
                 ui.label("Repository connected");
             }

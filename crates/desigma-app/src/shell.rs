@@ -557,7 +557,7 @@ impl eframe::App for Shell {
                 self.cityos.open = true;
             }
         } else {
-            self.workspace.hide();
+            self.cityos.inline_preview=None;
             self.cityos.has_bound_draft = self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some());
             self.draw(ui);
             if let Some(document) = self.cityos.local_design_request.take() {
@@ -602,6 +602,12 @@ impl eframe::App for Shell {
             } else if self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some()) && self.app.home.is_none() && !self.cityos.open {
                 self.workspace.resume(self.cityos.workspace_config(), &self.app);
             }
+            if !self.workspace.open&&self.cityos.open {
+                if let Some((pin,rect))=self.cityos.inline_preview.take(){
+                    if !self.cityos.inline_status.starts_with("Current"){self.cityos.yield_to_design();}
+                    self.cityos.inline_status=self.workspace.show_inline(&mut self.app,_frame,self.cityos.workspace_config(),pin,rect,ui.ctx().pixels_per_point());
+                }else{self.workspace.hide();}
+            }else if !self.workspace.open{self.workspace.hide();}
         }
     }
 }

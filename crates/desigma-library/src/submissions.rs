@@ -52,6 +52,12 @@ pub struct SubmissionRecord {
     pub state: SubmissionState,
     pub outcome: Option<Value>,
 }
+/// An authenticated owner-client observation, not admission or merge authority.
+#[derive(Clone,Debug,Serialize,Deserialize,PartialEq)]
+pub struct SubmissionObservation {
+    pub operation_id:String,pub request_digest:String,pub owner:String,pub resource:String,pub scope:BTreeMap<String,String>,
+    pub state:SubmissionState,pub receipt_ref:String,pub owner_revision:Option<String>,pub conclusively_ineligible:bool,pub details:Value,
+}
 impl SubmissionRecord {
     pub fn frozen(&self) -> bool {
         !matches!(self.state, SubmissionState::Synchronized | SubmissionState::Rejected | SubmissionState::Retired)
@@ -186,11 +192,37 @@ impl Library {
     /// The immutable durable record is the sole dispatch input. An identical retry
     /// retains its original operation/digest; inquiry is the restart entry point.
     pub fn dispatch_prepared<T>(&self, command: SubmissionCommand, dispatch: impl FnOnce(&SubmissionRecord) -> Result<T>) -> Result<T> {
-        let record = self.prepare_submission(command)?;
+        let mut record = self.prepare_submission(command)?;
         if !matches!(record.state, SubmissionState::Prepared | SubmissionState::Pending) {
             return Err(LibraryError::Invalid("Inquire about the existing outcome before dispatch".into()));
         }
+        if record.state==SubmissionState::Prepared {record.state=SubmissionState::Pending;write_atomic(&self.submission_path(&record.command.operation_id)?,&serde_json::to_vec(&record)?)?;
+            record=self.load_submission(&record.command.operation_id)?;}
         dispatch(&record)
+    }
+    /// Called only after the existing owner client authenticates and scopes inquiry.
+    /// Receipt storage cannot qualify an owner or make an MR eligible for acceptance.
+    pub fn record_submission_observation(&self,observation:SubmissionObservation)->Result<SubmissionRecord>{
+        let _guard=SUBMISSION_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let mut record=self.load_submission(&observation.operation_id)?;
+        if observation.request_digest!=record.request_digest||observation.owner!=record.command.owner||observation.resource!=record.command.resource||observation.scope!=record.command.scope||observation.receipt_ref.is_empty(){
+            return Err(LibraryError::Invalid("Owner observation identity/scope mismatch".into()));}
+        if !matches!(observation.state,SubmissionState::Pending|SubmissionState::Published|SubmissionState::AcceptedSyncPending|SubmissionState::Rejected|SubmissionState::Retired)
+            || observation.state==SubmissionState::AcceptedSyncPending&&observation.owner_revision.as_ref().is_none_or(|r|r.is_empty())
+            || observation.state==SubmissionState::Retired&&!observation.conclusively_ineligible {return Err(LibraryError::Invalid("Incomplete owner outcome; keep submission frozen".into()));}
+        let outcome=serde_json::to_value(&observation)?;
+        fn secret(value:&Value)->bool{match value {Value::Object(map)=>map.iter().any(|(k,v)|matches!(k.to_ascii_lowercase().as_str(),"authorization"|"password"|"access_token"|"refresh_token"|"api_key"|"private_key"|"credentials")||secret(v)),Value::Array(items)=>items.iter().any(secret),_=>false}}
+        if secret(&outcome){return Err(LibraryError::Invalid("Credentials cannot enter owner receipts".into()));}
+        if record.state==observation.state&&record.outcome.as_ref()==Some(&outcome){return Ok(record);}
+        match record.state {
+            SubmissionState::Rejected|SubmissionState::Retired|SubmissionState::Synchronized=>return Err(LibraryError::Invalid("Terminal outcome cannot be rewritten".into())),
+            SubmissionState::AcceptedSyncPending=>return Err(LibraryError::Invalid("Accepted outcome must synchronize before any successor or retirement".into())),
+            SubmissionState::Published if observation.state==SubmissionState::Pending=>return Err(LibraryError::Invalid("Publication cannot regress to pending".into())),
+            _=>{}
+        }
+        record.state=observation.state;record.outcome=Some(outcome);
+        write_atomic(&self.submission_path(&record.command.operation_id)?,&serde_json::to_vec(&record)?)?;
+        self.load_submission(&record.command.operation_id)
     }
     /// Deliberately no API for purging these payloads. Unresolved and accepted-but-
     /// unsynchronized records remain retention roots, including after restart.
@@ -269,5 +301,30 @@ mod tests {
         c.dependency_pins.push("f".repeat(64));
         assert!(library.prepare_submission(c).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+    fn observation(record:&SubmissionRecord,state:SubmissionState)->SubmissionObservation{
+        SubmissionObservation{operation_id:record.command.operation_id.clone(),request_digest:record.request_digest.clone(),owner:record.command.owner.clone(),resource:record.command.resource.clone(),
+            scope:record.command.scope.clone(),state,receipt_ref:"fixture-owner-inquiry".into(),owner_revision:Some("accepted-1".into()),conclusively_ineligible:false,details:serde_json::json!({"fixture":true})}
+    }
+    #[test]
+    fn lost_acceptance_is_recovered_by_original_identity_without_dispatching_again(){
+        let root=std::env::temp_dir().join(format!("desigma-inquiry-{}",crate::new_id()));let lib=Library::open(&root).unwrap();let mut effects=0;
+        assert!(lib.dispatch_prepared(command(),|record|{assert_eq!(record.state,SubmissionState::Pending);effects+=1;Err::<(),_>(LibraryError::Invalid("lost response".into()))}).is_err());drop(lib);
+        let lib=Library::open(&root).unwrap();let pending=lib.load_submission("operation-1").unwrap();assert!(pending.frozen());
+        let outcome=observation(&pending,SubmissionState::AcceptedSyncPending);let accepted=lib.record_submission_observation(outcome.clone()).unwrap();
+        assert_eq!(lib.record_submission_observation(outcome).unwrap(),accepted);
+        assert!(lib.dispatch_prepared(command(),|_|{effects+=1;Ok(())}).is_err());assert_eq!(effects,1);
+        let mut retirement=observation(&accepted,SubmissionState::Retired);retirement.conclusively_ineligible=true;assert!(lib.record_submission_observation(retirement).is_err());
+        assert_eq!(lib.load_submission("operation-1").unwrap().command,pending.command);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn successor_remains_blocked_until_original_retirement_is_conclusive(){
+        let root=std::env::temp_dir().join(format!("desigma-retire-{}",crate::new_id()));let lib=Library::open(&root).unwrap();let original=lib.prepare_submission(command()).unwrap();
+        let mut successor=command();successor.operation_id="operation-2".into();successor.predecessor=Some("operation-1".into());assert!(lib.prepare_submission(successor.clone()).is_err());
+        let mut retirement=observation(&original,SubmissionState::Retired);assert!(lib.record_submission_observation(retirement.clone()).is_err());
+        retirement.conclusively_ineligible=true;lib.record_submission_observation(retirement).unwrap();
+        assert_eq!(lib.prepare_submission(successor).unwrap().command.predecessor,Some("operation-1".into()));
+        let mut other=observation(&original,SubmissionState::Published);other.scope.insert("tenantId".into(),"another".into());assert!(lib.record_submission_observation(other).is_err());
+        assert_eq!(lib.load_submission("operation-1").unwrap().command,original.command);std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -242,6 +242,13 @@ fn editable_fixture() -> (Entry, Value, Value) {
     (e, specimen, json!({"mode":"committed","canonicalCommit":"a".repeat(40)}))
 }
 #[test]
+fn theme_variables_open_the_collection_of_the_active_page(){
+    let (entry,specimen,snapshot)=editable_fixture();let document=local_library::create(&entry,&specimen,&snapshot,"light").unwrap();
+    let page=document.pages[0];let expected=document.get(page).unwrap().variables.modes.keys().next().unwrap().clone();
+    let mut app=crate::app::App::new(document);app.page=page;app.vars.collection=None;app.open_variables();
+    assert_eq!(app.vars.collection,Some(expected));
+}
+#[test]
 fn explicit_native_theme_copy_has_editable_variables_aliases_samples_and_source_provenance() {
     use desigma_doc::*;
     let (e, specimen, snapshot) = editable_fixture();

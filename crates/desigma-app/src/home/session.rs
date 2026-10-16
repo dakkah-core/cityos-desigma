@@ -250,7 +250,7 @@ impl App {
                 return;
             }
             self.autosave.confirmed = true;
-        } else if self.autosave.confirmed && self.now - t >= AUTOSAVE_IDLE {
+        } else if self.autosave.confirmed && self.now - t >= if self.doc.cityos.is_some(){2.0}else{AUTOSAVE_IDLE} {
             if doc_hash(&self.doc) != self.autosave.saved_hash {
                 match self.save_library_file() {
                     Ok(()) => self.autosave.saves += 1,
