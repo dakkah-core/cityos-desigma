@@ -59,15 +59,41 @@ fn literal(row: &Value) -> Result<(VariableKind, VariableValue), String> {
     }
 }
 
-pub(super) fn create(entry: &Entry, specimen: &Value, snapshot: &Value, preferred_mode: &str) -> Result<Document, String> {
-    if snapshot["mode"] != "committed" || !snapshot["canonicalCommit"].as_str().is_some_and(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())) {
-        return Err("Create local libraries from committed source. Refresh GitLab main first; local overlays remain previews.".into());
-    }
-    if specimen["entry"]["id"] != entry.id || specimen["digest"] != entry.source_digest {
-        return Err("The selected source changed. Select it again before creating a local library.".into());
-    }
+pub(super) fn unavailable_reason(entry: &Entry, specimen: Option<&Value>, snapshot: &Value) -> Option<String> {
     if !matches!(entry.kind.as_str(), "theme" | "token" | "design-token") {
-        return Err("This source has no native token-library adapter.".into());
+        return Some("This source has no native token-library adapter.".into());
+    }
+    if snapshot["mode"] != "committed" || !snapshot["canonicalCommit"].as_str().is_some_and(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Some("Create local libraries from committed source. Refresh GitLab main first; local overlays remain previews.".into());
+    }
+    let Some(specimen) = specimen else { return Some("Load the selected values before creating an editable local copy.".into()); };
+    if !super::support::matches(entry, specimen) {
+        return Some("The selected source changed. Select it again before creating a local library.".into());
+    }
+    if entry.kind == "theme" {
+        let Some(modes) = specimen["presentation"]["modes"].as_object() else {
+            return Some("Theme tokens have not loaded yet.".into());
+        };
+        let total = modes.values().filter_map(Value::as_array).map(Vec::len).sum::<usize>();
+        if modes.values().any(|rows| !rows.is_array()) {
+            return Some("Invalid theme rows".into());
+        }
+        if total == 0 || total > 4096 || modes.len() > 16 {
+            return Some("Local token libraries support 1–4096 values per selected source.".into());
+        }
+    } else if let Some(value) = specimen["data"].get("$value").or_else(|| specimen["data"].get("value")) {
+        if value.as_str().is_some_and(|s| s.starts_with('{') && s.ends_with('}')) {
+            return Some("Load the complete theme to resolve this token alias.".into());
+        }
+    } else {
+        return Some("This item is a source declaration. It does not have a native variable adapter.".into());
+    }
+    None
+}
+
+pub(super) fn create(entry: &Entry, specimen: &Value, snapshot: &Value, preferred_mode: &str) -> Result<Document, String> {
+    if let Some(reason) = unavailable_reason(entry, Some(specimen), snapshot) {
+        return Err(reason);
     }
     let data = &specimen["data"];
     let modes: BTreeMap<String, Vec<Value>> = if entry.kind == "theme" {

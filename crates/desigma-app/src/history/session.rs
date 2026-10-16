@@ -48,7 +48,7 @@ impl App {
             Some(v) => v.saved,
             None => {
                 // edits still waiting for the autosave must be on disk before the live document is parked
-                self.flush_autosave();
+                if !self.flush_autosave(){return;}
                 self.take_snapshot()
             }
         };

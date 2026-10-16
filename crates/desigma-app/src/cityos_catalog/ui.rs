@@ -1,9 +1,10 @@
-use super::{preview, Browser, DetailTab};
+use super::{preview, support, Browser, DetailTab};
 use crate::theme;
 use desigma_cityos_catalog::{Entry, Filters};
 use egui::{Align, Align2, Context, FontId, Frame, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
+use serde_json::Value;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const COLLECTIONS: [(&str, &str); 8] = [
     ("design", "Design library"),
@@ -91,8 +92,38 @@ fn item_row(ui: &mut Ui, entry: &Entry, selected: bool) -> egui::Response {
     response.on_hover_text(format!("{}\n{}\n{}", entry.label, entry.source_path, entry.classification_status))
 }
 
+const TILE_HEIGHT: f32 = 148.0;
+fn tile_columns(width: f32) -> usize { ((width + 8.0) / 168.0).floor().clamp(1.0, 4.0) as usize }
+fn item_tile(ui: &mut Ui, entry: &Entry, selected: bool, width: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width.max(1.0), TILE_HEIGHT), Sense::click());
+    crate::widgets::record(ui, &format!("catalog-item-{}", entry.id), rect);
+    let title = preview::display_name(entry);
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, &title));
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect.shrink(1.0), theme::CATALOG_RADIUS, if selected { theme::BG_SELECTED_SECONDARY } else if response.hovered() { theme::BG_HOVER } else { theme::BG_TERTIARY });
+    if selected || response.has_focus() {
+        painter.rect_stroke(rect.shrink(1.0), theme::CATALOG_RADIUS, Stroke::new(1.0, theme::BORDER_SELECTED), StrokeKind::Inside);
+    }
+    let content = rect.shrink(12.0);
+    let painter = painter.with_clip_rect(content);
+    painter.text(content.min, Align2::LEFT_TOP, entry.level.as_deref().unwrap_or_else(|| preview::kind_name(&entry.kind)), FontId::proportional(theme::CATALOG_TITLE), theme::TEXT_SECONDARY);
+    painter.text(content.min + egui::vec2(0.0, 48.0), Align2::LEFT_TOP, title, FontId::proportional(theme::CATALOG_BODY), theme::TEXT);
+    painter.text(content.min + egui::vec2(0.0, 73.0), Align2::LEFT_TOP, preview::kind_name(&entry.kind), FontId::proportional(theme::CATALOG_SMALL), theme::TEXT_SECONDARY);
+    painter.text(content.min + egui::vec2(0.0, 100.0), Align2::LEFT_TOP, "Select to preview", FontId::proportional(theme::CATALOG_SMALL), theme::TEXT_TERTIARY);
+    response.on_hover_text(format!("{}\n{}\n{}", entry.label, entry.source_path, entry.classification_status))
+}
+
+fn action_button(ui: &mut Ui, id: &str, label: &str, reason: Option<&str>) -> bool {
+    let response = ui.add_enabled(reason.is_none(), egui::Button::new(label));
+    crate::widgets::record(ui, id, response.rect);
+    let clicked = response.clicked();
+    if let Some(reason) = reason { response.on_disabled_hover_text(reason); }
+    clicked
+}
+
 impl Browser {
     pub fn show(&mut self, ui: &mut Ui, ctx: &Context) {
+        if let Ok(mut repaint) = self.repaint.lock() { *repaint = Some(ctx.clone()); }
         self.inline_preview=None;
         if ctx.input(|input| {
             input.pointer.any_pressed()
@@ -102,7 +133,6 @@ impl Browser {
             self.last_interaction = Instant::now();
         }
         self.tick();
-        ctx.request_repaint_after(Duration::from_millis(if self.busy || self.filter_changed.is_some() || self.pending_selection { 100 } else { 1000 }));
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
         for (style, size) in [
@@ -139,12 +169,13 @@ impl Browser {
         }
         if stacked {
             egui::CentralPanel::default().frame(Frame::new().inner_margin(12)).show(ui, |ui| {
-                if self.selected.is_some() {
-                    if ui.button("← Results").clicked() {
-                        self.selected = None;
-                        self.pending_selection = false;
+                if self.selected.is_some() && !self.results_visible {
+                    let results = ui.button("← Results");
+                    crate::widgets::record(ui, "catalog-results-back", results.rect);
+                    if results.clicked() {
+                        self.results_visible = true;
                     }
-                    self.detail(ui);
+                    if !self.results_visible { self.detail(ui); } else { self.results(ui); }
                 } else {
                     self.results(ui);
                 }
@@ -161,6 +192,10 @@ impl Browser {
         self.settings(ctx);
         self.coverage(ctx);
         if self.settings_open||self.coverage_open {self.inline_preview=None;}
+        if let Some(delay) = self.next_repaint_after(Instant::now()) { ctx.request_repaint_after(delay); }
+        if !self.open {
+            if let Ok(mut repaint) = self.repaint.lock() { *repaint = None; }
+        }
     }
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
@@ -178,7 +213,7 @@ impl Browser {
             if self.has_bound_draft && ui.button("Resume canvas draft").clicked() {
                 self.workspace_request = Some(super::WorkspaceRequest { source_path: None, preview_only: false, resume: true });
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center).with_main_wrap(true), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
                 }
@@ -210,9 +245,18 @@ impl Browser {
         });
     }
     fn search_bar(&mut self, ui: &mut Ui, ctx: &Context) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!self.navigation_back.is_empty(), egui::Button::new("← Back")).clicked() { self.navigate_history(false); }
+            if ui.add_enabled(!self.navigation_forward.is_empty(), egui::Button::new("Forward →")).clicked() { self.navigate_history(true); }
+            if self.results_visible {
+                if let Some(entry) = self.selected.as_ref() {
+                    if ui.button("Return to selection").on_hover_text(preview::display_name(entry)).clicked() { self.results_visible = false; }
+                }
+            }
+        });
         let before = self.filters.clone();
-        ui.horizontal(|ui| {
-            let width = (ui.available_width() - 190.0).max(140.0);
+        ui.horizontal_wrapped(|ui| {
+            let width = (ui.available_width() - 190.0).max(80.0);
             let search = ui.add_sized(
                 [width, 34.0],
                 egui::TextEdit::singleline(&mut self.filters.search).id_salt("catalog-search").hint_text("Search names, tokens, shells, or source paths…"),
@@ -283,13 +327,10 @@ impl Browser {
                 if id == "compositions" {
                     ui.add_space(theme::CATALOG_GAP);
                     ui.label(RichText::new("L0–L9 · generated from repository").small().color(theme::TEXT_SECONDARY));
-                    let levels = self.summary.as_ref().and_then(|s| s["navigation"]["levels"].as_array()).cloned().unwrap_or_default();
-                    for level in levels {
-                        let id = level["id"].as_str().unwrap_or("");
-                        let name = level["name"].as_str().unwrap_or("");
-                        let total = level["count"].as_u64().unwrap_or(0) as usize;
-                        if nav_row(ui, self.filters.level == id, &format!("{id}  {name}"), &count(total)).clicked() {
-                            self.filters = Filters { collection: "design".into(), level: id.into(), ..Default::default() };
+                    for level in support::levels(self.summary.as_ref()) {
+                        let suffix = level.count.map(|n| count(n as usize)).unwrap_or_else(|| "?".into());
+                        if nav_row(ui, self.filters.level == level.id, &format!("{}  {}", level.id, level.name), &suffix).clicked() {
+                            self.filters = Filters { collection: "design".into(), level: level.id, ..Default::default() };
                         }
                     }
                     ui.add_space(theme::CATALOG_GAP);
@@ -302,11 +343,14 @@ impl Browser {
     }
     fn product_navigation(&mut self, ui: &mut Ui) {
         let products = self.summary.as_ref().and_then(|s| s["navigation"]["products"].as_array()).cloned().unwrap_or_default();
+        let diagnostics = self.summary.as_ref().and_then(|s| s["navigation"]["diagnostics"].as_array()).map_or(0, Vec::len);
+        if diagnostics > 0 { ui.small(format!("{diagnostics} unresolved hierarchy relationships · see Source accounting")); }
         if products.is_empty() {
-            ui.label("Products appear after the repository loads.");
+            ui.label(if self.summary.is_some() { "No products are registered in this snapshot." } else { "Products appear after the repository loads." });
         }
         for product in products {
             let id = product["id"].as_str().unwrap_or("");
+            if id.is_empty() { continue; }
             let name = product["name"].as_str().unwrap_or(id);
             if nav_row(ui, self.filters.product == id, name, "").clicked() {
                 self.filters = Filters { collection: "sources".into(), product: id.into(), ..Default::default() };
@@ -314,31 +358,62 @@ impl Browser {
             if self.filters.product == id {
                 ui.indent(id, |ui| {
                     if let Some(targets) = product["targets"].as_array() {
+                        if !targets.is_empty() { ui.small("Declared targets"); }
                         for target in targets {
-                            let target = target.as_str().unwrap_or("");
-                            if ui.selectable_label(self.filters.target == target, target).clicked() {
+                            let target = target.as_str().or_else(|| target["id"].as_str()).unwrap_or("");
+                            if target.is_empty() { continue; }
+                            if ui.selectable_label(self.filters.target == target, preview::humanize(target)).clicked() {
                                 self.filters.target = target.into();
                                 self.filters.search.clear();
                             }
                         }
                     }
-                    if let Some(shells) = product["shells"].as_array() {
-                        for shell in shells {
-                            ui.collapsing(format!("Shell · {}", shell["id"].as_str().unwrap_or("Unassigned")), |ui| {
-                                if let Some(routes) = shell["routes"].as_array() {
-                                    for route in routes {
-                                        let path = route["path"].as_str().unwrap_or("");
-                                        let label = path.split("/app/").last().unwrap_or(path);
-                                        if ui.button(label).on_hover_text(path).clicked() {
-                                            self.filters.search = path.into();
-                                            self.filters.target.clear();
-                                        }
-                                    }
-                                }
-                            });
-                        }
+                    self.product_children(ui, &product, id, 0);
+                    let has_shells = product["shells"].as_array().is_some_and(|shells| !shells.is_empty())
+                        || product["targets"].as_array().is_some_and(|targets| targets.iter().any(|target| target["shells"].as_array().is_some_and(|shells| !shells.is_empty())));
+                    if !has_shells {
+                        ui.small("No shell hierarchy is registered for this product in this capture.");
                     }
                 });
+            }
+        }
+    }
+    fn product_children(&mut self, ui: &mut Ui, parent: &Value, scope: &str, depth: usize) {
+        if depth >= 6 { ui.small("Further registered hierarchy is available in source records."); return; }
+        for (key, kind) in [("targets", "Target"), ("shells", "Shell"), ("routes", "Route"), ("pages", "Page"), ("screens", "Screen"), ("compositions", "Composition")] {
+            let Some(children) = parent[key].as_array() else { continue; };
+            for (index, child) in children.iter().enumerate() {
+                if key == "targets" && !child.is_object() { continue; }
+                let id = child["id"].as_str().or_else(|| child["path"].as_str()).or_else(|| child.as_str()).unwrap_or("Unnamed registration");
+                let name = child["name"].as_str().unwrap_or(id);
+                let path = child["sourcePath"].as_str().or_else(|| child["path"].as_str());
+                let salt = format!("{scope}/{key}/{index}");
+                let max_chars = ((ui.available_width() - 70.0) / 8.0).max(6.0) as usize;
+                let short = name.chars().take(max_chars).collect::<String>();
+                let short = if name.chars().count() > max_chars { format!("{short}…") } else { short };
+                let response = egui::CollapsingHeader::new(format!("{kind} · {short}")).id_salt(&salt).show(ui, |ui| {
+                    if key == "targets" && ui.selectable_label(self.filters.target == id, "Browse this target").clicked() {
+                        self.filters.target = id.into();
+                        self.filters.search.clear();
+                    }
+                    if let Some(path) = path {
+                        ui.label(path);
+                        if key == "compositions" && child["kind"] == "composition" {
+                            let open = ui.button("Open selected composition workspace");
+                            crate::widgets::record(ui, &format!("catalog-hierarchy-open-{salt}"), open.rect);
+                            if open.clicked() { self.workspace_request = Some(super::WorkspaceRequest::selected(path, true)); }
+                        }
+                        if ui.button("Browse source records").on_hover_text("Find this captured source path, including compositions registered outside the product directory.").clicked() {
+                            self.filters.collection = "sources".into();
+                            self.filters.product.clear();
+                            self.filters.search = path.into();
+                            self.filters.target.clear();
+                        }
+                    } else { ui.small("No source path is registered for this item."); }
+                    self.product_children(ui, child, &salt, depth + 1);
+                });
+                crate::widgets::record(ui, &format!("catalog-hierarchy-{salt}"), response.header_response.rect);
+                response.header_response.on_hover_text(format!("{kind} · {name}"));
             }
         }
     }
@@ -350,12 +425,23 @@ impl Browser {
         } else {
             COLLECTIONS.iter().find(|(id, _)| *id == self.filters.collection).map(|(_, label)| label.to_string()).unwrap_or_else(|| "Design library".into())
         };
-        ui.strong(title);
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(title);
+            ui.selectable_value(&mut self.visual_results, false, "List");
+            ui.selectable_value(&mut self.visual_results, true, "Tiles");
+        });
         let waiting = self.displayed_filters != self.filters;
         ui.label(RichText::new(if waiting { "Updating results…".into() } else { format!("{} items", count(self.total)) }).small().color(theme::TEXT_SECONDARY));
         ui.add_space(8.0);
         if self.summary.is_none() {
             ui.add_space(24.0);
+            if let Some(error) = &self.error {
+                ui.strong("Repository capture is unavailable");
+                ui.label(error);
+                if ui.add_enabled(!self.busy, egui::Button::new("Retry capture")).clicked() { self.refresh(); }
+                if ui.button("Connection settings").clicked() { self.settings_open = true; }
+                return;
+            }
             ui.spinner();
             ui.label("Reading your repository…");
             ui.label(RichText::new("The library will appear here when the first capture is ready.").color(theme::TEXT_SECONDARY));
@@ -376,16 +462,23 @@ impl Browser {
             return;
         }
         let mut chosen = None;
+        let columns = if self.visual_results { tile_columns(ui.available_width()) } else { 1 };
+        let row_height = if self.visual_results { TILE_HEIGHT } else { theme::CATALOG_ROW };
         egui::ScrollArea::vertical()
-            .id_salt(("catalog-results-scroll", serde_json::to_string(&self.displayed_filters).unwrap_or_default()))
+            .id_salt(("catalog-results-scroll", self.visual_results, serde_json::to_string(&self.displayed_filters).unwrap_or_default()))
             .auto_shrink([false, false])
             .max_height((ui.available_height() - 48.0).max(80.0))
-            .show_rows(ui, theme::CATALOG_ROW, self.entries.len(), |ui, range| {
-                for index in range {
-                    let entry = &self.entries[index];
-                    if item_row(ui, entry, self.selected.as_ref().is_some_and(|s| s.id == entry.id)).clicked() {
-                        chosen = Some(entry.clone());
-                    }
+            .show_rows(ui, row_height, self.entries.len().div_ceil(columns), |ui, range| {
+                let width = ((ui.available_width() - ui.spacing().item_spacing.x * (columns - 1) as f32) / columns as f32).max(1.0);
+                for row in range {
+                    ui.horizontal(|ui| {
+                        for index in row * columns..((row + 1) * columns).min(self.entries.len()) {
+                            let entry = &self.entries[index];
+                            let selected = self.selected.as_ref().is_some_and(|s| s.id == entry.id);
+                            let response = if self.visual_results { item_tile(ui, entry, selected, width) } else { item_row(ui, entry, selected) };
+                            if response.clicked() { chosen = Some(entry.clone()); }
+                        }
+                    });
                 }
             });
         if let Some(entry) = chosen {
@@ -401,8 +494,12 @@ impl Browser {
         });
     }
     fn detail(&mut self, ui: &mut Ui) {
+        let id = self.selected.as_ref().map(|entry| entry.id.clone());
+        egui::ScrollArea::vertical().id_salt(("catalog-detail-scroll", id)).auto_shrink([false, false]).show(ui, |ui| self.detail_body(ui));
+    }
+    fn detail_body(&mut self, ui: &mut Ui) {
         let Some(entry) = self.selected.clone() else {
-            egui::ScrollArea::vertical().id_salt("catalog-welcome").show(ui, |ui| self.welcome(ui));
+            self.welcome(ui);
             return;
         };
         ui.horizontal_wrapped(|ui| {
@@ -415,104 +512,77 @@ impl Browser {
         ui.add_space(theme::CATALOG_GAP);
         ui.label(RichText::new(preview::display_name(&entry)).size(theme::CATALOG_TITLE).strong());
         ui.label(RichText::new(&entry.label).small().color(theme::TEXT_SECONDARY));
-        let native_tokens = matches!(entry.kind.as_str(), "theme" | "design-token" | "token");
-        if native_tokens {
-            let committed = self.summary.as_ref().is_some_and(|s| s["snapshot"]["mode"] == "committed");
-            if ui
-                .add_enabled(
-                    committed && self.specimen.is_some(),
-                    egui::Button::new(if entry.kind == "theme" { "Create editable theme library" } else { "Create editable token" }),
-                )
-                .clicked()
-            {
-                self.local_design_error = None;
-                let snapshot = &self.summary.as_ref().unwrap()["snapshot"];
-                match super::local_library::create(&entry, self.specimen.as_ref().unwrap(), snapshot, &self.theme_mode) {
-                    Ok(document) => self.local_design_request = Some(document),
-                    Err(error) => self.local_design_error = Some(error),
+        ui.label(RichText::new(&entry.source_path).small().color(theme::TEXT_SECONDARY));
+        let actions = support::actions(&entry, self.specimen.as_ref(), self.summary.as_ref(), &self.mode);
+        ui.horizontal_wrapped(|ui| {
+            let unavailable = actions.source.is_none().then_some(actions.preview_reason.as_str());
+            let label = if actions.source.is_some() && !actions.actual_preview { "Open structure workspace" } else { "Open actual preview" };
+            if action_button(ui, "catalog-preview-action", label, unavailable) {
+                if let Some(source) = &actions.source {
+                    self.workspace_request = Some(super::WorkspaceRequest::selected(source, true));
                 }
             }
-            if let Some(error) = &self.local_design_error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-                if ui.button("Return to current design").clicked() {
-                    self.open = false;
+            let unavailable = (!actions.editable).then_some(actions.edit_reason.as_str());
+            if action_button(ui, "catalog-edit-action", if self.mode == "local" { "Open canonical draft" } else { "Open on canvas" }, unavailable) {
+                if let Some(source) = &actions.source {
+                    self.workspace_request = Some(super::WorkspaceRequest::selected(source, false));
                 }
             }
-            ui.small(if committed {
-                "Creates a local Desigma design with editable variables. Save it normally; source submission is not enabled."
-            } else {
-                "Switch to GitLab main to create a local design copy. Local changes remain previews."
-            });
+        });
+        ui.label(RichText::new(&actions.preview_reason).small().color(theme::TEXT_SECONDARY));
+        if !actions.editable { ui.small(&actions.edit_reason); }
+        for diagnostic in entry.diagnostics.iter().take(3) {
+            if let Some(message) = diagnostic["message"].as_str() { ui.small(message); }
+        }
+        if actions.source.is_some() && self.mode == "local" {
+            ui.small("Workspace actions open canonical source. The local overlay remains a data preview.");
+        }
+        if matches!(entry.kind.as_str(), "theme" | "design-token" | "token") {
+            if action_button(ui, "catalog-local-copy-action", if entry.kind == "theme" { "Create editable theme library" } else { "Create editable token" }, actions.copy_reason.as_deref()) {
+                if let (Some(summary), Some(specimen)) = (&self.summary, &self.specimen) {
+                    self.local_design_error = None;
+                    match super::local_library::create(&entry, specimen, &summary["snapshot"], &self.theme_mode) {
+                        Ok(document) => self.local_design_request = Some(document),
+                        Err(error) => self.local_design_error = Some(error),
+                    }
+                }
+            }
+            ui.small(actions.copy_reason.as_deref().unwrap_or("Creates an ordinary local design with editable variables. Save it normally; source submission is not enabled."));
         }
         if entry.kind == "theme" {
-            let selectable = self.specimen.as_ref().is_some_and(|s| s["data"]["metadata"]["selectable"] != false);
-            if ui
-                .add_enabled(
-                    selectable,
-                    egui::Button::new(if self.mode == "local" { "Preview canonical theme on web frame" } else { "Preview theme on web frame" }),
-                )
-                .clicked()
-            {
+            if action_button(ui, "catalog-theme-preview-action", "Preview theme on canonical web frame", actions.theme_reason.as_deref()) {
                 self.workspace_theme = Some(entry.semantic_id.clone());
                 self.workspace_request = Some(super::WorkspaceRequest::selected("config/experience/living-canvas-frame/cityos-web.input.json", true));
             }
+            ui.small(actions.theme_reason.as_deref().unwrap_or("Applies this canonical theme to the registered web-frame fixture. The token sheet below shows the captured values."));
         }
-        if self.specimen.is_some() {
-            ui.horizontal_wrapped(|ui| {
-                if ui.button(if self.specimen_canvas.is_some() { "Reload inspection canvas" } else { "Load inspection canvas" }).clicked() {
-                    self.specimen_canvas = Some(super::canvas::SpecimenCanvas::new(&entry, self.specimen.as_ref().unwrap(), &self.theme_mode));
+        if let Some(error) = &self.local_design_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+            if ui.button("Return to current design").clicked() { self.open = false; }
+        }
+        let specimen = self.specimen.as_ref().filter(|s| support::matches(&entry, s));
+        ui.horizontal_wrapped(|ui| {
+            if action_button(ui, "catalog-inspection-action", if self.specimen_canvas.is_some() { "Reload inspection canvas" } else { "Load inspection canvas" }, specimen.is_none().then_some("Load this resource before opening its inspection canvas.")) {
+                if let Some(specimen) = specimen {
+                    self.specimen_canvas = Some(super::canvas::SpecimenCanvas::new(&entry, specimen, &self.theme_mode));
                     self.detail_tab = DetailTab::Preview;
                 }
-                if self.specimen_canvas.is_some() && ui.button("Back to specimen").clicked() {
-                    self.specimen_canvas = None;
-                }
-                ui.small("Temporary · does not create a saved design");
+            }
+            if self.specimen_canvas.is_some() && ui.button("Back to specimen").clicked() { self.specimen_canvas = None; }
+        });
+        if let Some(modes) = specimen.and_then(|s| s["presentation"]["modes"].as_object()) {
+            if !modes.contains_key(&self.theme_mode) { self.theme_mode = modes.keys().next().cloned().unwrap_or_default(); }
+            let old = self.theme_mode.clone();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Token sheet mode");
+                for key in modes.keys() { ui.selectable_value(&mut self.theme_mode, key.clone(), preview::humanize(key)); }
             });
-            if let Some(modes) = self.specimen.as_ref().and_then(|s| s["presentation"]["modes"].as_object()) {
-                let old = self.theme_mode.clone();
-                ui.horizontal_wrapped(|ui| {
-                    for key in modes.keys() {
-                        ui.selectable_value(&mut self.theme_mode, key.clone(), preview::humanize(key));
-                    }
-                });
-                if old != self.theme_mode && self.specimen_canvas.is_some() {
-                    self.specimen_canvas = Some(super::canvas::SpecimenCanvas::new(&entry, self.specimen.as_ref().unwrap(), &self.theme_mode));
-                }
+            if old != self.theme_mode && self.specimen_canvas.is_some() {
+                if let Some(specimen) = specimen { self.specimen_canvas = Some(super::canvas::SpecimenCanvas::new(&entry, specimen, &self.theme_mode)); }
             }
         }
-        let composition = self.specimen.as_ref().is_some_and(|value| value["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1");
-        let profile=self.specimen.as_ref().map(|s|s["workspaceProfile"].clone()).filter(|p|p["kind"]=="component-specimen");
-        if let Some(profile)=profile {
-            if let Some(source)=profile["sourcePath"].as_str(){ui.horizontal_wrapped(|ui|{
-                if ui.button("Preview actual component").clicked(){self.workspace_request=Some(super::WorkspaceRequest::selected(source,true));}
-                if ui.button(if self.mode=="local" {"Open canonical draft"}else{"Open on canvas"}).clicked(){self.workspace_request=Some(super::WorkspaceRequest::selected(source,false));}
-            });ui.small("Canonical component fixture · typed local edits · source submission mapping unavailable");}
-        }
-        if composition || entry.source_path.ends_with(".input.json") {
-            ui.horizontal_wrapped(|ui| {
-                let actual = entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json";
-                if ui
-                    .button(if actual {
-                        "Open actual web preview"
-                    } else if self.mode == "local" {
-                        "Open canonical structure"
-                    } else {
-                        "Open structure workspace"
-                    })
-                    .clicked()
-                {
-                    self.workspace_request = Some(super::WorkspaceRequest::selected(&entry.source_path, true));
-                }
-                if entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json"
-                    && ui.button(if self.mode == "local" { "Open canonical draft" } else { "Open on canvas" }).clicked()
-                {
-                    self.workspace_request = Some(super::WorkspaceRequest::selected(&entry.source_path, false));
-                }
-            });
-            ui.small("Opens this source from canonical GitLab. Local overlay changes remain previews. Renderer availability is shown per file.");
-        }
         ui.add_space(theme::CATALOG_GAP);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.detail_tab, DetailTab::Preview, "Specimen");
             ui.selectable_value(&mut self.detail_tab, DetailTab::Inspector, "Source & support");
             ui.selectable_value(&mut self.detail_tab, DetailTab::Source, "Raw data");
@@ -520,24 +590,28 @@ impl Browser {
         ui.separator();
         if self.detail_tab == DetailTab::Preview {
             if let Some(canvas) = &mut self.specimen_canvas {
-                canvas.show(ui);
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 360.0), Layout::top_down(Align::Min), |ui| canvas.show(ui));
                 return;
             }
-            if self.mode=="committed" {if let Some(profile)=self.specimen.as_ref().map(|s|s["workspaceProfile"].clone()).filter(|p|p["sourceDigest"].is_string()) {
-                let commit=self.summary.as_ref().map(|s|s["snapshot"]["canonicalCommit"].clone()).unwrap_or(Value::Null);
+            if let Some(pin) = actions.inline_pin {
                 ui.label("Actual renderer · pinned captured source · temporary preview");
                 if !self.inline_status.is_empty(){ui.small(&self.inline_status);}
-                let (_,rect)=ui.allocate_space(egui::vec2(ui.available_width().max(1.),ui.available_height().max(1.)));
-                self.inline_preview=Some((serde_json::json!({"sourcePath":profile["sourcePath"],"sourceDigest":profile["sourceDigest"],"commit":commit}),rect));
+                let (_,rect)=ui.allocate_space(egui::vec2(ui.available_width().max(1.),360.0));
+                let rect = rect.intersect(ui.clip_rect());
+                if rect.width() > 1.0 && rect.height() > 1.0 { self.inline_preview=Some((pin,rect)); }
                 return;
-            }}
+            }
         }
-        egui::ScrollArea::vertical().id_salt(("catalog-detail", &entry.id, self.detail_tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
+        ui.push_id(("catalog-detail", &entry.id, self.detail_tab as u8), |ui| {
             ui.add_space(theme::CATALOG_GAP);
             match self.detail_tab {
                 DetailTab::Inspector => preview::inspector(ui, &entry),
                 DetailTab::Source => {
-                    if self.source_text.is_empty() {
+                    if let Some(error) = &self.preview_error {
+                        ui.label("Captured source could not load.");
+                        ui.small(error);
+                        if ui.button("Retry captured source").clicked() { self.pending_selection = true; }
+                    } else if self.source_text.is_empty() {
                         ui.label("Captured source is loading.");
                     } else {
                         ui.horizontal(|ui| {
@@ -592,34 +666,37 @@ impl Browser {
             }
         });
         ui.add_space(16.);
-        let levels = self.summary.as_ref().and_then(|s| s["navigation"]["levels"].as_array()).cloned().unwrap_or_default();
-        if levels.is_empty() {
-            ui.label("The L0–L9 overview appears when the repository capture is ready.");
-        }
-        egui::Grid::new("catalog-level-overview").num_columns(3).spacing(egui::vec2(16., 10.)).striped(true).show(ui, |ui| {
-            ui.strong("Level");
-            ui.strong("Records");
-            ui.strong("Loading support");
-            ui.end_row();
-            for level in levels {
-                let id = level["id"].as_str().unwrap_or("");
-                let name = level["name"].as_str().unwrap_or("");
-                let total = level["count"].as_u64().unwrap_or(0);
-                if ui.button(format!("{id} · {name}")).clicked() {
-                    self.filters = Filters { collection: "design".into(), level: id.into(), ..Default::default() };
-                    self.filters_changed();
-                }
-                ui.label(count(total as usize));
-                ui.small(if total == 0 { "No classified records" } else { "Specimen + inspection canvas" });
-                ui.end_row();
-            }
-        });
+        self.level_overview(ui);
         ui.add_space(theme::CATALOG_GAP);
         ui.label(
-            RichText::new("Inspection canvases show source data as native objects. Actual web rendering and editable drafts are currently qualified for the canonical web frame. Other renderer and editing adapters remain unavailable.")
+            RichText::new("Inspection canvases show captured data as native objects. Actual rendering and local drafts depend on the selected resource's registered adapter. Support is shown before opening; owner qualification and submission remain separate.")
                 .small()
                 .color(theme::TEXT_SECONDARY),
         );
+    }
+    fn level_overview(&mut self, ui: &mut Ui) {
+        ui.strong("L0–L9 capability coverage");
+        ui.small("Captured record flags · unknown counts are not treated as zero. Selected workspace adapters and editable local token copies are reported separately.");
+        for level in support::levels(self.summary.as_ref()) {
+            Frame::new().inner_margin(egui::Margin::symmetric(0, 6)).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(format!("{} · {}", level.id, level.name)).clicked() {
+                        self.filters = Filters { collection: "design".into(), level: level.id.clone(), ..Default::default() };
+                        self.filters_changed();
+                    }
+                    let total = level.count.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
+                    ui.small(format!("{total} records"));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for (label, number) in [("Data specimens", level.specimens), ("Renderer flags", level.renderers), ("Editing flags", level.editable)] {
+                        let number = number.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
+                        chip(ui, &format!("{label} · {number}"));
+                    }
+                });
+                if level.count == Some(0) { ui.small("No classified records are reported at this level."); }
+                else if level.count.is_none() { ui.small("The capture does not report this level; refresh or inspect source accounting."); }
+            });
+        }
     }
     fn status(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
@@ -693,16 +770,21 @@ impl Browser {
         self.settings_open &= open;
     }
     fn coverage(&mut self, ctx: &Context) {
-        egui::Window::new("Source accounting").open(&mut self.coverage_open).default_width(680.0).vscroll(true).show(ctx,|ui|{
-            let Some(summary)=&self.summary else {ui.label("Connect a repository to inspect its census.");return;};
+        let mut open = self.coverage_open;
+        egui::Window::new("Source accounting").open(&mut open).default_width(680.0).vscroll(true).show(ctx,|ui|{
+            let Some(summary)=self.summary.clone() else {ui.label("Connect a repository to inspect its census.");return;};
             ui.label(format!("{} source occurrences",count(summary["entryCount"].as_u64().unwrap_or(0) as usize)));
             ui.label("The design library is a browsing selection. The census includes every captured source occurrence, including unresolved and conflicting records.");
             if let Some(rows)=summary["census"].as_array(){egui::Grid::new("catalog-census").striped(true).show(ui,|ui|{
                 for label in ["Source family","Expected","Accounted","Health"]{ui.strong(label);}ui.end_row();
                 for row in rows {ui.label(row["family"].as_str().unwrap_or(""));ui.label(row["expected"].to_string());ui.label(row["accounted"].to_string());ui.label(if row["healthy"]==true{"Available"}else{"Incomplete"});ui.end_row();}
             });}
-            ui.separator();ui.label("Native discovery is unavailable until its owner is qualified.");
-            ui.collapsing("Snapshot & diagnostics",|ui|{ui.monospace(serde_json::to_string_pretty(&serde_json::json!({"snapshot":summary["snapshot"],"diagnostics":summary["diagnostics"]})).unwrap_or_default());});
+            ui.separator();
+            self.level_overview(ui);
+            ui.separator();
+            ui.label(summary["native"]["reason"].as_str().unwrap_or("Native owner discovery qualification is not reported by this capture."));
+            ui.collapsing("Snapshot & diagnostics",|ui|{ui.monospace(serde_json::to_string_pretty(&serde_json::json!({"snapshot":summary["snapshot"],"diagnostics":summary["diagnostics"],"navigationDiagnostics":summary["navigation"]["diagnostics"]})).unwrap_or_default());});
         });
+        self.coverage_open = open;
     }
 }

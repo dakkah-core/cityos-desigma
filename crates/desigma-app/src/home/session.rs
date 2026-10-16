@@ -35,6 +35,9 @@ pub struct Autosave {
     pub saved_hash: u64,
     /// Number of autosaves performed (tests).
     pub saves: u32,
+    /// Automatic retries back off without clearing the unsaved revision.
+    pub failures: u32,
+    pub retry_at: Option<f64>,
 }
 
 impl Autosave {
@@ -51,6 +54,23 @@ pub(crate) fn doc_hash(doc: &Document) -> u64 {
 }
 
 impl App {
+    /// Persistent bound files use the same save/dirty rules inside and outside the library.
+    fn save_autosave_target(&mut self) -> Result<(), String> {
+        if self.lib_file.is_some() { return self.save_library_file(); }
+        let path = self.file_path.as_ref().filter(|p| self.doc.cityos.is_some()
+            && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
+            .ok_or("Save this draft to the library or a native file first")?;
+        crate::io::save_path(&self.doc, path)?;
+        self.autosave.saved_hash = doc_hash(&self.doc);
+        self.autosave.changed_at = None;
+        self.autosave.failures = 0;
+        self.autosave.retry_at = None;
+        Ok(())
+    }
+    fn has_autosave_target(&self) -> bool {
+        self.lib_file.is_some() || self.doc.cityos.is_some() && self.file_path.as_ref()
+            .is_some_and(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
+    }
     /// Opens (or creates) the library at `root` and seeds it on first run.
     pub fn attach_library(&mut self, root: PathBuf) {
         // Shared libraries use the same root as the projects library.
@@ -80,9 +100,9 @@ impl App {
             return;
         };
         crate::decks::ui::flush_notes(self);
+        if !self.flush_autosave(){return;}
         self.save_close_version();
         self.stop_plugin();
-        self.flush_autosave();
         self.canvas.reset_interaction();
         let mut home = Home::new();
         home.refresh(&lib);
@@ -94,8 +114,8 @@ impl App {
     /// Opens a library file in the editor.
     pub fn open_library_file(&mut self, id: &str) {
         let Some(lib) = self.lib.clone() else { return };
-        let loaded = lib.file(id).and_then(|e| lib.load_file(id).map(|d| (e, d)));
-        let (entry, mut doc) = match loaded {
+        let loaded = lib.file(id).and_then(|e| lib.load_checkpoint_for_recovery(id).map(|(checkpoint,missing)| (e, checkpoint.document, checkpoint.history, missing)));
+        let (entry, mut doc, history, missing) = match loaded {
             Ok(x) => x,
             Err(e) => {
                 self.show_toast(format!("Cannot open the file: {e}"), true);
@@ -105,13 +125,15 @@ impl App {
         let project = lib.project(&entry.project).map(|p| p.name).unwrap_or_default();
         doc.name = entry.name.clone();
         let needs_thumb = lib.thumbnail_path(&entry).is_none();
-        self.replace_document(doc, None);
+        if !self.replace_document(doc, None){return;}
+        self.hist = history;
         self.lib_file = Some(LibFile { id: entry.id.clone(), project_id: entry.project.clone(), project, name: entry.name.clone() });
         self.autosave = Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: doc_hash(&self.doc), ..Default::default() };
         self.history_open_file();
         let _ = lib.mark_opened(id);
         self.home = None;
         self.ui.menu = None;
+        if !missing.is_empty() { self.show_toast(format!("Recovered draft. {} dependencies must be verified before editing or export.",missing.len()),true); }
         if needs_thumb {
             thumb::refresh_in_background(lib, entry.id, self.export_doc().into_owned());
         }
@@ -137,6 +159,7 @@ impl App {
     }
 
     fn new_library_file_of(&mut self, target: Option<(String, Option<String>)>, kind: DocumentKind) {
+        if !self.flush_autosave(){return;}
         let Some(lib) = self.lib.clone() else {
             if kind == DocumentKind::Board {
                 self.new_board_document();
@@ -192,9 +215,11 @@ impl App {
             // an old version is on screen: the file on disk must keep the live document
             return Err("Go back to the current version before saving".into());
         }
-        lib.save_file(&lf.id, &self.doc).map_err(|e| format!("Cannot save: {e}"))?;
+        lib.save_file_with_history(&lf.id, &self.doc, &self.hist).map_err(|e| format!("Cannot save: {e}"))?;
         self.autosave.saved_hash = doc_hash(&self.doc);
         self.autosave.changed_at = None;
+        self.autosave.failures = 0;
+        self.autosave.retry_at = None;
         thumb::refresh_in_background(lib, lf.id, self.export_doc().into_owned());
         Ok(())
     }
@@ -211,24 +236,25 @@ impl App {
     }
 
     /// Saves pending edits right away (before leaving the editor or the app).
-    pub fn flush_autosave(&mut self) {
+    pub fn flush_autosave(&mut self) -> bool {
         if self.history.viewing.is_some() {
-            return;
+            return true;
         }
-        if self.lib_file.is_some() && doc_hash(&self.doc) != self.autosave.saved_hash {
-            if let Err(e) = self.save_library_file() {
+        if self.has_autosave_target() && doc_hash(&self.doc) != self.autosave.saved_hash {
+            if let Err(e) = self.save_autosave_target() {
                 self.autosave.changed_at=Some(self.now);
                 self.autosave.confirmed=true;
                 self.show_toast(e, true);
-                return;
+                return false;
             }
         }
         self.autosave.changed_at = None;
+        true
     }
 
     /// Called every frame: debounced autosave of the open library file.
     pub fn autosave_tick(&mut self, ctx: &egui::Context) {
-        if self.lib_file.is_none() || self.home.is_some() || self.history.viewing.is_some() {
+        if !self.has_autosave_target() || self.home.is_some() || self.history.viewing.is_some() {
             self.autosave.changed_at = None;
             return;
         }
@@ -239,6 +265,12 @@ impl App {
             self.autosave.confirmed = false;
         }
         let Some(t) = self.autosave.changed_at else { return };
+        if let Some(at)=self.autosave.retry_at {
+            if self.now<at {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at-self.now).min(5.)));
+                return;
+            }
+        }
         let busy = ctx.input(|i| i.pointer.any_down()) || self.canvas.text.is_some();
         if busy {
             self.autosave.changed_at = Some(self.now);
@@ -252,12 +284,15 @@ impl App {
             self.autosave.confirmed = true;
         } else if self.autosave.confirmed && self.now - t >= if self.doc.cityos.is_some(){2.0}else{AUTOSAVE_IDLE} {
             if doc_hash(&self.doc) != self.autosave.saved_hash {
-                match self.save_library_file() {
+                match self.save_autosave_target() {
                     Ok(()) => self.autosave.saves += 1,
                     Err(e) => {
                         self.autosave.changed_at=Some(self.now);
+                        self.autosave.failures=self.autosave.failures.saturating_add(1);
+                        let backoff=(2_u64 << self.autosave.failures.saturating_sub(1).min(4)).min(30);
+                        self.autosave.retry_at=Some(self.now+backoff as f64);
                         self.show_toast(e, true);
-                        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                        ctx.request_repaint_after(std::time::Duration::from_secs(backoff));
                     },
                 }
             }else{
@@ -292,7 +327,7 @@ impl App {
         let Some(lib) = self.lib.clone() else { return };
         let mut doc = self.doc.clone();
         doc.name = name.trim().to_string();
-        match lib.create_file(project, folder, name, &doc) {
+        match lib.create_file_with_history(project, folder, name, &doc, &self.hist) {
             Ok(e) => {
                 self.doc.name = e.name.clone();
                 let project_name = lib.project(project).map(|p| p.name).unwrap_or_default();

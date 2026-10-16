@@ -12,6 +12,374 @@ fn selected_workspace_requests_preserve_the_source_and_do_not_resume_unrelated_d
     assert!(!browse.resume);
 }
 
+fn profile_summary() -> Value {
+    json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[
+        {"sourcePath":"config/experience/living-canvas-frame/cityos-web.input.json","kind":"composition","fixture":"cityos-web-frame"},
+        {"sourcePath":"packages/design-system/src/components/ui/accordion.tsx","publicExport":"Accordion","kind":"component-specimen","fixture":"cityos-accordion"}
+    ]})
+}
+
+#[test]
+fn registered_selection_actions_exist_before_materialization_without_loading_an_unrelated_frame() {
+    let summary = profile_summary();
+    let mut selected = entry("frame");
+    selected.kind = "authored-composition".into();
+    selected.source_path = "config/experience/living-canvas-frame/cityos-web.input.json".into();
+    let actions = support::actions(&selected, None, Some(&summary), "committed");
+    assert_eq!(actions.source.as_deref(), Some(selected.source_path.as_str()));
+    assert!(actions.actual_preview && actions.editable);
+    assert!(actions.inline_pin.is_none(), "An unloaded selection has no captured renderer digest");
+    selected.source_path = "config/experience/another-page.input.json".into();
+    let actions = support::actions(&selected, None, Some(&summary), "committed");
+    assert_eq!(actions.source.as_deref(), Some(selected.source_path.as_str()));
+    assert!(!actions.actual_preview && !actions.editable);
+    assert!(actions.preview_reason.contains("No actual renderer"));
+    selected.kind = "registration".into();
+    assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
+}
+
+#[test]
+fn component_selection_uses_the_registered_export_and_rejects_other_exports_or_missing_module_identity() {
+    let summary = profile_summary();
+    let mut selected = entry("accordion");
+    selected.kind = "public-declaration".into();
+    selected.label = "Accordion".into();
+    selected.source_path = "packages/design-system/src/components/ui/accordion.tsx".into();
+    let actions = support::actions(&selected, None, Some(&summary), "committed");
+    assert_eq!(actions.source.as_deref(), Some(selected.source_path.as_str()));
+    assert!(actions.actual_preview && actions.editable);
+    selected.label = "AccordionItem".into();
+    assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
+    selected.label = "Accordion".into();
+    selected.source_path = "an-unrelated-file.json".into();
+    let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{"name":"Accordion"},
+        "workspaceProfile":{"sourcePath":"not-a-design-system-file.tsx","publicExport":"Accordion","fixture":"cityos-accordion"}});
+    assert!(support::actions(&selected, Some(&specimen), None, "committed").source.is_none());
+}
+
+#[test]
+fn registered_component_records_resolve_only_their_captured_module_and_export() {
+    let summary = profile_summary();
+    let mut selected = entry("accordion-record");
+    selected.kind = "registered-component".into();
+    selected.label = "Accordion".into();
+    selected.dependencies = vec!["components/ui/accordion.tsx".into()];
+    let unloaded = support::actions(&selected, None, Some(&summary), "committed");
+    assert_eq!(unloaded.source.as_deref(), Some("packages/design-system/src/components/ui/accordion.tsx"));
+    selected.dependencies.clear();
+    let mut specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{"name":"Accordion","file":"components/ui/accordion.tsx"},
+        "workspaceProfile":summary["workspaceProfiles"][1]});
+    let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
+    assert_eq!(actions.source.as_deref(), Some("packages/design-system/src/components/ui/accordion.tsx"));
+    specimen["data"]["file"] = json!("components/ui/another.tsx");
+    assert!(support::actions(&selected, Some(&specimen), Some(&summary), "committed").source.is_none());
+}
+
+#[test]
+fn inline_renderer_requires_matching_selection_and_exact_captured_commit_and_digest() {
+    let summary = profile_summary();
+    let mut selected = entry("frame");
+    selected.kind = "authored-composition".into();
+    selected.source_path = "config/experience/living-canvas-frame/cityos-web.input.json".into();
+    let mut specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{},"workspaceProfile":summary["workspaceProfiles"][0]});
+    specimen["workspaceProfile"]["sourceDigest"] = json!("b".repeat(64));
+    let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
+    let pin = actions.inline_pin.unwrap();
+    assert_eq!(pin["sourcePath"], selected.source_path);
+    assert_eq!(pin["sourceDigest"], "b".repeat(64));
+    for field in ["actualWebPreview", "editable"] { specimen["workspaceProfile"][field] = json!(false); }
+    let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
+    assert!(!actions.actual_preview && !actions.editable && actions.inline_pin.is_none());
+    specimen["workspaceProfile"]["actualWebPreview"] = json!(true);
+    specimen["workspaceProfile"]["sourceDigest"] = json!("short");
+    assert!(support::actions(&selected, Some(&specimen), Some(&summary), "committed").inline_pin.is_none());
+    specimen["workspaceProfile"]["sourceDigest"] = json!("b".repeat(64));
+    specimen["entry"]["id"] = json!("other");
+    assert!(support::actions(&selected, Some(&specimen), Some(&summary), "committed").inline_pin.is_none());
+    specimen["entry"]["id"] = json!(selected.id);
+    assert!(support::actions(&selected, Some(&specimen), Some(&summary), "local").inline_pin.is_none());
+    let mut invalid_commit = summary.clone();
+    invalid_commit["snapshot"]["canonicalCommit"] = json!("short");
+    assert!(support::actions(&selected, Some(&specimen), Some(&invalid_commit), "committed").inline_pin.is_none());
+}
+
+#[test]
+fn every_level_reports_captured_support_and_preserves_missing_coverage_as_unknown() {
+    let summary = json!({"navigation":{"levels":[
+        {"id":"L0","name":"Foundations","count":12,"temporaryViewCount":10,"rendererCount":0,"editableCount":0},
+        {"id":"L9","name":"Frame","count":0}
+    ]}});
+    let levels = support::levels(Some(&summary));
+    assert_eq!(levels.len(), 10);
+    assert_eq!(levels[0].count, Some(12));
+    assert_eq!(levels[0].specimens, Some(10));
+    assert_eq!(levels[0].renderers, Some(0));
+    assert_eq!(levels[0].editable, Some(0));
+    assert_eq!(levels[9].count, Some(0));
+    assert!(levels[9].editable.is_none());
+    for (n, level) in levels.iter().enumerate().skip(1).take(8) {
+        assert_eq!(level.id, format!("L{n}"));
+        assert!(level.count.is_none() && level.renderers.is_none());
+    }
+    assert!(support::levels(None).iter().all(|l| l.count.is_none()));
+}
+
+#[test]
+fn theme_actions_explain_unloaded_unselectable_stale_and_local_sources() {
+    let (selected, mut specimen, snapshot) = editable_fixture();
+    let summary = json!({"snapshot":snapshot});
+    let unloaded = support::actions(&selected, None, Some(&summary), "committed");
+    assert!(unloaded.copy_reason.unwrap().contains("Load the selected values"));
+    assert!(unloaded.theme_reason.unwrap().contains("Load this theme"));
+    let ready = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
+    assert!(ready.copy_reason.is_none() && ready.theme_reason.is_none());
+    specimen["data"]["metadata"]["selectable"] = json!(false);
+    assert!(support::actions(&selected, Some(&specimen), Some(&summary), "committed").theme_reason.unwrap().contains("non-selectable"));
+    specimen["entry"]["id"] = json!("other");
+    let stale = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
+    assert!(stale.copy_reason.unwrap().contains("selected source changed"));
+    assert!(stale.theme_reason.unwrap().contains("no longer matches"));
+    let local = support::actions(&selected, Some(&specimen), Some(&summary), "local");
+    assert!(local.copy_reason.unwrap().contains("Switch to GitLab main"));
+    assert!(local.theme_reason.unwrap().contains("Switch to GitLab main"));
+}
+
+#[test]
+fn nonvisual_dependencies_never_offer_a_visual_fixture_even_when_profile_metadata_conflicts() {
+    let mut selected = entry("provider");
+    selected.kind = "nonvisual-dependency".into();
+    let summary = json!({"workspaceProfiles":[{"sourcePath":selected.source_path,"kind":"composition","actualWebPreview":true,"editable":true}]});
+    let actions = support::actions(&selected, None, Some(&summary), "committed");
+    assert!(actions.source.is_none() && !actions.actual_preview && !actions.editable);
+    assert!(actions.preview_reason.contains("no standalone visual appearance"));
+}
+
+#[test]
+fn mismatched_materialization_identity_cannot_replace_the_selected_resource() {
+    for mismatch in ["entry", "digest"] {
+        let (mut browser, responses, _) = fixture();
+        browser.select(entry("one"));
+        browser.epoch = 4;
+        browser.busy = true;
+        let mut value = json!({"entry":entry("one"),"digest":"digest","data":{"$value":3}});
+        if mismatch == "entry" { value["entry"]["id"] = json!("other"); } else { value["digest"] = json!("other"); }
+        responses.send(Reply::Materialize(4, "one".into(), Ok(value))).unwrap();
+        browser.poll();
+        assert_eq!(browser.selected.as_ref().unwrap().id, "one");
+        assert!(browser.specimen.is_none());
+        assert!(browser.preview_error.as_ref().unwrap().contains("different source identity"));
+    }
+}
+
+#[test]
+fn navigation_history_restores_selection_filters_mode_and_detail_without_reusing_an_old_specimen() {
+    let (mut browser, _, _) = fixture();
+    browser.select(entry("one"));
+    browser.detail_tab = DetailTab::Inspector;
+    browser.theme_mode = "dark".into();
+    browser.filters = Filters { collection:"themes".into(), ..Default::default() };
+    browser.filters_changed();
+    assert!(browser.selected.is_none());
+    browser.navigate_history(false);
+    assert_eq!(browser.filters.collection, "design");
+    assert_eq!(browser.selected.as_ref().unwrap().id, "one");
+    assert_eq!(browser.theme_mode, "dark");
+    assert!(browser.detail_tab == DetailTab::Inspector);
+    assert!(!browser.results_visible);
+    assert!(browser.specimen.is_none() && browser.pending_selection);
+    browser.navigate_history(true);
+    assert_eq!(browser.filters.collection, "themes");
+    assert!(browser.selected.is_none() && browser.results_visible);
+    browser.filters.search = "new".into();
+    browser.filters_changed();
+    assert!(browser.navigation_forward.is_empty());
+}
+
+#[test]
+fn typing_during_debounce_keeps_one_back_location_and_clears_stale_inline_status() {
+    let (mut browser, _, _) = fixture();
+    browser.inline_status = "Current · old selection".into();
+    browser.filters.search = "a".into(); browser.filters_changed();
+    browser.filters.search = "ab".into(); browser.filters_changed();
+    assert_eq!(browser.navigation_back.len(), 1);
+    assert!(browser.inline_status.is_empty());
+    browser.navigate_history(false);
+    assert!(browser.filters.search.is_empty());
+}
+
+fn catalog_frame(browser: &mut Browser, ctx: &egui::Context, size: egui::Vec2, events: Vec<egui::Event>) -> egui::FullOutput {
+    ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), events, ..Default::default() }, |ui| browser.show(ui, ctx))
+}
+
+fn click_catalog(browser: &mut Browser, ctx: &egui::Context, size: egui::Vec2, id: &str) {
+    ctx.all_styles_mut(|style| style.animation_time = 0.0);
+    catalog_frame(browser, ctx, size, vec![]);
+    catalog_frame(browser, ctx, size, vec![]);
+    let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", id.to_string())))).unwrap_or_else(|| panic!("Missing {id}"));
+    let pos = rect.center();
+    for pressed in [true, false] {
+        catalog_frame(browser, ctx, size, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+        }]);
+    }
+}
+
+#[test]
+fn clicking_preview_before_materialization_requests_the_selected_resource() {
+    let ctx = egui::Context::default();
+    let (mut browser, _, _) = fixture();
+    browser.summary = Some(profile_summary());
+    let mut selected = entry("selected");
+    selected.kind = "public-declaration".into();
+    selected.label = "Accordion".into();
+    selected.source_path = "packages/design-system/src/components/ui/accordion.tsx".into();
+    browser.select(selected.clone());
+    click_catalog(&mut browser, &ctx, egui::vec2(1600., 1000.), "catalog-preview-action");
+    let request = browser.workspace_request.take().expect("Selected fixture should open before materialization");
+    assert_eq!(request.source_path.as_deref(), Some(selected.source_path.as_str()));
+    assert!(request.preview_only && !request.resume);
+    assert!(browser.specimen.is_none());
+}
+
+#[test]
+fn compact_results_return_keeps_selection_and_loaded_specimen() {
+    let ctx = egui::Context::default();
+    let (mut browser, _, _) = fixture();
+    browser.select(entry("one"));
+    browser.pending_selection = false;
+    browser.specimen = Some(json!({"entry":entry("one"),"digest":"digest","data":{"$value":3}}));
+    let captured = browser.specimen.clone();
+    click_catalog(&mut browser, &ctx, egui::vec2(680., 700.), "catalog-results-back");
+    assert!(browser.results_visible);
+    assert_eq!(browser.selected.as_ref().unwrap().id, "one");
+    assert_eq!(browser.specimen, captured);
+    assert_eq!(browser.filters, browser.displayed_filters);
+}
+
+#[test]
+fn list_and_tile_results_stay_in_the_viewport_at_compact_and_wide_sizes() {
+    for size in [egui::vec2(360., 700.), egui::vec2(680., 600.), egui::vec2(900., 600.), egui::vec2(1600., 1000.)] {
+        for tiles in [false, true] {
+            let ctx = egui::Context::default();
+            let (mut browser, _, _) = fixture();
+            browser.visual_results = tiles;
+            for _ in 0..2 { catalog_frame(&mut browser, &ctx, size, vec![]); }
+            for name in ["catalog-search", "catalog-item-one", "catalog-back"] {
+                let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("Missing {name} at {size:?}"));
+                assert!(rect.min.x >= 0. && rect.min.y >= 0. && rect.max.x <= size.x + 1. && rect.max.y <= size.y + 1., "{name} escaped {size:?} with tiles={tiles}: {rect:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn unloaded_selection_shows_disabled_actions_and_resource_specific_reason() {
+    let ctx = egui::Context::default();
+    let (mut browser, _, _) = fixture();
+    let mut selected = entry("provider");
+    selected.kind = "nonvisual-dependency".into();
+    browser.select(selected);
+    let output = catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1000.), vec![]);
+    let mut text = String::new();
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for expected in ["Open actual preview", "Open on canvas", "no standalone visual appearance", "No editable workspace adapter"] {
+        assert!(text.contains(expected), "Missing {expected}: {text}");
+    }
+    click_catalog(&mut browser, &ctx, egui::vec2(1600., 1000.), "catalog-preview-action");
+    assert!(browser.workspace_request.is_none());
+}
+
+#[test]
+fn empty_theme_modes_and_compact_token_sheets_remain_browsable() {
+    let ctx = egui::Context::default();
+    let mut mode = "light".into();
+    let _ = ctx.run_ui(Default::default(), |ui| assert!(preview::theme_sheet(ui, &json!({"modes":{}}), &mut mode)));
+    let (_, specimen, _) = editable_fixture();
+    let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360., 700.))), ..Default::default() }, |ui| {
+        assert!(preview::theme_sheet(ui, &specimen["presentation"], &mut mode));
+    });
+    let mut text = String::new();
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.contains("colors.primary") && text.contains("#123456"));
+}
+
+#[test]
+fn failed_initial_capture_offers_recovery_instead_of_an_endless_loading_message() {
+    let ctx = egui::Context::default();
+    let (mut browser, _, _) = fixture();
+    browser.summary = None;
+    browser.error = Some("Reader executable is unavailable".into());
+    let output = catalog_frame(&mut browser, &ctx, egui::vec2(900., 700.), vec![]);
+    let mut text = String::new();
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.contains("Repository capture is unavailable"));
+    assert!(text.contains("Retry capture") && text.contains("Connection settings"));
+}
+
+#[test]
+fn registered_product_hierarchy_exposes_only_the_captured_shell_route_and_page() {
+    let ctx = egui::Context::default();
+    let (mut browser, _, _) = fixture();
+    browser.products_open = true;
+    browser.filters = Filters { collection:"sources".into(), product:"alpha".into(), ..Default::default() };
+    browser.displayed_filters = browser.filters.clone();
+    browser.location_filters = browser.filters.clone();
+    browser.summary.as_mut().unwrap()["navigation"]["products"] = json!([{
+        "id":"alpha","name":"Alpha","targets":["web"],"shells":[{
+            "id":"main","name":"Main shell","routes":[{
+                "id":"overview","name":"Overview route","path":"/app/overview","pages":[{
+                    "id":"overview-page","name":"Overview page","sourcePath":"apps/alpha/src/overview.tsx"
+                }]
+            }]
+        }]
+    }]);
+    let size = egui::vec2(1600., 1200.);
+    click_catalog(&mut browser, &ctx, size, "catalog-hierarchy-alpha/shells/0");
+    click_catalog(&mut browser, &ctx, size, "catalog-hierarchy-alpha/shells/0/routes/0");
+    click_catalog(&mut browser, &ctx, size, "catalog-hierarchy-alpha/shells/0/routes/0/pages/0");
+    let output = catalog_frame(&mut browser, &ctx, size, vec![]);
+    let mut text = String::new();
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.contains("Page ·"));
+    assert!(text.contains("apps/alpha/src/overview.tsx"));
+    assert!(browser.workspace_request.is_none(), "Hierarchy browsing must not substitute a renderer");
+    browser.summary.as_mut().unwrap()["navigation"]["products"][0]["shells"] = json!([]);
+    let output = catalog_frame(&mut browser, &ctx, size, vec![]);
+    let mut text = String::new();
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.contains("No shell hierarchy is registered"));
+    assert!(!text.contains("Overview page"));
+}
+
+#[test]
+fn nested_target_composition_opens_its_exact_registered_source_without_a_frame_substitute() {
+    let ctx = egui::Context::default();
+    let (mut browser, _, _) = fixture();
+    browser.products_open = true;
+    browser.filters = Filters { collection:"sources".into(), product:"alpha".into(), ..Default::default() };
+    browser.displayed_filters = browser.filters.clone();
+    browser.location_filters = browser.filters.clone();
+    let source = "config/experience/registered-page.input.json";
+    browser.summary.as_mut().unwrap()["navigation"]["products"] = json!([{
+        "id":"alpha","name":"Alpha","targets":[{"id":"web","kind":"target","shells":[{
+            "id":"main","name":"Main shell","routes":[{"id":"overview","path":"/overview","compositions":[{
+                "id":"composition.page","kind":"composition","sourcePath":source,"sourceDigest":"d".repeat(64)
+            }]}]
+        }]}]
+    }]);
+    let size = egui::vec2(1600., 1400.);
+    for id in [
+        "catalog-hierarchy-alpha/targets/0",
+        "catalog-hierarchy-alpha/targets/0/shells/0",
+        "catalog-hierarchy-alpha/targets/0/shells/0/routes/0",
+        "catalog-hierarchy-alpha/targets/0/shells/0/routes/0/compositions/0",
+        "catalog-hierarchy-open-alpha/targets/0/shells/0/routes/0/compositions/0",
+    ] { click_catalog(&mut browser, &ctx, size, id); }
+    let request = browser.workspace_request.take().expect("Registered composition action should open its selected workspace");
+    assert_eq!(request.source_path.as_deref(), Some(source));
+    assert!(request.preview_only && !request.resume);
+}
+
 fn entry(id: &str) -> Entry {
     serde_json::from_value(json!({"id":id,"semanticId":"token:/colors/surface/page","label":"token:/colors/surface/page","level":"L0","family":"foundations","kind":"token","owner":"design-system","package":"@cityos/design-tokens","product":null,"targets":["web"],"locales":["ar","en"],"sourcePath":"tokens.json","sourcePointer":"/colors/page","sourceDigest":"digest","observationId":"git:fixture","dependencies":[],"generationStatus":"not-applicable","classificationStatus":"classified","temporaryView":"token-sheet","persistentDraft":false,"editable":false,"rendererQualified":false,"diagnostics":[]})).unwrap()
 }
@@ -34,6 +402,7 @@ fn fixture() -> (Browser, Sender<Reply>, Receiver<Job>) {
 pub(crate) fn populated_browser() -> Browser {
     let (mut browser, _, _) = fixture();
     browser.selected = Some(entry("one"));
+    browser.results_visible = false;
     browser.specimen = Some(json!({"entry":entry("one"),"data":{"$type":"color","$value":"#f8f8f3"}}));
     browser
 }
@@ -144,6 +513,84 @@ fn paused_catalog_does_not_schedule_background_scans() {
     browser.auto_refresh = true;
     browser.tick();
     assert!(matches!(requests.try_recv(), Ok(Job::Scan(..))));
+}
+
+#[test]
+fn idle_library_uses_a_five_second_guard_and_no_timer_when_paused_disconnected_or_hidden() {
+    let (mut browser, _, _) = fixture();
+    let now = Instant::now();
+    browser.last_refresh = now;
+    browser.last_interaction = now;
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_secs(5)));
+    browser.auto_refresh = false;
+    assert_eq!(browser.next_repaint_after(now), None);
+    browser.auto_refresh = true;
+    browser.summary = None;
+    assert_eq!(browser.next_repaint_after(now), None);
+    browser.busy = true;
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
+    browser.open = false;
+    assert_eq!(browser.next_repaint_after(now), None);
+}
+
+#[test]
+fn pending_library_work_keeps_fast_repaints_even_with_live_updates_paused() {
+    let (mut browser, _, _) = fixture();
+    let now = Instant::now();
+    browser.auto_refresh = false;
+    browser.busy = true;
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
+    browser.busy = false;
+    browser.filter_changed = Some(now);
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
+    browser.filter_changed = None;
+    browser.pending_selection = true;
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
+    browser.pending_selection = false;
+    assert_eq!(browser.next_repaint_after(now), None);
+}
+
+#[test]
+fn idle_guard_does_not_delay_sixty_second_refresh_backoff_or_interaction_deadlines() {
+    let (mut browser, _, _) = fixture();
+    let now = Instant::now();
+    browser.last_refresh = now - Duration::from_secs(59);
+    browser.last_interaction = now - Duration::from_secs(20);
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_secs(1)));
+    assert_eq!(browser.next_repaint_after(now + Duration::from_secs(1)), Some(Duration::ZERO));
+    browser.refresh_failures = 1;
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_secs(5)));
+    browser.last_refresh = now - Duration::from_secs(119);
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_secs(1)));
+    browser.refresh_failures = 0;
+    browser.last_refresh = now - Duration::from_secs(60);
+    browser.last_interaction = now - Duration::from_secs(9);
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::from_secs(1)));
+    browser.last_interaction = now - Duration::from_secs(10);
+    assert_eq!(browser.next_repaint_after(now), Some(Duration::ZERO));
+}
+
+#[test]
+fn reader_source_events_queue_then_wake_the_desktop_without_waiting_for_idle_repaint() {
+    let (mut browser, responses, requests) = fixture();
+    let ctx = egui::Context::default();
+    for _ in 0..4 { let _ = ctx.run_ui(Default::default(), |_| {}); }
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = wakes.clone();
+    ctx.set_request_repaint_callback(move |_| { observed.fetch_add(1, Ordering::SeqCst); });
+    *browser.repaint.lock().unwrap() = Some(ctx);
+    browser.mode = "local".into();
+    browser.selected = Some(entry("one"));
+    assert!(send_reply(&responses, &browser.repaint, Reply::SourceChanged));
+    assert!(wakes.load(Ordering::SeqCst) > 0);
+    browser.tick();
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, mode, _)) if mode == "local"));
+    assert_eq!(browser.selected.as_ref().unwrap().id, "one");
+    assert!(browser.workspace_request.is_none());
+    *browser.repaint.lock().unwrap() = None;
+    let count = wakes.load(Ordering::SeqCst);
+    assert!(send_reply(&responses, &browser.repaint, Reply::SourceChanged));
+    assert_eq!(wakes.load(Ordering::SeqCst), count);
 }
 #[test]
 fn inspection_canvas_has_real_native_nodes_and_no_editor_binding_or_history() {
@@ -317,7 +764,7 @@ fn supported_frame_specimen_links_to_actual_preview_instead_of_claiming_unavaila
     for shape in output.shapes {
         shape_text(&shape.shape, &mut text);
     }
-    assert!(text.contains("Open actual web preview"));
+    assert!(text.contains("Open actual preview"));
     assert!(!text.contains("Target rendering is not yet available"));
 }
 

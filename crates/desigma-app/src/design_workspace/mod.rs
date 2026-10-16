@@ -1,6 +1,8 @@
 //! Bound CityOS workspace: native projection and actual web renderer share one semantic draft.
 mod bridge;
 mod host;
+mod layout;
+mod dependencies;
 use crate::app::App;
 pub use bridge::Config;
 use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Color, Command, Document, Node, Paint, Rect, TextStyle};
@@ -10,8 +12,10 @@ use std::time::{Duration, Instant};
 
 struct DraftTab {
     document:Document,history:desigma_doc::History,path:Option<std::path::PathBuf>,file:Option<crate::home::LibFile>,
-    autosave:crate::home::Autosave,page:desigma_doc::NodeId,resource:Option<Value>,locale:String,theme:String,theme_id:String,
+    autosave:crate::home::Autosave,page:desigma_doc::NodeId,resource:Option<Value>,locale:String,theme:String,theme_id:String,interactive:bool,
 }
+#[derive(Clone, Copy)]
+enum DependencyAction { Open, Resume, Reconcile }
 
 pub struct Workspace {
     pub open: bool,
@@ -35,8 +39,6 @@ pub struct Workspace {
     pending: Option<Instant>,
     compare: Option<String>,
     compare_open: bool,
-    expanded: bool,
-    preview_visible: bool,
     validated: bool,
     harness: bool,
     viewport: (u32, u32),
@@ -54,6 +56,17 @@ pub struct Workspace {
     incoming:Option<Value>,
     inline_identity:Option<String>,
     requested_pin:Option<Value>,
+    layout: layout::Layout,
+    layout_loaded: bool,
+    narrow_preview: bool,
+    leave_to_library: bool,
+    dependency_action: Option<DependencyAction>,
+    dependency_draft: Option<Value>,
+    reconciliation_bundle: Option<Value>,
+    resolutions: BTreeMap<String, String>,
+    recovery_pending: bool,
+    interactive: bool,
+    property_text: BTreeMap<String,String>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -79,8 +92,6 @@ impl Default for Workspace {
             pending: None,
             compare: None,
             compare_open: false,
-            expanded: false,
-            preview_visible: true,
             validated: false,
             harness: false,
             viewport: (560, 720),
@@ -98,12 +109,23 @@ impl Default for Workspace {
             incoming:None,
             inline_identity:None,
             requested_pin:None,
+            layout: Default::default(),
+            layout_loaded: false,
+            narrow_preview: false,
+            leave_to_library: true,
+            dependency_action: None,
+            dependency_draft: None,
+            reconciliation_bundle: None,
+            resolutions: BTreeMap::new(),
+            recovery_pending: false,
+            interactive: false,
+            property_text: BTreeMap::new(),
         }
     }
 }
 
 fn binding(draft: Value, projection: &Value) -> Result<Document, String> {
-    if draft["schemaVersion"] != "cityos.design-exchange.v2"
+    if !matches!(draft["schemaVersion"].as_str(),Some("cityos.design-exchange.v2" | "cityos.design-exchange.v3"))
         || !matches!(projection["schemaVersion"].as_str(), Some("cityos.desigma-canvas.v1" | "cityos.desigma-structure.v1"))
         || projection["draftId"] != draft["draftId"]
         || projection["draftRevision"] != draft["draftRevision"]
@@ -179,6 +201,14 @@ fn revision(doc: &Document) -> Option<(String, u64)> {
     Some((d["draftId"].as_str()?.into(), d["draftRevision"].as_u64()?))
 }
 
+fn local_copy(document: &Document) -> Document {
+    let mut copy = document.clone();
+    copy.cityos = None;
+    copy.name = format!("{} · local copy", copy.name);
+    for node in copy.nodes.values_mut() { node.locked = false; node.source_id = None; }
+    copy
+}
+
 /// Headless delivery check through the same native document and trusted bridge paths.
 pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<Value, String> {
     let bundle: Value =
@@ -226,6 +256,14 @@ impl Workspace {
         self.pending = Some(Instant::now());
     }
     pub fn begin(&mut self, config: Config, source: Option<String>, preview_only: bool) {
+        self.begin_request(config,source,preview_only,None);
+    }
+    fn begin_request(&mut self, config: Config, source: Option<String>, preview_only: bool,pin:Option<Value>) {
+        self.property_text.clear();
+        self.interactive=false;
+        self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
+        self.leave_to_library = true;
+        self.load_layout(&config);
         self.inline_identity=None;self.requested_pin=None;self.changes_mode=false;
         self.host.reset();
         self.bridge = Some(bridge::Bridge::spawn(config.clone()));
@@ -253,7 +291,8 @@ impl Workspace {
         self.render_started = None;
         self.compare = None;
         self.compare_open = false;
-        self.send(json!({"op":"Resources"}));
+        if let Some(pin)=pin {self.requested_source=None;self.send(json!({"op":"Open","resource":pin}));}
+        else{self.send(json!({"op":"Resources"}));}
     }
     fn open_resource(&mut self, resource: Value) {
         self.changes_mode=false;self.incoming=None;
@@ -274,20 +313,21 @@ impl Workspace {
         self.themes_loaded = false;
         self.send(json!({"op":"Open","resource":resource}));
     }
-    pub fn show_inline(&mut self,app:&mut App,frame:&eframe::Frame,config:Config,pin:Value,rect:egui::Rect,scale:f32)->String {
+    pub fn show_inline(&mut self,app:&mut App,frame:&eframe::Frame,config:Config,pin:Value,rect:egui::Rect,scale:f32,ctx:&egui::Context)->String {
         let key=serde_json::to_string(&pin).unwrap_or_default();
         if self.inline_identity.as_deref()!=Some(&key){
             let Some(source)=pin["sourcePath"].as_str() else{return "Preview source unavailable".into();};
-            self.begin(config,Some(source.into()),true);self.requested_pin=Some(pin);self.open=false;self.inline_identity=Some(key);
+            self.begin_request(config,Some(source.into()),true,Some(pin));self.open=false;self.inline_identity=Some(key);
         }
         self.poll(app);
         if let Some(error)=&self.error{self.host.hide();return error.clone();}
         if let Some(url)=self.preview.as_ref().and_then(|p|p["url"].as_str()){
-            if let Err(error)=self.host.show(frame,url,rect,scale){return error;}
+            if let Err(error)=self.host.show(frame,url,rect,scale,ctx){self.render_started=None;self.pending=None;self.error=Some(error.clone());return error;}
         }
         if self.current{format!("Current · revision {}",self.preview.as_ref().map(|p|p["draftRevision"].clone()).unwrap_or(Value::Null))}
         else if let Some(operation)=&self.busy{format!("{operation}…")}else{"Preparing actual preview…".into()}
     }
+    pub fn inline_pending(&self)->bool {self.error.is_none()&&(self.busy.is_some()||self.pending.is_some()||self.render_started.is_some())}
     fn actual_preview(&self) -> bool {
         self.harness || self.resource.as_ref().is_some_and(|r| r["actualWebPreview"] == true)
     }
@@ -296,28 +336,34 @@ impl Workspace {
         if app.lib_file.is_some(){return app.save_library_file();}
         if let Some(path)=&app.file_path{return crate::io::save_path(&app.doc,path).map(|_|());}
         if app.doc.cityos.is_some(){
-            let lib=app.lib.clone().ok_or("The library is unavailable. Save this draft before switching.")?;
-            let project=lib.list_projects().into_iter().find(|p|p.name=="CityOS drafts").map(Ok).unwrap_or_else(||lib.create_project("CityOS drafts")).map_err(|e|e.to_string())?;
-            let file=lib.create_file(&project.id,None,&app.doc.name,&app.doc).map_err(|e|e.to_string())?;
-            app.lib_file=Some(crate::home::LibFile{id:file.id,project_id:project.id,project:project.name,name:file.name});
-            app.autosave=crate::home::Autosave{seen_rev:app.canvas.tiles.rev(),saved_hash:crate::home::doc_hash(&app.doc),..Default::default()};
-            return Ok(());
+            return Self::save_to_draft_library(app);
         }
         if app.hist.can_undo(){return Err("Save your current design before opening a bound draft.".into());}Ok(())
+    }
+    fn save_to_draft_library(app: &mut App) -> Result<(), String> {
+        if app.lib_file.is_some() { return app.save_library_file(); }
+        let lib=app.lib.clone().ok_or("The library is unavailable. Save this draft before switching.")?;
+        let project=lib.list_projects().into_iter().find(|p|p.name=="CityOS drafts").map(Ok).unwrap_or_else(||lib.create_project("CityOS drafts")).map_err(|e|e.to_string())?;
+        let file=lib.create_file_with_history(&project.id,None,&app.doc.name,&app.doc,&app.hist).map_err(|e|e.to_string())?;
+        app.lib_file=Some(crate::home::LibFile{id:file.id,project_id:project.id,project:project.name,name:file.name});
+        app.file_path=None;
+        app.autosave=crate::home::Autosave{seen_rev:app.canvas.tiles.rev(),saved_hash:crate::home::doc_hash(&app.doc),..Default::default()};
+        Ok(())
     }
     fn suspend_current(&mut self,app:&mut App)->Result<(),String>{
         let id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
         if id.is_some()&&self.tabs.len()>=3{return Err("Four drafts are already loaded. Save and close an inactive tab before opening another.".into());}
         Self::save_before_switch(app)?;
         if let Some(id)=id{self.tabs.insert(id,DraftTab{document:app.doc.clone(),history:std::mem::take(&mut app.hist),path:app.file_path.clone(),file:app.lib_file.clone(),
-            autosave:std::mem::take(&mut app.autosave),page:app.page,resource:self.resource.clone(),locale:self.locale.clone(),theme:self.theme.clone(),theme_id:self.theme_id.clone()});}
+            autosave:std::mem::take(&mut app.autosave),page:app.page,resource:self.resource.clone(),locale:self.locale.clone(),theme:self.theme.clone(),theme_id:self.theme_id.clone(),interactive:self.interactive});}
         Ok(())
     }
     fn activate_tab(&mut self,app:&mut App,id:&str){
         let Some(tab)=self.tabs.remove(id) else{return;};
         if let Err(error)=self.suspend_current(app){self.tabs.insert(id.into(),tab);self.error=Some(error);return;}
-        app.replace_document(tab.document,tab.path);app.hist=tab.history;app.lib_file=tab.file;app.autosave=tab.autosave;app.page=tab.page;app.home=None;
+        if !app.replace_document(tab.document,tab.path){self.error=Some("Current draft could not be saved; tab switch cancelled".into());return;}app.hist=tab.history;app.lib_file=tab.file;app.autosave=tab.autosave;app.page=tab.page;app.home=None;
         self.resource=tab.resource;self.locale=tab.locale;self.theme=tab.theme;self.theme_id=tab.theme_id;
+        self.interactive=tab.interactive;
         self.changes_mode=false;self.incoming=None;
         if let Some(config)=self.config.clone(){self.resume(config,app);}
     }
@@ -329,17 +375,33 @@ impl Workspace {
             self.error = Some("Reusable dependencies are unresolved. This file remains a temporary structure preview.".into());
             return;
         }
+        let candidate = self.staged.as_ref().unwrap().clone();
+        if !self.require_dependencies(app, &candidate, DependencyAction::Open) { return; }
         // Previewing another file never replaces the editor document. An explicit
         // open must preserve the current document, including failed saves.
         if let Err(error)=self.suspend_current(app){self.error=Some(error);return;}
-        let doc = self.staged.take().unwrap();
-        app.replace_document(doc, None);
+        let doc = self.staged.as_ref().unwrap().clone();
+        if !app.replace_document(doc, None){self.error=Some("Current draft could not be saved; open cancelled".into());return;}
+        self.staged=None;
         app.home = None;
         self.preview_only = false;
         self.changes_mode=false;self.incoming=None;
         self.temporary_canvas = None;
         self.observed = None;
         self.error = None;
+        if let Err(error)=Self::save_before_switch(app) { self.error=Some(error); }
+    }
+    fn create_local_copy(&mut self, app: &mut App) {
+        let source = if self.preview_only { self.staged.as_ref() } else { Some(&app.doc) };
+        let Some(document) = source.map(local_copy) else { return; };
+        if let Err(error) = self.suspend_current(app) { self.error = Some(error); return; }
+        if !app.replace_document(document, None) { self.error = Some("Save failed; local copy was not opened".into()); return; }
+        app.home = None;
+        self.host.reset();
+        self.bridge = None;
+        self.leave_to_library = false;
+        self.open = false;
+        app.show_toast("Local Desigma copy · no CityOS submission binding", false);
     }
     pub fn begin_harness(&mut self, config: Config) {
         self.host.reset();
@@ -356,6 +418,10 @@ impl Workspace {
         self.send(json!({"op":"Harness"}));
     }
     pub fn resume(&mut self, config: Config, app: &App) {
+        self.property_text.clear();
+        self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
+        self.leave_to_library = true;
+        self.load_layout(&config);
         self.inline_identity=None;self.requested_pin=None;
         self.host.reset();
         self.config = Some(config);
@@ -385,6 +451,93 @@ impl Workspace {
     pub fn hide(&self) {
         self.host.hide();
     }
+    pub fn library_requested(&self) -> bool { self.leave_to_library }
+    fn require_dependencies(&mut self, app: &App, document: &Document, action: DependencyAction) -> bool {
+        let Some(library) = &app.lib else { self.error=Some("The dependency library is unavailable; this draft remains read-only".into()); return false; };
+        if dependencies::complete(library, document) { return true; }
+        let Some(draft) = draft(document).cloned() else { self.error=Some("Missing bound draft".into()); return false; };
+        self.dependency_action=Some(action); self.dependency_draft=Some(draft.clone());
+        self.send(json!({"op":"Dependencies","draft":draft}));
+        false
+    }
+    fn install_reconciliation(&mut self, app: &mut App, value: Value) {
+        let install = (|| -> Result<(), String> {
+            if value["historyBoundary"] != true { return Err("Reconciliation did not establish a validated baseline boundary".into()); }
+            let mut document = binding(value["draft"].clone(), &value["projection"])?;
+            document.name = app.doc.name.clone();
+            let previous = revision(&app.doc).ok_or("Current draft is unavailable")?;
+            let next = revision(&document).ok_or("Incoming draft is unavailable")?;
+            if previous.0 != next.0 || next.1 != previous.1 + 1 { return Err("Obsolete reconciliation discarded".into()); }
+            if !self.require_dependencies(app, &document, DependencyAction::Reconcile) {
+                self.reconciliation_bundle=Some(value.clone());
+                return Ok(());
+            }
+            let library = app.lib.clone().ok_or("The draft library is unavailable")?;
+            let file = app.lib_file.clone().ok_or("Save this draft to the library before applying incoming changes")?;
+            // Archive the current undo stack, then persist the complete new state
+            // before it becomes visible. A failed save leaves the old draft active.
+            let mut checkpoint = library.load_checkpoint(&file.id).map_err(|e| e.to_string())?;
+            checkpoint.document = app.doc.clone(); checkpoint.history = app.hist.clone();
+            checkpoint.install_baseline(document.clone());
+            let expected_checkpoint = checkpoint.to_json().map_err(|e|e.to_string())?;
+            if let Err(error)=library.save_checkpoint(&file.id, &checkpoint) {
+                // A durable journal can have committed despite an I/O error.
+                // Recover/read back before either installing or retrying old state.
+                match library.load_checkpoint_for_recovery(&file.id) {
+                    Ok((recovered,missing)) if missing.is_empty() && recovered.to_json().is_ok_and(|text|text==expected_checkpoint) => {},
+                    Ok((recovered,_)) if recovered.document.to_json().ok()==app.doc.to_json().ok() => return Err(format!("Incoming changes were not installed; current draft retained: {error}")),
+                    _ => {
+                        self.recovery_pending=true; self.validated=false;
+                        self.reconciliation_bundle=Some(value.clone());
+                        return Err("Document generation outcome is uncertain. Recover it before editing, saving or leaving.".into());
+                    }
+                }
+            }
+            app.doc = document; app.hist = checkpoint.history;
+            app.history.reset(); app.changed();
+            app.autosave.saved_hash=crate::home::doc_hash(&app.doc);
+            app.autosave.changed_at=None;
+            self.resource=Some(value["resource"].clone()); self.incoming=None; self.resolutions.clear();
+            self.compare=None; self.current=false; self.observed=None; self.validated=true;
+            self.pending=Some(Instant::now());
+            self.recovery_pending=false; self.reconciliation_bundle=None;
+            app.show_toast("Reviewed incoming changes saved. Earlier baseline history is retained for inspection.",false);
+            Ok(())
+        })();
+        if let Err(error)=install { self.error=Some(error); self.bridge=None; self.busy=None; }
+    }
+    fn recover_reconciliation(&mut self, app: &mut App) {
+        let result=(|| -> Result<(),String> {
+            let expected=self.reconciliation_bundle.as_ref().ok_or("Missing recovery identity")?;
+            let library=app.lib.as_ref().ok_or("Draft library unavailable")?;
+            let file=app.lib_file.as_ref().ok_or("Draft file unavailable")?;
+            let(checkpoint,missing)=library.load_checkpoint_for_recovery(&file.id).map_err(|e|e.to_string())?;
+            if !missing.is_empty(){return Err("Recovery dependencies remain unavailable".into());}
+            let recovered=draft(&checkpoint.document).ok_or("Recovery binding unavailable")?;
+            if ["draftId","draftRevision","semanticDigest","base"].iter().all(|key|recovered[*key]==expected["draft"][*key]) {
+                app.doc=checkpoint.document; app.hist=checkpoint.history; app.history.reset(); app.changed();
+                app.autosave.saved_hash=crate::home::doc_hash(&app.doc); app.autosave.changed_at=None;
+                self.resource=Some(expected["resource"].clone()); self.incoming=None;
+            } else if checkpoint.document.to_json().ok()!=app.doc.to_json().ok(){return Err("Recovered generation differs from both known states; keep the draft frozen for inspection".into());}
+            self.recovery_pending=false; self.reconciliation_bundle=None; self.validated=true;
+            self.current=false;self.observed=None;self.pending=Some(Instant::now());self.error=None;
+            Ok(())
+        })();
+        if let Err(error)=result{self.error=Some(error);}
+    }
+    fn load_layout(&mut self, config: &Config) {
+        if self.layout_loaded { return; }
+        match layout::Layout::load(&config.cache) {
+            Ok(value) => self.layout = value,
+            Err(error) => self.error = Some(error),
+        }
+        self.layout_loaded = true;
+    }
+    fn save_layout(&mut self) {
+        if let Some(config) = &self.config {
+            if let Err(error) = self.layout.save(&config.cache) { self.error = Some(error); }
+        }
+    }
     fn send(&mut self, value: Value) {
         if self.busy.is_some() {
             return;
@@ -399,7 +552,7 @@ impl Workspace {
             return;
         };
         self.busy = value["op"].as_str().map(str::to_owned);
-        if bridge.jobs.send(value).is_err() {
+        if bridge.jobs.try_send(value).is_err() {
             self.busy = None;
             self.error = Some("Exchange helper unavailable".into());
         }
@@ -419,7 +572,8 @@ impl Workspace {
     }
     fn scenario(&self) -> Value {
         json!({"target":"web","locale":self.locale,"theme":self.theme,"themeId":self.theme_id,
-        "viewport":{"width":self.viewport.0,"height":self.viewport.1},"fixture":self.resource.as_ref().and_then(|r|r["fixture"].as_str()).unwrap_or("cityos-web-frame")})
+        "viewport":{"width":self.viewport.0,"height":self.viewport.1},"fixture":self.resource.as_ref().and_then(|r|r["fixture"].as_str()).unwrap_or("cityos-web-frame"),
+        "renderMode":if self.interactive && self.resource.as_ref().is_none_or(|r|r["fixture"]!="cityos-lower-level"){"interactive-fixture"}else{"studio-passive"},"motion":"reduce"})
     }
     fn poll(&mut self, app: &mut App) {
         let result = self.bridge.as_ref().and_then(|b| b.replies.try_recv().ok());
@@ -440,7 +594,7 @@ impl Workspace {
                             self.resources = value["resources"].as_array().cloned().unwrap_or_default();
                             self.resource_diagnostics = value["diagnostics"].as_array().cloned().unwrap_or_default();
                             if let Some(source) = self.requested_source.take() {
-                                if let Some(resource) = self.resources.iter().find(|r| r["sourcePath"] == source).cloned() {
+                                if let Some(resource) = self.resources.iter().find(|r| r["sourcePath"] == source && r["openAvailable"]!=false).cloned() {
                                     let resource=self.requested_pin.take().unwrap_or(resource);
                                     self.open_resource(resource);
                                 } else {
@@ -459,7 +613,9 @@ impl Workspace {
                         }
                         "Open" | "Command" | "Project" => match binding(value["draft"].clone(), &value["projection"]) {
                             Err(e) => self.error = Some(e),
-                            Ok(document) => {
+                            Ok(mut document) => {
+                                self.property_text.clear();
+                                if op != "Open" && !self.preview_only { document.name=app.doc.name.clone(); }
                                 self.incoming=None;
                                 self.resource = Some(value["resource"].clone());
                                 if self.preview_only {
@@ -470,7 +626,7 @@ impl Workspace {
                                         self.install_staged(app);
                                     }
                                 } else if op == "Open" {
-                                    app.replace_document(document, None);
+                                    if !app.replace_document(document, None){self.error=Some("Current draft could not be saved; open cancelled".into());return;}
                                     app.home = None;
                                 } else if op == "Command" {
                                     let previous = revision(&app.doc);
@@ -486,6 +642,10 @@ impl Workspace {
                                 } else {
                                     app.doc = document;
                                     app.changed();
+                                }
+                                if op == "Project" && !self.require_dependencies(app, &app.doc, DependencyAction::Resume) {
+                                    self.validated=false;
+                                    return;
                                 }
                                 self.validated = true;
                                 self.observed = None;
@@ -509,7 +669,25 @@ impl Workspace {
                             self.compare = Some(serde_json::to_string_pretty(&value).unwrap_or_default());
                             self.compare_open = !self.changes_mode;
                         }
-                        "Incoming"=>self.incoming=Some(value),
+                        "Incoming"=>{self.resolutions.clear();self.incoming=Some(value);},
+                        "Dependencies" => {
+                            let retained = self.config.as_ref().zip(app.lib.as_ref()).zip(self.dependency_draft.as_ref())
+                                .ok_or_else(|| "Dependency context changed".to_owned())
+                                .and_then(|((config, library), draft)| dependencies::retain(&config.cache, library, draft, &value));
+                            match retained {
+                                Err(error) => { self.error=Some(error); self.validated=false; },
+                                Ok(()) => {
+                                    self.dependency_draft=None;
+                                    match self.dependency_action.take() {
+                                        Some(DependencyAction::Open) => self.install_staged(app),
+                                        Some(DependencyAction::Resume) => { self.validated=true; self.observed=None; self.pending=Some(Instant::now()); },
+                                        Some(DependencyAction::Reconcile) => if let Some(bundle)=self.reconciliation_bundle.take() { self.install_reconciliation(app,bundle); },
+                                        None => {},
+                                    }
+                                }
+                            }
+                        },
+                        "Reconcile" => self.install_reconciliation(app, value),
                         _ => {}
                     }
                 }
@@ -547,13 +725,14 @@ impl Workspace {
                 Some("failed") => {
                     self.current = false;
                     self.error = Some("Renderer failed; draft retained".into());
+                    self.render_started = None;
                 }
                 Some("selection") => {
                     if let Some(node) = event["nodeId"].as_str() {
                         self.select(app, node);
                     }
                 }
-                Some("shortcut") if !self.preview_only && self.busy.is_none() => match event["key"].as_str() {
+                Some("shortcut") if !self.preview_only && self.busy.is_none() && !self.recovery_pending => match event["key"].as_str() {
                     Some("s") => {
                         self.host.hide();
                         app.save(false);
@@ -580,7 +759,7 @@ impl Workspace {
             if let Some(d) = self.active_draft(app) {
                 self.send(json!({"op":"Themes","draft":d}));
             }
-        } else if self.validated && self.actual_preview() && self.pending.is_some_and(|at| at.elapsed() >= Duration::from_millis(250)) && self.busy.is_none() {
+        } else if self.validated && self.actual_preview() && (self.preview_only || self.inline_identity.is_some() || self.layout.view != layout::View::Canvas) && self.pending.is_some_and(|at| at.elapsed() >= Duration::from_millis(250)) && self.busy.is_none() {
             self.pending = None;
             self.request_preview(app);
         }
@@ -609,10 +788,12 @@ impl Workspace {
         }
         self.poll(app);
         let ctx = ui.ctx().clone();
-        ctx.request_repaint_after(Duration::from_millis(if self.busy.is_some() || self.pending.is_some() || self.render_started.is_some() {
+        let old_layout = self.layout.clone();
+        let visible_pending = self.pending.is_some() && (self.preview_only || self.layout.view != layout::View::Canvas);
+        ctx.request_repaint_after(Duration::from_millis(if self.busy.is_some() || visible_pending || self.render_started.is_some() {
             100
         } else {
-            1000
+            5000
         }));
         if let Some(toast) = &app.toast {
             if app.now < toast.until {
@@ -621,13 +802,13 @@ impl Workspace {
                 });
             }
         }
-        if !self.preview_only {
-            app.autosave_tick(&ctx);
-            if ctx.input(|i| i.viewport().close_requested()) {
-                app.flush_autosave();
-            }
+        // `app` remains the user's persistent document while a temporary preview
+        // lives in `staged`/`temporary_canvas`. Leaving must still save that draft.
+        if !self.recovery_pending { app.autosave_tick(&ctx); }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.recovery_pending || !app.flush_autosave(){ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);}
         }
-        if !ctx.egui_wants_keyboard_input() && self.busy.is_none() {
+        if !ctx.egui_wants_keyboard_input() && self.busy.is_none() && !self.recovery_pending {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) && !self.preview_only {
                 app.save(false);
             }
@@ -640,7 +821,7 @@ impl Workspace {
         }
         egui::Panel::top("cityos-workspace-actions").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Library").clicked() {
+                if ui.add_enabled(!self.recovery_pending,egui::Button::new("Library")).clicked() {
                     self.open = false;
                 }
                 if ui.selectable_label(!self.changes_mode,"Design").clicked(){self.changes_mode=false;}
@@ -648,8 +829,8 @@ impl Workspace {
                     self.changes_mode=true;self.compare_open=false;
                     if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Export","draft":draft}));}
                 }
-                ui.heading(if self.preview_only { "CityOS · Design preview" } else { "CityOS · Bound design workspace" });
-                if ui.add_enabled(self.busy.is_none(), egui::Button::new("Choose design file…")).clicked() {
+                ui.strong(if self.preview_only { "Design preview" } else { "CityOS workspace" });
+                if ui.add_enabled(self.busy.is_none()&&!self.recovery_pending, egui::Button::new("Choose design file…")).clicked() {
                     self.picker_open = !self.picker_open;
                     if self.resources.is_empty() {
                         self.send(json!({"op":"Resources"}));
@@ -670,11 +851,35 @@ impl Workspace {
                         app.save(false);
                     }
                 } else if !self.preview_only {
-                    if ui.button("Save draft").clicked() {
+                    if ui.add_enabled(!self.recovery_pending,egui::Button::new("Save draft")).clicked() {
                         self.host.hide();
                         app.save(false);
                     }
-                    if ui.button("Open draft…").clicked() {
+                    ui.add_enabled_ui(!self.recovery_pending,|ui|{ui.menu_button("Draft actions", |ui| {
+                    if app.lib_file.is_none() && ui.button("Save to draft library").clicked() {
+                        ui.close();
+                        match Self::save_to_draft_library(app) {
+                            Ok(()) => app.show_toast("Draft and history saved to the CityOS draft library",false),
+                            Err(error) => self.error=Some(error),
+                        }
+                    }
+                    if ui.add_enabled(app.lib_file.is_some()&&self.validated,egui::Button::new("Export portable draft…")).clicked() {
+                        ui.close();self.host.hide();
+                        let export=(|| -> Result<(),String> {
+                            Self::save_before_switch(app)?;
+                            let library=app.lib.as_ref().ok_or("Draft library unavailable")?;
+                            let file=app.lib_file.as_ref().ok_or("Save this draft to the library before exporting")?;
+                            let payload=library.export_checkpoint(&file.id).map_err(|e|e.to_string())?;
+                            if let Some(path)=rfd::FileDialog::new().add_filter("Portable Desigma checkpoint",&["json"]).set_file_name(format!("{}.portable.json",app.doc.name)).save_file() {
+                                desigma_library::write_atomic(&path,payload.as_bytes()).map_err(|e|e.to_string())?;
+                                app.show_toast("Portable draft exported with verified dependencies and retained history",false);
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error)=export{self.error=Some(error);}
+                    }
+                    if ui.button("Open saved draft…").clicked() {
+                        ui.close();
                         self.host.hide();
                         app.open_dialog();
                         // A loaded file never inherits the previous document's validation,
@@ -684,30 +889,42 @@ impl Workspace {
                         }
                     }
                     if ui.add_enabled(self.validated && self.busy.is_none(), egui::Button::new("Compare / export")).clicked() {
+                        ui.close();
                         if let Some(draft) = self.active_draft(app) {
                             self.send(json!({"op":"Export","draft":draft}));
                         }
                     }
                     if ui.add_enabled(self.validated && self.busy.is_none() && app.hist.can_undo(), egui::Button::new("Undo")).clicked() {
+                        ui.close();
                         app.undo();
                     }
                     if ui.add_enabled(self.validated && self.busy.is_none() && app.hist.can_redo(), egui::Button::new("Redo")).clicked() {
+                        ui.close();
                         app.redo();
                     }
                     ui.add_enabled(false, egui::Button::new("Submit proposal"))
                         .on_hover_text("Engineering owner publication and merge qualification remains required");
+                    });});
                 }
                 if ui.button("Reset panels").clicked() {
-                    self.expanded = false;
-                    self.preview_visible = true;
-                    ctx.memory_mut(|m| m.data.clear());
+                    self.layout = Default::default();
+                    self.narrow_preview = false;
+                    // Keep focus, catalog navigation and unrelated editor preferences.
+                    ctx.data_mut(|data| {
+                        data.remove::<egui::containers::panel::PanelState>(egui::Id::new("cityos-workspace-properties"));
+                        data.remove::<egui::containers::panel::PanelState>(egui::Id::new("cityos-workspace-preview"));
+                    });
                 }
-                if self.actual_preview() {
-                    ui.checkbox(&mut self.preview_visible, "Web preview");
-                    if ui.button(if self.expanded { "Canvas + preview" } else { "Larger preview" }).clicked() {
-                        self.expanded = !self.expanded;
-                    }
+                if self.actual_preview() && !self.preview_only {
+                    ui.selectable_value(&mut self.layout.view, layout::View::Canvas, "Canvas");
+                    ui.selectable_value(&mut self.layout.view, layout::View::Split, "Split");
+                    ui.selectable_value(&mut self.layout.view, layout::View::Preview, "Preview");
                 }
+                if ui.add_enabled(self.validated && self.busy.is_none(), egui::Button::new("Create local copy"))
+                    .on_hover_text("Open an ordinary editable Desigma copy of this projection. It has no CityOS submission binding.").clicked() {
+                    self.create_local_copy(app);
+                }
+                if !self.preview_only { ui.toggle_value(&mut self.layout.inspector, "Properties"); }
             });
         });
         let active_id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
@@ -715,10 +932,10 @@ impl Workspace {
             let tabs:Vec<_>=self.tabs.iter().map(|(id,t)|(id.clone(),t.document.name.clone())).collect();
             let mut activate=None;let mut close=None;
             egui::Panel::top("cityos-draft-tabs").show(ui,|ui|{ui.horizontal_wrapped(|ui|{
-                if active_id.is_some()&&ui.selectable_label(!self.preview_only,format!("{} · {}",app.doc.name,if app.autosave.pending(){"unsaved"}else{"local draft"})).clicked(){
+                if active_id.is_some()&&ui.add_enabled(!self.recovery_pending,egui::Button::new(format!("{} · {}",app.doc.name,if app.autosave.pending(){"unsaved"}else{"local draft"})).selected(!self.preview_only)).clicked(){
                     if let Some(config)=self.config.clone(){self.resume(config,app);}
                 }
-                for(id,name)in tabs {if ui.add_enabled(self.busy.is_none(),egui::Button::new(name)).clicked(){activate=Some(id.clone());}
+                for(id,name)in tabs {if ui.add_enabled(self.busy.is_none()&&!self.recovery_pending,egui::Button::new(name)).clicked(){activate=Some(id.clone());}
                     if ui.small_button("×").on_hover_text("Close saved inactive draft").clicked(){close=Some(id);}}
                 ui.small("One active canvas / renderer");
             });});
@@ -726,9 +943,10 @@ impl Workspace {
             if let Some(id)=activate{self.activate_tab(app,&id);}
         }
         if self.changes_mode {
+            if old_layout != self.layout { self.save_layout(); }
             self.host.hide();
             egui::CentralPanel::default().show(ui,|ui|{
-                ui.heading("Changes");ui.label("Your draft keeps its canonical base until a reviewed reconciliation is qualified.");
+                ui.heading("Changes");ui.label("Review incoming source changes before updating this draft's pinned baseline.");
                 if let Some(error)=&self.error{ui.colored_label(ui.visuals().error_fg_color,error);}
                 ui.horizontal_wrapped(|ui|{
                     if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Review incoming changes")).clicked(){if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Incoming","draft":draft}));}}
@@ -736,15 +954,66 @@ impl Workspace {
                     ui.add_enabled(false,egui::Button::new("Submit proposal")).on_hover_text("Engineering owner acceptance and recovery qualification is required.");
                     ui.add_enabled(false,egui::Button::new("Check outcome")).on_hover_text("No qualified owner submission adapter is installed.");
                 });
-                egui::ScrollArea::both().id_salt("cityos-changes-content").show(ui,|ui|{
-                    if let Some(incoming)=&self.incoming{ui.heading("Incoming source");ui.monospace(serde_json::to_string_pretty(incoming).unwrap_or_default());}
-                    ui.heading("Semantic edits");if let Some(compare)=&self.compare {ui.monospace(compare);}else{ui.label("Choose Compare local edits.");}
+                let mut apply_incoming=false;
+                egui::ScrollArea::vertical().id_salt("cityos-changes-content").show(ui,|ui|{
+                    if let Some(incoming)=&self.incoming {
+                        ui.heading("Incoming source");
+                        match incoming["status"].as_str() {
+                            Some("current") => { ui.label("This draft already uses the current source baseline."); },
+                            Some("unavailable") => { ui.colored_label(ui.visuals().error_fg_color,incoming["reason"].as_str().unwrap_or("Incoming source unavailable")); },
+                            _ => {
+                                if let Some(commit)=incoming["candidate"]["base"]["commit"].as_str(){ui.label(format!("Incoming canonical revision {}",&commit[..commit.len().min(12)]));}
+                                let changes=incoming["changes"].as_array().cloned().unwrap_or_default();
+                                ui.label(format!("{} incoming semantic changes",changes.len()));
+                                for change in changes {ui.label(change["sourcePointer"].as_str().unwrap_or("Source change"));}
+                                let conflicts=incoming["conflicts"].as_array().cloned().unwrap_or_default();
+                                for conflict in &conflicts {
+                                    let pointer=conflict["sourcePointer"].as_str().unwrap_or("");
+                                    ui.group(|ui| {
+                                        ui.strong(pointer);
+                                        ui.label(format!("Your value: {}",conflict["local"]));
+                                        ui.label(format!("Incoming value: {}",conflict["incoming"]));
+                                        let decision=self.resolutions.entry(pointer.into()).or_default();
+                                        ui.horizontal(|ui|{ui.selectable_value(decision,"local".into(),"Keep mine");ui.selectable_value(decision,"incoming".into(),"Use incoming");});
+                                    });
+                                }
+                                let resolved=conflicts.iter().all(|c|c["sourcePointer"].as_str().is_some_and(|p|self.resolutions.get(p).is_some_and(|s|!s.is_empty())));
+                                let eligible=incoming["reconcileAvailable"]==true && resolved && self.validated && !self.preview_only && self.busy.is_none() && app.lib_file.is_some();
+                                if ui.add_enabled(eligible,egui::Button::new("Apply reviewed incoming changes")).clicked(){apply_incoming=true;}
+                                if app.lib_file.is_none(){ui.small("Save this draft to the library before applying incoming changes.");}
+                                else if !resolved{ui.small("Choose a value for each conflict before applying.");}
+                            },
+                        }
+                        ui.collapsing("Source and reconciliation details",|ui|{ui.monospace(serde_json::to_string_pretty(incoming).unwrap_or_default());});
+                    }
+                    ui.heading("Semantic edits");
+                    if let Some(compare)=&self.compare {
+                        if ui.button("Copy semantic export").clicked(){ctx.copy_text(compare.clone());}
+                        if let Ok(export)=serde_json::from_str::<Value>(compare) {
+                            ui.label(format!("{} authored operations",export["operationCount"]));
+                            if let Some(changes)=export["changeset"]["changes"].as_array() {for change in changes {
+                                ui.group(|ui| {
+                                    ui.strong(change["sourcePointer"].as_str().or_else(||change["field"].as_str()).unwrap_or("Semantic change"));
+                                    ui.label(format!("{} → {}",change["before"],change["after"]));
+                                });
+                            }}
+                            ui.collapsing("Complete semantic export",|ui|{ui.monospace(compare);});
+                        } else {ui.monospace(compare);}
+                    } else {ui.label("Choose Compare local edits.");}
                 });
+                if apply_incoming {if let (Some(draft),Some(incoming))=(self.active_draft(app),self.incoming.clone()){
+                    let resolutions:Vec<_>=self.resolutions.iter().filter(|(_,value)|!value.is_empty()).map(|(pointer,value)|json!({"sourcePointer":pointer,"resolution":value})).collect();
+                    self.send(json!({"op":"Reconcile","expectedRevision":draft["draftRevision"],"draft":draft,"incoming":{"reconciliationId":incoming["reconciliationId"],"pin":incoming["pin"]},"resolutions":resolutions}));
+                }}
             });return;
         }
         if let Some(error) = self.error.clone() {
             egui::Panel::top("cityos-workspace-error").show(ui, |ui| {
                 ui.colored_label(ui.visuals().error_fg_color, &error);
+                if self.recovery_pending && ui.button("Recover document generation").clicked(){self.recover_reconciliation(app);}
+                if !self.preview_only && !self.recovery_pending && self.busy.is_none() && ui.button("Retry draft validation").clicked() {
+                    if let Some(config)=self.config.clone(){self.resume(config,app);}
+                }
             });
         }
         {
@@ -782,11 +1051,12 @@ impl Workspace {
                         if !format!("{path} {label}").to_lowercase().contains(&search) {
                             continue;
                         }
-                        ui.add_enabled_ui(self.busy.is_none(), |ui| {
+                        ui.add_enabled_ui(self.busy.is_none()&&resource["openAvailable"]!=false, |ui| {
                             if ui.selectable_label(self.resource.as_ref().is_some_and(|r| r["sourcePath"] == path), label).on_hover_text(path).clicked() {
                                 selected = Some(resource.clone());
                             }
                         });
+                        if let Some(reason)=resource["previewNotice"].as_str(){ui.small(reason);}
                         ui.small(if resource["actualWebPreview"] == true {
                             "Actual web preview · canvas edit"
                         } else {
@@ -795,7 +1065,7 @@ impl Workspace {
                         ui.separator();
                     }
                     for finding in &self.resource_diagnostics {
-                        ui.colored_label(ui.visuals().error_fg_color, format!("{}: {}", finding["sourcePath"], finding["error"]));
+                        ui.small(if finding["code"]=="PACKAGED_CANONICAL_REVISION" {format!("Packaged canonical revision {} · newer main {} needs a matching renderer",finding["commit"],finding["latestCommit"])}else{format!("{}: {}",finding["sourcePath"],finding["error"])});
                     }
                 });
                 if let Some(resource) = selected {
@@ -806,20 +1076,35 @@ impl Workspace {
         }
         if let Some(resource) = self.resource.clone() {
             egui::Panel::top("cityos-selected-resource").show(ui, |ui| {
-                ui.strong(resource["resourceId"].as_str().unwrap_or("Selected design"));
-                ui.small(resource["sourcePath"].as_str().unwrap_or(""));
-                if let Some(commit) = resource["commit"].as_str() {
-                    ui.small(format!("Canonical GitLab commit {}", &commit[..commit.len().min(12)]));
-                }
-                if let Some(messages) = resource["diagnostics"].as_array() {
-                    for message in messages {
-                        ui.label(message.as_str().unwrap_or(""));
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(resource["label"].as_str().or_else(|| resource["resourceId"].as_str()).unwrap_or("Selected design"));
+                    ui.small(if self.preview_only { "Temporary preview" } else { "Canonical bound draft" });
+                    ui.menu_button("Source details", |ui| {
+                        ui.set_max_width(600.);
+                        ui.label(resource["sourcePath"].as_str().unwrap_or(""));
+                        if let Some(commit) = resource["commit"].as_str() { ui.monospace(format!("GitLab commit {commit}")); }
+                        if resource["packagedRevision"]==true {ui.label("Pinned packaged revision. Newer main needs a matching renderer package.");}
+                        if let Some(messages) = resource["diagnostics"].as_array() {
+                            for message in messages { ui.label(message.as_str().unwrap_or("")); }
+                        }
+                    });
+                    if let Some(d) = self.active_draft(app) { ui.small(format!("Draft revision {}", d["draftRevision"])); }
+                    if let Some(messages) = resource["diagnostics"].as_array() {
+                        if !messages.is_empty() { ui.small(format!("{} source findings", messages.len())); }
                     }
-                }
+                });
             });
         }
         let mut bounds = None;
-        if (!self.expanded && !self.preview_only) || (self.preview_only && !self.actual_preview() && self.validated) {
+        let narrow = ui.available_width() < 1100.;
+        if narrow && !self.preview_only && self.actual_preview() && self.layout.view == layout::View::Split {
+            egui::Panel::top("cityos-narrow-surfaces").show(ui, |ui| { ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.narrow_preview, false, "Canvas");
+                ui.selectable_value(&mut self.narrow_preview, true, "Actual preview");
+            }); });
+        }
+        let effective_view = self.layout.effective_view(ui.available_width(), self.narrow_preview);
+        if self.layout.inspector && ((!self.preview_only && effective_view != layout::View::Preview) || (self.preview_only && !self.actual_preview() && self.validated)) {
             egui::Panel::left("cityos-workspace-properties").default_size(248.).size_range(200.0..=360.0).resizable(true).show(ui,|ui|{
                 ui.heading("Layers & properties");
                 fn layers(node:&Value,depth:usize,rows:&mut Vec<(String,String)>) {if depth>12{return;}if let Some(id)=node["id"].as_str(){rows.push((id.into(),format!("{}{}", "  ".repeat(depth),id)));}if let Some(slots)=node["slots"].as_object(){for children in slots.values(){if let Some(children)=children.as_array(){for child in children {layers(child,depth+1,rows);}}}}}
@@ -835,6 +1120,15 @@ impl Workspace {
                     ui.add_enabled_ui(self.validated&&self.busy.is_none()&&self.selected==field["nodeId"].as_str().unwrap_or(""),|ui|{
                         if let Some(mut boolean)=value.as_bool(){if ui.checkbox(&mut boolean,"Allow multiple open sections").changed(){value=json!(boolean);}}
                         else if let Some(values)=field["values"].as_array(){ui.horizontal_wrapped(|ui|{for option in values {ui.selectable_value(&mut value,option.clone(),option.as_str().unwrap_or(""));}});}
+                        else if let Some(text)=previous.as_str() {
+                            let key=format!("{}:{}:{}",d["draftId"],d["draftRevision"],pointer);
+                            let edited=self.property_text.entry(key).or_insert_with(||text.into());
+                            let response=ui.text_edit_singleline(edited);
+                            if ui.button("Apply property").clicked() || response.lost_focus()&&ui.input(|i|i.key_pressed(egui::Key::Enter)) {
+                                value=json!(edited.clone());
+                            }
+                            ui.small("Validated against the registered component contract before applying.");
+                        }
                     });
                     if value!=previous {self.send(json!({"op":"Command","command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],"operationId":uuid::Uuid::new_v4().to_string(),"operation":"set-property","nodeId":field["nodeId"],"property":field["property"],"value":value},"draft":d}));}
                 }}
@@ -844,19 +1138,25 @@ impl Workspace {
                 ui.small("Canvas geometry is a design projection.");
             });
         }
-        let show_side_preview = self.actual_preview() && self.preview_visible && !self.expanded && !self.preview_only;
-        let show_full_preview = self.actual_preview() && (self.expanded || self.preview_only);
+        let show_side_preview = self.actual_preview() && effective_view == layout::View::Split && !self.preview_only;
+        let show_full_preview = self.actual_preview() && (effective_view == layout::View::Preview || self.preview_only);
+        let preview_width = self.layout.preview_width;
+        let mut resized_preview = None;
         let mut web_panel = |ui: &mut egui::Ui| {
             ui.heading("Actual web renderer");
             if let Some(p) = &self.preview {
-                ui.label(format!("{} · revision {}", if self.current { "Current" } else { "Rendering" }, p["draftRevision"]));
-                ui.small(format!("Rendered elevation: {}", p["observedElevation"].as_str().unwrap_or("pending")));
+                let status = if self.current { "Current" } else if self.error.is_some() { "Failed — previous preview retained" }
+                    else if self.busy.as_deref() == Some("Preview") || self.render_started.is_some() { "Rendering" } else { "Out of date" };
+                ui.label(format!("{status} · rendered revision {}", p["draftRevision"]));
+                if p["scenario"]["fixture"]=="cityos-web-frame" {
+                    ui.small(format!("Rendered elevation: {}", p["observedElevation"].as_str().unwrap_or("pending")));
+                }
                 ui.small(format!("Viewport: {} × {} CSS px", p["observedViewport"]["width"], p["observedViewport"]["height"]));
             } else {
                 ui.label("Waiting for preview");
             }
             ui.small(if self.harness { "Inert embedded-host diagnostic · no repository code" } else { "Registered CityOS renderer · deterministic fixture · owner actions disabled" });
-            let old = (self.locale.clone(), self.theme.clone(), self.theme_id.clone());
+            let old = (self.locale.clone(), self.theme.clone(), self.theme_id.clone(), self.interactive);
             egui::ComboBox::from_id_salt("workspace-theme")
                 .width(250.)
                 .selected_text(self.themes.iter().find(|t| t["id"] == self.theme_id).and_then(|t| t["name"].as_str()).unwrap_or("Renderer default theme"))
@@ -873,6 +1173,9 @@ impl Workspace {
                 ui.selectable_value(&mut self.locale, "en".into(), "English · LTR");
                 ui.selectable_value(&mut self.theme, "light".into(), "Light");
                 ui.selectable_value(&mut self.theme, "dark".into(), "Dark");
+                if self.resource.as_ref().is_none_or(|r|r["fixture"]!="cityos-lower-level") {
+                    ui.checkbox(&mut self.interactive,"Interact with fixture").on_hover_text("Preview interactions stay local and do not edit the draft or invoke owner actions.");
+                }
                 if ui.button("Restart preview").clicked() {
                     self.host.reset();
                     self.request_preview(app);
@@ -884,7 +1187,7 @@ impl Workspace {
                     }
                 }
             });
-            if old != (self.locale.clone(), self.theme.clone(), self.theme_id.clone()) {
+            if old != (self.locale.clone(), self.theme.clone(), self.theme_id.clone(), self.interactive) {
                 self.current = false;
                 self.pending = Some(Instant::now());
             }
@@ -899,13 +1202,14 @@ impl Workspace {
             bounds = Some(rect);
         };
         if show_side_preview {
-            egui::Panel::right("cityos-workspace-preview").default_size(560.).size_range(320.0..=1400.0).resizable(true).show(ui, &mut web_panel);
+            let panel = egui::Panel::right("cityos-workspace-preview").default_size(preview_width).size_range(280.0..=1400.0).resizable(true).show(ui, &mut web_panel);
+            if !ctx.input(|i| i.pointer.any_down()) { resized_preview = Some(panel.response.rect.width().clamp(280., 1400.)); }
         }
         if show_full_preview {
             egui::CentralPanel::default().show(ui, &mut web_panel);
         } else {
             egui::CentralPanel::default().show(ui, |ui| {
-                ui.heading(if self.actual_preview() { "Native canvas" } else { "Protected composition structure" });
+                ui.heading(if !self.validated { "Selected design" } else if self.actual_preview() { "Native canvas" } else { "Protected composition structure" });
                 if !self.validated {
                     if self.busy.is_some() {
                         ui.spinner();
@@ -968,7 +1272,7 @@ impl Workspace {
                 crate::canvas::draw::overlays(app, ui, rect);
             });
         }
-        if !self.preview_visible || !self.open {
+        if (!show_side_preview && !show_full_preview) || !self.open {
             self.host.hide();
         }
         if self.compare_open {
@@ -985,9 +1289,9 @@ impl Workspace {
             });
         } else if egui::Popup::is_any_open(&ctx) {
             self.host.hide();
-        } else if self.open && self.preview_visible && self.actual_preview() {
+        } else if self.open && (show_side_preview || show_full_preview) && self.actual_preview() {
             if let (Some(rect), Some(url)) = (bounds, self.preview.as_ref().and_then(|p| p["url"].as_str())) {
-                if let Err(error) = self.host.show(frame, url, rect, ctx.pixels_per_point()) {
+                if let Err(error) = self.host.show(frame, url, rect, ctx.pixels_per_point(), &ctx) {
                     self.error = Some(error);
                 }
             }
@@ -997,6 +1301,8 @@ impl Workspace {
                 ui.small(format!("WebView2 {version}"));
             });
         }
+        if let Some(width) = resized_preview { self.layout.preview_width = width; }
+        if old_layout != self.layout { self.save_layout(); }
     }
 }
 
@@ -1004,22 +1310,88 @@ impl Workspace {
 mod tests {
     use super::*;
     fn tab_document(id:&str)->Document{
+        let source_digest=desigma_library::payload_digest(b"fixture");
         let semantic=json!({"id":id,"revision":"1","root":{"id":"material","props":{}}});
         let draft=json!({"schemaVersion":"cityos.design-exchange.v3","semanticContract":"fixture.component","profileRef":"fixture","draftId":id,"documentId":id,
-            "draftRevision":0,"base":{"kind":"canonical-git","repositoryId":"fixture","commit":"a".repeat(40),"sourcePath":"fixture.json","sourceDigest":"b".repeat(64)},
-            "semanticBase":semantic,"semanticDraft":semantic,"semanticDigest":"c".repeat(64),"dependencyPins":[{"path":"fixture.json","digest":"b".repeat(64)}],"commandReceipts":[]});
-        binding(draft,&json!({"draftId":id,"draftRevision":0,"semanticDigest":"c".repeat(64),"nodes":[{"id":"native","sourceNodeId":"material","definitionId":"fixture","parent":null,"slot":null,"x":0,"y":0,"width":100,"height":100,"label":id,"fill":"#ffffff"}]})).unwrap()
+            "draftRevision":0,"base":{"kind":"canonical-git","repositoryId":"fixture","commit":"a".repeat(40),"sourcePath":"fixture.json","sourceDigest":source_digest},
+            "semanticBase":semantic,"semanticDraft":semantic,"semanticDigest":"c".repeat(64),"dependencyPins":[{"path":"fixture.json","digest":source_digest}],"commandReceipts":[]});
+        binding(draft,&json!({"schemaVersion":"cityos.desigma-canvas.v1","draftId":id,"draftRevision":0,"semanticDigest":"c".repeat(64),"nodes":[{"id":"native","sourceNodeId":"material","definitionId":"fixture","parent":null,"slot":null,"x":0,"y":0,"width":100,"height":100,"label":id,"fill":"#ffffff"}]})).unwrap()
+    }
+    #[test]
+    fn explicit_local_copy_has_no_submission_binding_and_leaves_the_source_untouched() {
+        let source = tab_document("canonical");
+        let before = source.to_json().unwrap();
+        let copy = local_copy(&source);
+        assert!(copy.cityos.is_none());
+        assert!(copy.nodes.values().all(|node| !node.locked && node.source_id.is_none()));
+        assert_eq!(source.to_json().unwrap(), before);
+        assert_eq!(copy.nodes.len(), source.nodes.len());
+    }
+    #[test]
+    fn reviewed_baseline_is_durable_before_display_and_previous_undo_is_retained_inactively() {
+        let root=std::env::temp_dir().join(format!("desigma-incoming-{}",uuid::Uuid::new_v4()));
+        let library=desigma_library::Library::open(&root).unwrap();
+        library.put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
+        let mut app=App::new(tab_document("incoming")); app.lib=Some(library.clone()); app.home=None;
+        let mut edited=app.doc.clone();edited.name="My draft".into();
+        app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(edited)}).unwrap();
+        Workspace::save_to_draft_library(&mut app).unwrap();
+        let file=app.lib_file.as_ref().unwrap().id.clone();
+        let mut candidate=draft(&app.doc).unwrap().clone();
+        let next_revision=candidate["draftRevision"].as_u64().unwrap()+1;
+        candidate["base"]["commit"]=json!("b".repeat(40));candidate["draftRevision"]=json!(next_revision);
+        candidate["semanticDigest"]=json!("d".repeat(64));
+        let bundle=json!({"draft":candidate,"historyBoundary":true,"resource":{"resourceId":"incoming"},
+            "projection":{"schemaVersion":"cityos.desigma-canvas.v1","draftId":"incoming","draftRevision":next_revision,"semanticDigest":"d".repeat(64),
+                "nodes":[{"id":"native","sourceNodeId":"material","definitionId":"fixture","parent":null,"x":0,"y":0,"width":100,"height":100,"label":"incoming","fill":"#ffffff"}]}});
+        let mut workspace=Workspace::default();workspace.install_reconciliation(&mut app,bundle.clone());
+        assert!(workspace.error.is_none(),"{:?}",workspace.error);assert!(!app.hist.can_undo());assert_eq!(app.doc.name,"My draft");
+        let stored=library.load_checkpoint(&file).unwrap();
+        assert_eq!(stored.document.to_json().unwrap(),app.doc.to_json().unwrap());
+        assert_eq!(stored.retained.len(),1);assert!(stored.retained[0].history.can_undo());
+        let before=app.doc.to_json().unwrap();workspace.install_reconciliation(&mut app,bundle);
+        assert!(workspace.error.as_ref().unwrap().contains("Obsolete"));
+        assert_eq!(app.doc.to_json().unwrap(),before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn external_bound_autosave_persists_after_two_seconds_and_failed_close_keeps_dirty_state() {
+        let root = std::env::temp_dir().join(format!("desigma-external-autosave-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(tab_document("external"));
+        let path = root.join("draft.desigma");
+        crate::io::save_path(&app.doc, &path).unwrap();
+        app.file_path = Some(path.clone());
+        app.home = None;
+        app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
+        app.doc.name = "Edited external".into(); app.changed();
+        let ctx = egui::Context::default();
+        app.now = 1.; app.autosave_tick(&ctx);
+        app.now = 1.5; app.autosave_tick(&ctx);
+        assert_ne!(crate::io::load_path(&path).unwrap().name, app.doc.name);
+        app.now = 3.1; app.autosave_tick(&ctx);
+        assert_eq!(crate::io::load_path(&path).unwrap().name, "Edited external");
+        assert!(!app.autosave.pending());
+        let blocker = root.join("blocked"); std::fs::write(&blocker, b"file").unwrap();
+        app.file_path = Some(blocker.join("draft.desigma"));
+        app.doc.name = "Unsaved external".into(); app.changed();
+        assert!(!app.flush_autosave()); assert!(app.autosave.pending());
+        assert!(!app.replace_document(Document::new("Replacement"), None));
+        assert_eq!(app.doc.name, "Unsaved external");
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn draft_tabs_save_before_switch_and_restore_undo_with_the_correct_library_file(){
         let root=std::env::temp_dir().join(format!("desigma-tabs-{}",uuid::Uuid::new_v4()));
         let mut app=App::new(tab_document("first"));app.lib=Some(desigma_library::Library::open(&root).unwrap());app.home=None;
+        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
         let mut next=app.doc.clone();next.name="First edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
         let mut workspace=Workspace::default();workspace.suspend_current(&mut app).unwrap();let first_file=app.lib_file.clone().unwrap().id;
         app.replace_document(tab_document("second"),None);app.home=None;
         workspace.activate_tab(&mut app,"first");assert_eq!(draft(&app.doc).unwrap()["draftId"],"first");assert_eq!(app.lib_file.as_ref().unwrap().id,first_file);assert!(app.hist.can_undo());
         assert_ne!(workspace.tabs["second"].file.as_ref().unwrap().id,first_file);app.hist.undo(&mut app.doc).unwrap();
         assert_eq!(app.lib.as_ref().unwrap().load_file(&first_file).unwrap().name,"First edited");
+        crate::home::thumb::finish_library_jobs(&root);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

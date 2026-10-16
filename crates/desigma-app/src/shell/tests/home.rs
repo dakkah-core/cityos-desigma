@@ -64,6 +64,37 @@ fn failed_flush_retains_dirty_revision_for_retry(){
 }
 
 #[test]
+fn failed_autosave_backs_off_without_clearing_dirty_state(){
+    let (mut s,_dir)=home_sim();let library=lib(&s);let id=library.all_files()[0].id.clone();s.shell.app.open_library_file(&id);
+    let project=s.app().lib_file.as_ref().unwrap().project_id.clone();
+    let blocked=library.path("projects").join(project).join(".save.pending.json");std::fs::create_dir(&blocked).unwrap();
+    let app=&mut s.shell.app;let saved=app.autosave.saved_hash;app.doc.name="Retry this revision".into();
+    app.autosave.changed_at=Some(0.);app.autosave.confirmed=true;app.now=10.;
+    let ctx=egui::Context::default();app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saved_hash,saved);assert_eq!(app.autosave.failures,1);assert_eq!(app.autosave.retry_at,Some(12.));
+    std::fs::remove_dir(blocked).unwrap();app.now=11.;app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saved_hash,saved);assert!(app.autosave.pending());
+    app.now=12.;app.autosave_tick(&ctx);
+    assert_ne!(app.autosave.saved_hash,saved);assert_eq!(app.autosave.failures,0);assert_eq!(app.autosave.retry_at,None);
+    assert_eq!(library.load_file(&id).unwrap().name,"Retry this revision");
+}
+
+#[test]
+fn failed_save_prevents_home_open_new_and_document_replacement(){
+    let (mut s,_dir)=home_sim();let library=lib(&s);let id=library.all_files()[0].id.clone();s.shell.app.open_library_file(&id);
+    let project=s.app().lib_file.as_ref().unwrap().project_id.clone();
+    let other=library.create_file(&project,None,"Other",&Document::new("Other")).unwrap();
+    s.shell.app.doc.name="Unsaved current".into();let document=s.app().doc.to_json().unwrap();
+    let blocked=library.path("projects").join(project).join(".save.pending.json");std::fs::create_dir(&blocked).unwrap();
+    s.shell.app.go_home();assert!(s.app().home.is_none());
+    s.shell.app.open_library_file(&other.id);assert_eq!(s.app().lib_file.as_ref().unwrap().id,id);
+    s.shell.app.new_library_file(None);
+    assert!(!s.shell.app.replace_document(Document::new("Replacement"),None));
+    assert_eq!(s.app().doc.to_json().unwrap(),document);assert!(s.app().autosave.pending());
+    std::fs::remove_dir(blocked).unwrap();assert_eq!(library.all_files().len(),2);
+}
+
+#[test]
 fn catalog_launcher_and_back_preserve_the_home_library() {
     let (mut s,_dir)=home_sim();
     let library=lib(&s);let files=library.all_files().len();

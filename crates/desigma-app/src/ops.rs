@@ -793,12 +793,12 @@ impl App {
     }
 
     // ------------------------------------------------------------ files
-    pub fn replace_document(&mut self, doc: Document, path: Option<PathBuf>) {
+    pub fn replace_document(&mut self, doc: Document, path: Option<PathBuf>) -> bool {
         crate::decks::ui::flush_notes(self);
-        self.stop_plugin();
         // Pending edits of the library file being left are saved first (from the live state, not an old version).
         self.exit_version_view();
-        self.flush_autosave();
+        if !self.flush_autosave(){return false;}
+        self.stop_plugin();
         self.lib_file = None;
         self.renaming_file = false;
         let mut doc = doc;
@@ -812,6 +812,11 @@ impl App {
         self.selection.clear();
         self.hover = None;
         self.file_path = path;
+        self.autosave = crate::home::Autosave {
+            seen_rev: self.canvas.tiles.rev(),
+            saved_hash: crate::home::doc_hash(&self.doc),
+            ..Default::default()
+        };
         self.canvas.reset_interaction();
         // a design tool means nothing on a board and the other way round
         self.tool = Tool::Move;
@@ -823,6 +828,7 @@ impl App {
         self.fonts.load_for(&self.doc);
         self.changed();
         self.fit_all();
+        true
     }
 
     pub fn open_dialog(&mut self) {
@@ -851,7 +857,7 @@ impl App {
                 let name = doc.name.clone();
                 // An SVG becomes a new unsaved document, never overwritten by Save.
                 let svg = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-                self.replace_document(doc, (!svg).then_some(p));
+                if !self.replace_document(doc, (!svg).then_some(p)){return;}
                 self.show_toast(format!("Opened {name}"), false);
             }
             Err(e) => self.show_toast(e, true),
@@ -875,6 +881,10 @@ impl App {
                 self.show_toast(format!("Saved {}", p.display()), false);
                 if self.lib_file.is_none() {
                     self.file_path = Some(p);
+                    self.autosave.saved_hash = crate::home::doc_hash(&self.doc);
+                    self.autosave.changed_at = None;
+                    self.autosave.failures = 0;
+                    self.autosave.retry_at = None;
                 }
             }
             Err(e) => self.show_toast(e, true),

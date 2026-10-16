@@ -12,6 +12,7 @@ mod dev;
 pub mod find;
 mod geom;
 mod history;
+mod persistence;
 mod library;
 mod library_ops;
 mod node;
@@ -32,6 +33,7 @@ pub use components::*;
 pub use dev::*;
 pub use geom::*;
 pub use history::*;
+pub use persistence::*;
 pub use library::*;
 pub use library_ops::*;
 pub use node::*;
@@ -255,6 +257,9 @@ impl Document {
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
+        if let Some(binding) = &self.cityos {
+            binding.validate().map_err(<serde_json::Error as serde::ser::Error>::custom)?;
+        }
         if self.cityos.is_some(){
             let version = if self.cityos.as_ref().is_some_and(|b| b.exchange_v3.is_some()) {"desigma.document.v4"} else if self.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {"desigma.document.v3"} else {"desigma.document.v2"};
             return serde_json::to_string_pretty(&serde_json::json!({"schemaVersion":version,"document":self}));
@@ -268,19 +273,30 @@ impl Document {
     /// literal bullet and "1. " prefixes is converted to real lists.
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
         let mut value: serde_json::Value=serde_json::from_str(s)?;
+        let container_version = value.get("schemaVersion").and_then(|v| v.as_str()).map(str::to_owned);
         if let Some(version)=value.get("schemaVersion") {
             if version=="desigma.document.v2" || version=="desigma.document.v3" || version=="desigma.document.v4" {
                 let v3=version=="desigma.document.v3";
                 let v4=version=="desigma.document.v4";
                 value=value.get("document").cloned().ok_or_else(||<serde_json::Error as serde::de::Error>::custom("Bound document payload missing"))?;
-                if !v3 && value["cityos"]["exchange_v2"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Expanded bindings require container v3")); }
+                if !v3 && !v4 && value["cityos"]["exchange_v2"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Expanded bindings require container v3")); }
                 if v4 != value["cityos"]["exchange_v3"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Typed bindings require container v4")); }
             }
             else if version!="desigma.document.v1" {return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));}
         }
         let mut doc: Self = serde_json::from_value(value)?;
-        if let Some(binding)=&doc.cityos {binding.validate().map_err(<serde_json::Error as serde::de::Error>::custom)?;}
+        if let Some(binding)=&doc.cityos {
+            binding.validate().map_err(<serde_json::Error as serde::de::Error>::custom)?;
+            let expected = if binding.exchange_v3.is_some() { "desigma.document.v4" }
+                else if binding.exchange_v2.is_some() { "desigma.document.v3" } else { "desigma.document.v2" };
+            if container_version.as_deref() != Some(expected) {
+                return Err(<serde_json::Error as serde::de::Error>::custom("Binding/container version mismatch"));
+            }
+        } else if matches!(container_version.as_deref(), Some("desigma.document.v2" | "desigma.document.v3" | "desigma.document.v4")) {
+            return Err(<serde_json::Error as serde::de::Error>::custom("Bound document container has no binding"));
+        }
         doc.migrate_text();
+        doc.bump_ids();
         Ok(doc)
     }
 
@@ -344,6 +360,36 @@ mod tests {
         let removed = d.remove(frame).unwrap();
         assert_eq!(removed.len(), 2);
         assert!(d.get(rect).is_none());
+    }
+
+    #[test]
+    fn native_restart_repairs_a_stale_allocator_without_overwriting_imported_nodes() {
+        let mut document = Document::new("imported");
+        let page = document.add_page("P");
+        document.insert(page, Node::rectangle(NodeId(50), Rect::new(0., 0., 1., 1.))).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&document.to_json().unwrap()).unwrap();
+        value["next_id"] = serde_json::json!(0);
+        let mut back = Document::from_json(&value.to_string()).unwrap();
+        assert_eq!(back.alloc_id(), NodeId(51));
+        assert!(back.get(NodeId(50)).is_some());
+    }
+
+    #[test]
+    fn bound_containers_without_bindings_and_flat_relabelings_are_rejected() {
+        let document = Document::new("ordinary");
+        for version in ["desigma.document.v2", "desigma.document.v3", "desigma.document.v4"] {
+            let value = serde_json::json!({"schemaVersion":version, "document":document});
+            assert!(Document::from_json(&value.to_string()).is_err());
+        }
+        let mut bound = document;
+        bound.cityos = Some(CityosBinding {
+            schema_version: "cityos.design-exchange.v1".into(), document_id: "d".into(), draft_id: "draft".into(),
+            base: CityosBase::NativeOwner { owner: "o".into(), resource: "r".into(), revision: "1".into() },
+            semantic_base: serde_json::json!({}), dependency_pins: vec![], occurrences: BTreeMap::new(), exchange_v2: None, exchange_v3: None,
+        });
+        let mut flat = serde_json::to_value(&bound).unwrap();
+        flat["schemaVersion"] = serde_json::json!("desigma.document.v1");
+        assert!(Document::from_json(&flat.to_string()).is_err());
     }
 
     #[test]

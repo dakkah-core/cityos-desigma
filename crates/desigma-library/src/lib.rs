@@ -20,11 +20,13 @@ mod publish;
 mod store;
 mod versions;
 mod submissions;
+mod checkpoint;
 
 pub use publish::*;
 pub use store::*;
 pub use versions::*;
 pub use submissions::*;
+pub use checkpoint::CheckpointSaveReceipt;
 
 use std::path::{Path, PathBuf};
 
@@ -38,9 +40,20 @@ pub enum LibraryError {
     NotFound(String),
     #[error("{0}")]
     Invalid(String),
+    #[error("Checkpoint baseline changed for {0}; reload/reconcile before saving")]
+    CheckpointConflict(String),
+    #[error("Checkpoint save for {file_id} requires reconciliation; save: {save_error}; recovery: {recovery_error}")]
+    ReconciliationRequired { file_id: String, save_error: String, recovery_error: String },
 }
 
 pub type Result<T> = std::result::Result<T, LibraryError>;
+
+pub(crate) fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 160 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err(LibraryError::Invalid("Invalid library identity".into()));
+    }
+    Ok(())
+}
 
 /// Handle to the on-disk library. Cheap to clone; all state lives on disk.
 #[derive(Clone, Debug)]
@@ -54,7 +67,9 @@ impl Library {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
         let library=Self { root };
+        let _guard = store::write_lock();
         library.recover_pending_saves()?;
+        library.recover_pending_versions()?;
         Ok(library)
     }
 

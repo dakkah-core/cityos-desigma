@@ -234,6 +234,13 @@ impl App {
     /// Marks the document as modified so the canvas texture is re-rendered.
     pub fn changed(&mut self) {
         self.canvas.dirty = true;
+        // A bound draft can change while the native canvas is hidden. Autosave
+        // must not wait for tile invalidation; the later hash probe removes
+        // view-only changes without manufacturing semantic operations.
+        if self.doc.cityos.is_some() {
+            self.autosave.changed_at = Some(self.now);
+            self.autosave.confirmed = false;
+        }
     }
 
     pub fn is_selected(&self, id: NodeId) -> bool {

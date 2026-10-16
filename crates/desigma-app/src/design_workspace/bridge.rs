@@ -3,8 +3,9 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
+use std::time::{Duration,Instant};
 
 const PROTOCOL: &str = "cityos.design-workspace.ipc.v1";
 const MAX_FRAME: usize = 4 * 1024 * 1024;
@@ -16,9 +17,11 @@ pub struct Config {
     pub cache: PathBuf,
 }
 pub struct Bridge {
-    pub jobs: Sender<Value>,
+    pub jobs: SyncSender<Value>,
     pub replies: Receiver<Result<Value, String>>,
+    cancel: Arc<AtomicBool>,
 }
+impl Drop for Bridge {fn drop(&mut self){self.cancel.store(true,Ordering::Release);}}
 struct Client {
     child: Child,
     input: ChildStdin,
@@ -76,7 +79,7 @@ fn frame(reader: &mut impl BufRead) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("Malformed exchange response: {e}"))
 }
 impl Client {
-    fn connect(config: &Config) -> Result<Self, String> {
+    fn connect(config: &Config,cancel:&AtomicBool) -> Result<Self, String> {
         if !config.bridge.is_absolute() || !config.bridge.is_file() {
             return Err("Packaged workspace.mjs is unavailable; repackage the CityOS reader".into());
         }
@@ -103,10 +106,12 @@ impl Client {
             }
         });
         let mut client = Self { child, input, output, session: uuid::Uuid::new_v4().to_string(), sequence: 0 };
-        client.request(json!({"op":"Hello"}))?;
+        compatible(&client.request(json!({"op":"Hello"}),cancel)?)?;
         Ok(client)
     }
-    fn request(&mut self, mut request: Value) -> Result<Value, String> {
+    fn request(&mut self, mut request: Value,cancel:&AtomicBool) -> Result<Value, String> {
+        if cancel.load(Ordering::Acquire){return Err("Obsolete workspace request cancelled".into());}
+        let timeout=Duration::from_secs(if request["op"]=="Hello"{10}else{30});
         self.sequence += 1;
         let id = format!("workspace-{}", self.sequence);
         request["protocolVersion"] = json!(PROTOCOL);
@@ -117,7 +122,16 @@ impl Client {
             return Err("Exchange request exceeds 4 MiB".into());
         }
         self.input.write_all(&bytes).and_then(|_| self.input.write_all(b"\n")).and_then(|_| self.input.flush()).map_err(|e| e.to_string())?;
-        let response = self.output.recv_timeout(Duration::from_secs(30)).map_err(|_| "Exchange timed out; draft retained".to_string())??;
+        let started=Instant::now();
+        let response=loop {
+            if cancel.load(Ordering::Acquire){return Err("Obsolete workspace request cancelled".into());}
+            if started.elapsed()>=timeout{return Err("Exchange timed out; draft retained".into());}
+            match self.output.recv_timeout(Duration::from_millis(50)){
+                Ok(response)=>break response?,
+                Err(mpsc::RecvTimeoutError::Timeout)=>{},
+                Err(_)=>return Err("Exchange helper stopped; draft retained".into()),
+            }
+        };
         if response["protocolVersion"] != PROTOCOL || response["sessionId"] != self.session || response["requestId"] != id {
             return Err("Obsolete or incompatible exchange reply".into());
         }
@@ -129,8 +143,9 @@ impl Client {
 }
 impl Bridge {
     pub fn spawn(config: Config) -> Self {
-        let (jobs, rx) = mpsc::channel::<Value>();
+        let (jobs, rx) = mpsc::sync_channel::<Value>(8);
         let (tx, replies) = mpsc::channel();
+        let cancel=Arc::new(AtomicBool::new(false));let canceled=cancel.clone();
         std::thread::spawn(move || {
             let mut client: Option<Client> = None;
             while let Ok(mut request) = rx.recv() {
@@ -138,11 +153,11 @@ impl Bridge {
                     request["repository"] = json!(config.repository);
                     request["cacheRoot"] = json!(config.cache);
                 }
-                let result = crate::cityos_jobs::run(true,None,|| {
+                let result = crate::cityos_jobs::run(true,Some(&canceled),|| {
                     if client.is_none() {
-                        client = Some(Client::connect(&config)?);
+                        client = Some(Client::connect(&config,&canceled)?);
                     }
-                    client.as_mut().unwrap().request(request)
+                    client.as_mut().unwrap().request(request,&canceled)
                 });
                 if result.is_err() {
                     client = None;
@@ -152,13 +167,40 @@ impl Bridge {
                 }
             }
         });
-        Self { jobs, replies }
+        Self { jobs, replies,cancel }
     }
+}
+
+fn compatible(hello: &Value) -> Result<(), String> {
+    let supports=|key:&str,value:&str| hello[key].as_array().is_some_and(|rows|rows.iter().any(|row|row==value));
+    if !supports("exchangeVersions","cityos.design-exchange.v3") || !supports("documentContainers","desigma.document.v4")
+        || ["Resources","Open","Project","Command","Export","Preview","Dependencies","Incoming","Reconcile"].iter().any(|op|!supports("operations",op)) {
+        return Err("Packaged exchange helper is incompatible. Install the matching reader, bridge and desktop build.".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn handshake_rejects_a_helper_that_would_drop_expanded_bindings_or_dependency_recovery() {
+        let mut hello=json!({"exchangeVersions":["cityos.design-exchange.v3"],"documentContainers":["desigma.document.v4"],
+            "operations":["Resources","Open","Project","Command","Export","Preview","Dependencies","Incoming","Reconcile"]});
+        assert!(compatible(&hello).is_ok());hello["documentContainers"]=json!(["desigma.document.v3"]);assert!(compatible(&hello).is_err());
+        hello["documentContainers"]=json!(["desigma.document.v4"]);hello["operations"]=json!(["Open","Preview"]);assert!(compatible(&hello).is_err());
+    }
+    #[test]
+    #[ignore="requires the pinned packaged Node runtime"]
+    fn obsolete_unresponsive_helpers_release_the_foreground_budget_within_two_seconds(){
+        let directory=std::env::temp_dir().join(format!("desigma-cancel-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&directory).unwrap();
+        let script=directory.join("inert.mjs");std::fs::write(&script,"process.stdin.resume();setInterval(()=>{},1000);").unwrap();
+        let bridge=Bridge::spawn(Config{node:std::env::var("CITYOS_DESIGN_WORKSPACE_NODE").unwrap().into(),bridge:script,repository:directory.clone(),cache:directory.clone()});
+        bridge.jobs.send(json!({"op":"Resources"})).unwrap();std::thread::sleep(Duration::from_millis(150));
+        let start=Instant::now();drop(bridge);
+        crate::cityos_jobs::run(true,None,||Ok(())).unwrap();assert!(start.elapsed()<Duration::from_secs(2));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn bounded_frames_reject_oversize_depth_and_partial_response() {
         assert!(frame(&mut &b"{}\n"[..]).is_ok());

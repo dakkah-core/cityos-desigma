@@ -41,7 +41,7 @@ impl Host {
     pub fn poll(&mut self) -> Vec<Value> {
         self.messages.as_ref().map(|rx| rx.try_iter().take(16).collect()).unwrap_or_default()
     }
-    pub fn show(&mut self, frame: &eframe::Frame, url: &str, rect: egui::Rect, scale: f32) -> Result<(), String> {
+    pub fn show(&mut self, frame: &eframe::Frame, url: &str, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> Result<(), String> {
         #[cfg(windows)]
         {
             let bounds = wry::Rect {
@@ -73,6 +73,7 @@ impl Host {
                 let navigation = allowed.clone();
                 let origin = parsed.origin().ascii_serialization();
                 let (tx, messages) = mpsc::sync_channel(32);
+                let repaint = ctx.clone();
                 let view = wry::WebViewBuilder::new()
                     .with_incognito(true)
                     .with_focused(false)
@@ -86,7 +87,7 @@ impl Host {
                             return;
                         }
                         if let Ok(value) = serde_json::from_str::<Value>(request.body()) {
-                            let _ = tx.try_send(value);
+                            if tx.try_send(value).is_ok() { repaint.request_repaint(); }
                         }
                     })
                     .build_as_child(frame)
@@ -112,7 +113,7 @@ impl Host {
         }
         #[cfg(not(windows))]
         {
-            let _ = (frame, url, rect, scale);
+            let _ = (frame, url, rect, scale, ctx);
             Err("Embedded host is currently available on Windows only".into())
         }
     }

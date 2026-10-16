@@ -9,7 +9,7 @@
 //! A file publishes under its own id, so republishing adds a version to the
 //! same library.
 
-use crate::{Library, LibraryError, Result};
+use crate::{write_atomic, Library, LibraryError, Result};
 use desigma_doc::{diff_snapshots, snapshot, Document, LibraryAssetKind, LibrarySnapshot, PublishInfo, UpdateKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -91,13 +91,6 @@ pub fn now_rfc3339() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 fn read_or_not_found(p: &Path, what: impl FnOnce() -> String) -> Result<String> {

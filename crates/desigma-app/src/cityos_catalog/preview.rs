@@ -197,9 +197,9 @@ pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
         ui.strong("Composition structure");
         ui.label(
             RichText::new(if entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json" {
-                "Authored structure. Use Open actual web preview above to render this frame, or Open on canvas to edit supported properties."
+                "Authored structure. Use Open actual preview above to render this frame, or Open on canvas to edit supported properties."
             } else {
-                "Authored structure. The structure workspace preserves these nodes; an actual renderer adapter is not connected for this item."
+                "Authored structure. The structure workspace preserves these nodes. The selected workspace checks registered renderer and editing support for this source."
             })
             .color(theme::TEXT_SECONDARY),
         );
@@ -235,6 +235,7 @@ pub(super) fn theme_sheet(ui: &mut Ui, presentation: &Value, mode: &mut String) 
     let Some(modes) = presentation["modes"].as_object() else {
         return false;
     };
+    if modes.is_empty() { ui.label("No theme modes were captured for this source."); return true; }
     if !modes.contains_key(mode.as_str()) {
         *mode = modes.keys().next().cloned().unwrap_or_default();
     }
@@ -242,6 +243,19 @@ pub(super) fn theme_sheet(ui: &mut Ui, presentation: &Value, mode: &mut String) 
     ui.small("Captured repository theme · aliases resolved within the selected mode");
     let rows = modes[mode.as_str()].as_array();
     if let Some(rows) = rows {
+        if ui.available_width() < 540.0 {
+            for row in rows {
+                Frame::new().inner_margin(egui::Margin::symmetric(0, 8)).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(36., 24.), egui::Sense::hover());
+                        if let Some(value) = color(&row["resolvedValue"]) { ui.painter().rect_filled(rect, 4, value); }
+                        ui.label(row["name"].as_str().unwrap_or(""));
+                    });
+                    ui.label(RichText::new(if row["resolvedValue"].is_null() { "Unresolved alias".into() } else { compact(&row["resolvedValue"]) }).monospace());
+                });
+            }
+            return true;
+        }
         egui::Grid::new("theme-token-sheet").num_columns(3).spacing(egui::vec2(16., 8.)).striped(true).show(ui, |ui| {
             for row in rows {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(36., 24.), egui::Sense::hover());
@@ -266,21 +280,29 @@ pub(super) fn inspector(ui: &mut Ui, entry: &Entry) {
         ui.ctx().copy_text(format!("{}#{}", entry.source_path, entry.source_pointer));
     }
     ui.add_space(16.0);
-    egui::Grid::new(("catalog-support", &entry.id)).num_columns(2).spacing(egui::vec2(20.0, 10.0)).show(ui, |ui| {
-        for (key, value) in [
-            ("Owner", entry.owner.as_str()),
-            ("Package", entry.package.as_deref().unwrap_or("Unassigned")),
-            ("Classification", entry.classification_status.as_str()),
-            ("Generated output", if entry.generation_status == "observed" { "Observed · freshness unverified" } else { "Not applicable" }),
-            ("Persistent draft", if entry.persistent_draft { "Supported" } else { "Unavailable" }),
-            ("Editing", if entry.editable { "Supported" } else { "Unavailable" }),
-            ("Target renderer", if entry.renderer_qualified { "Qualified" } else { "Unqualified" }),
-        ] {
-            ui.label(RichText::new(key).color(theme::TEXT_SECONDARY));
+    let rows = [
+        ("Owner", entry.owner.as_str()),
+        ("Package", entry.package.as_deref().unwrap_or("Unassigned")),
+        ("Classification", entry.classification_status.as_str()),
+        ("Generated output", if entry.generation_status == "observed" { "Observed · freshness unverified" } else { "Not applicable" }),
+        ("Persistent draft", if entry.persistent_draft { "Supported" } else { "Unavailable" }),
+        ("Editing", if entry.editable { "Supported" } else { "Unavailable" }),
+        ("Target renderer", if entry.renderer_qualified { "Qualified" } else { "Unqualified" }),
+    ];
+    if ui.available_width() < 540.0 {
+        for (key, value) in rows {
+            ui.label(RichText::new(key).small().color(theme::TEXT_SECONDARY));
             ui.label(value);
-            ui.end_row();
         }
-    });
+    } else {
+        egui::Grid::new(("catalog-support", &entry.id)).num_columns(2).spacing(egui::vec2(20.0, 10.0)).show(ui, |ui| {
+            for (key, value) in rows {
+                ui.label(RichText::new(key).color(theme::TEXT_SECONDARY));
+                ui.label(value);
+                ui.end_row();
+            }
+        });
+    }
     if !entry.targets.is_empty() {
         ui.add_space(16.0);
         ui.strong("Declared targets");

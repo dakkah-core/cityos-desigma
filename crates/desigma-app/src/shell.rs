@@ -543,6 +543,7 @@ impl eframe::App for Shell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        crate::cityos_jobs::set_background_paused(ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
         self.app.poll_fonts();
         if self.app.fonts.is_loading() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -554,7 +555,7 @@ impl eframe::App for Shell {
             self.app.now = ui.ctx().input(|i| i.time);
             self.workspace.show(&mut self.app, ui, _frame);
             if !self.workspace.open {
-                self.cityos.open = true;
+                self.cityos.open = self.workspace.library_requested();
             }
         } else {
             self.cityos.inline_preview=None;
@@ -576,7 +577,7 @@ impl eframe::App for Shell {
                         self.app.show_toast(error, true);
                     }
                     Ok(()) => {
-                        self.app.replace_document(document, None);
+                        if !self.app.replace_document(document, None){return;}
                         self.app.home = None;
                         self.cityos.open = false;
                         self.app.open_variables();
@@ -605,7 +606,8 @@ impl eframe::App for Shell {
             if !self.workspace.open&&self.cityos.open {
                 if let Some((pin,rect))=self.cityos.inline_preview.take(){
                     if !self.cityos.inline_status.starts_with("Current"){self.cityos.yield_to_design();}
-                    self.cityos.inline_status=self.workspace.show_inline(&mut self.app,_frame,self.cityos.workspace_config(),pin,rect,ui.ctx().pixels_per_point());
+                    self.cityos.inline_status=self.workspace.show_inline(&mut self.app,_frame,self.cityos.workspace_config(),pin,rect,ui.ctx().pixels_per_point(),ui.ctx());
+                    if self.workspace.inline_pending(){ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
                 }else{self.workspace.hide();}
             }else if !self.workspace.open{self.workspace.hide();}
         }
@@ -682,6 +684,7 @@ impl Shell {
     /// One full UI pass over the window.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        crate::cityos_jobs::set_background_paused(ctx.input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
         self.app.now = ctx.input(|i| i.time);
         self.drive_screenshot(&ctx);
         if self.cityos.open {
@@ -692,7 +695,7 @@ impl Shell {
         if ctx.input(|i| i.viewport().close_requested()) {
             crate::decks::ui::flush_notes(&mut self.app);
             self.app.save_close_version();
-            self.app.flush_autosave();
+            if !self.app.flush_autosave(){ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);}
         }
         self.app.scrub_sync(&ctx);
         if self.app.home.is_some() {

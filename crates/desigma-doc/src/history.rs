@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
     /// Whole validated semantic state and its native projection share one undo boundary.
-    CityosInstall { document: Box<Document> },
+    CityosInstall {
+        #[serde(with = "crate::persistence::native_box")]
+        document: Box<Document>,
+    },
     /// Insert subtree nodes (root first) under `parent` at `index`.
     Insert {
         parent: NodeId,
@@ -186,13 +189,48 @@ impl Document {
 }
 
 /// Linear undo stack.
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct History {
     undo: Vec<Command>,
     redo: Vec<Command>,
+    /// Local concurrency fence only; never an owner revision or approval.
+    #[serde(default, rename = "baselineId", skip_serializing_if = "Option::is_none")]
+    baseline_id: Option<String>,
 }
 
 impl History {
+    /// Detaches the active undo/redo stacks at a baseline boundary. Keep the
+    /// returned history with its old document; it is not an active undo source.
+    pub fn seal(&mut self) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let previous = std::mem::take(self);
+        let clock = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        self.baseline_id = Some(format!("{:x}-{:x}-{:x}", std::process::id(), clock, NEXT.fetch_add(1, Ordering::Relaxed)));
+        previous
+    }
+
+    pub fn baseline_id(&self) -> Option<&str> {
+        self.baseline_id.as_deref()
+    }
+
+    /// Documents retained by whole-document undo/redo commands, including batches.
+    pub(crate) fn retained_documents(&self) -> Vec<&Document> {
+        fn collect<'a>(command: &'a Command, out: &mut Vec<&'a Document>) {
+            match command {
+                Command::CityosInstall { document } => out.push(document),
+                Command::Batch(commands) => commands.iter().for_each(|c| collect(c, out)),
+                _ => {}
+            }
+        }
+        let mut documents = Vec::new();
+        for command in self.undo.iter().chain(&self.redo) {
+            collect(command, &mut documents);
+        }
+        documents
+    }
+
     pub fn exec(&mut self, doc: &mut Document, cmd: Command) -> Result<(), DocError> {
         let inv = cmd.apply(doc)?;
         self.undo.push(inv);

@@ -121,8 +121,21 @@ impl Library {
     }
     pub fn retain_cityos_payload(&self, bytes: &[u8]) -> Result<String> {
         let hash = payload_digest(bytes);
-        write_atomic(&self.payload_path(&hash)?, bytes)?;
+        self.put_cityos_payload(&hash, bytes)?;
         Ok(hash)
+    }
+
+    /// Materialize a pinned payload from the trusted bridge's artifact cache.
+    /// Hash the exact bytes; JSON reformatting changes identity. This is local
+    /// content retention and grants no owner admission or execution authority.
+    pub fn put_cityos_payload(&self, expected_digest: &str, bytes: &[u8]) -> Result<()> {
+        let path = self.payload_path(expected_digest)?;
+        if payload_digest(bytes) != expected_digest {
+            return Err(LibraryError::Invalid("Dependency digest mismatch".into()));
+        }
+        write_atomic(&path, bytes)?;
+        self.load_cityos_payload(expected_digest)?;
+        Ok(())
     }
     pub fn load_cityos_payload(&self, hash: &str) -> Result<Vec<u8>> {
         let bytes = std::fs::read(self.payload_path(hash)?)?;
@@ -227,7 +240,7 @@ impl Library {
     /// Deliberately no API for purging these payloads. Unresolved and accepted-but-
     /// unsynchronized records remain retention roots, including after restart.
     pub fn cityos_retention_roots(&self) -> Result<Vec<String>> {
-        let mut roots = vec![];
+        let mut roots = self.local_document_retention_roots()?;
         let folder = self.path("cityos/submissions");
         if !folder.exists() {
             return Ok(roots);

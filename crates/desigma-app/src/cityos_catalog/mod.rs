@@ -5,15 +5,21 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 mod canvas;
 mod local_library;
 mod preview;
+mod support;
 #[cfg(test)]
 pub(crate) mod tests;
 mod ui;
+
+const ACTIVE_REPAINT: Duration = Duration::from_millis(100);
+const IDLE_REPAINT: Duration = Duration::from_secs(5);
+const LOCAL_EVENT_POLL: Duration = Duration::from_millis(750);
+const FILTER_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum DetailTab {
@@ -21,6 +27,15 @@ enum DetailTab {
     Preview,
     Source,
     Inspector,
+}
+
+#[derive(Clone)]
+struct Location {
+    filters: Filters,
+    selected: Option<Entry>,
+    detail_tab: DetailTab,
+    theme_mode: String,
+    results_visible: bool,
 }
 
 enum Job {
@@ -33,6 +48,14 @@ enum Reply {
     Query(u64, Filters, usize, Result<Page, String>),
     Materialize(u64, String, Result<Value, String>),
     SourceChanged,
+}
+
+fn send_reply(responses: &Sender<Reply>, repaint: &Mutex<Option<egui::Context>>, reply: Reply) -> bool {
+    if responses.send(reply).is_err() { return false; }
+    // Notify only after queueing a result/event. Never wake egui on an empty poll.
+    let context = repaint.lock().ok().and_then(|context| context.clone());
+    if let Some(context) = context { context.request_repaint(); }
+    true
 }
 pub struct Browser {
     pub open: bool,
@@ -53,6 +76,7 @@ pub struct Browser {
     filters: Filters,
     jobs: Sender<Job>,
     replies: Receiver<Reply>,
+    repaint: Arc<Mutex<Option<egui::Context>>>,
     epoch: u64,
     busy: bool,
     summary: Option<Value>,
@@ -81,6 +105,11 @@ pub struct Browser {
     auto_refresh: bool,
     specimen_canvas: Option<canvas::SpecimenCanvas>,
     theme_mode: String,
+    results_visible: bool,
+    visual_results: bool,
+    location_filters: Filters,
+    navigation_back: Vec<Location>,
+    navigation_forward: Vec<Location>,
 }
 
 pub struct WorkspaceRequest {
@@ -109,6 +138,8 @@ impl Browser {
     pub fn new(repository: Option<PathBuf>, reader: Option<PathBuf>, node: Option<PathBuf>, cache: Option<PathBuf>, canonical_ref: Option<String>) -> Self {
         let (jobs, requests) = mpsc::channel();
         let (responses, replies) = mpsc::channel();
+        let repaint = Arc::new(Mutex::new(None));
+        let worker_repaint = repaint.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancelled.clone();
         std::thread::spawn(move || {
@@ -116,11 +147,14 @@ impl Browser {
             let mut previous_config: Option<ReaderConfig> = None;
             let mut previous_mode = String::new();
             loop {
-                let job = match requests.recv_timeout(Duration::from_millis(100)) {
+                // Job sends interrupt this wait immediately. Only local source
+                // notifications require the bounded 750 ms drain interval.
+                let interval = if previous_mode == "local" { LOCAL_EVENT_POLL } else { IDLE_REPAINT };
+                let job = match requests.recv_timeout(interval) {
                     Ok(job) => job,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         if client.as_mut().is_some_and(|c| c.take_source_changed()) {
-                            if responses.send(Reply::SourceChanged).is_err() {
+                            if !send_reply(&responses, &worker_repaint, Reply::SourceChanged) {
                                 break;
                             }
                         }
@@ -159,7 +193,7 @@ impl Browser {
                         Reply::Materialize(epoch, id, result)
                     }
                 };
-                if responses.send(reply).is_err() {
+                if !send_reply(&responses, &worker_repaint, reply) {
                     break;
                 }
             }
@@ -185,6 +219,7 @@ impl Browser {
             filters: Filters { collection: "design".into(), ..Default::default() },
             jobs,
             replies,
+            repaint,
             epoch: 0,
             busy: false,
             summary: None,
@@ -213,6 +248,11 @@ impl Browser {
             auto_refresh: true,
             specimen_canvas: None,
             theme_mode: "light".into(),
+            results_visible: true,
+            visual_results: false,
+            location_filters: Filters { collection: "design".into(), ..Default::default() },
+            navigation_back: vec![],
+            navigation_forward: vec![],
         };
         if open {
             browser.refresh();
@@ -270,9 +310,7 @@ impl Browser {
                                 let changed = self.summary.as_ref().is_none_or(|old| old["generationId"] != summary["generationId"]);
                                 self.summary = Some(summary);
                                 if changed {
-                                    self.specimen_canvas = None;
-                                    self.specimen = None;
-                                    self.source_text.clear();
+                                    self.clear_preview();
                                     self.pending_selection = self.selected.is_some();
                                     self.query(0);
                                 }
@@ -306,9 +344,15 @@ impl Browser {
                     match result {
                         Ok(value) => {
                             // A refresh may have changed metadata for the same occurrence.
-                            if let Ok(entry) = serde_json::from_value(value["entry"].clone()) {
-                                self.selected = Some(entry);
+                            let Ok(entry) = serde_json::from_value::<Entry>(value["entry"].clone()) else {
+                                self.preview_error = Some("The preview did not identify its selected source. Select it again to retry.".into());
+                                continue;
+                            };
+                            if entry.id != id || !support::matches(&entry, &value) {
+                                self.preview_error = Some("The preview returned a different source identity. Select it again to retry.".into());
+                                continue;
                             }
+                            self.selected = Some(entry);
                             self.source_text = preview::source_text(&value);
                             self.specimen = Some(value);
                             self.preview_error = None;
@@ -322,32 +366,81 @@ impl Browser {
         }
     }
     fn filters_changed(&mut self) {
+        if self.filters != self.location_filters {
+            // Coalesce a search typed during the debounce interval into one location.
+            let mut previous = self.location_filters.clone();
+            previous.search = self.filters.search.clone();
+            if self.filter_changed.is_none() || previous != self.filters {
+                self.navigation_back.push(self.location());
+                if self.navigation_back.len() > 40 { self.navigation_back.remove(0); }
+            }
+            self.navigation_forward.clear();
+            self.location_filters = self.filters.clone();
+        }
         self.last_interaction = Instant::now();
         self.filter_changed = Some(Instant::now());
         self.selected = None;
-        self.specimen_canvas = None;
-        self.specimen = None;
-        self.source_text.clear();
-        self.preview_error = None;
+        self.results_visible = true;
+        self.clear_preview();
         self.pending_selection = false;
     }
-    fn select(&mut self, entry: Entry) {
-        self.local_design_error = None;
-        self.last_interaction = Instant::now();
-        self.selected = Some(entry);
+    fn clear_preview(&mut self) {
         self.specimen_canvas = None;
         self.specimen = None;
         self.source_text.clear();
         self.preview_error = None;
+        self.local_design_error = None;
+        self.inline_status.clear();
+        self.inline_preview = None;
+    }
+    fn location(&self) -> Location {
+        Location { filters: self.location_filters.clone(), selected: self.selected.clone(), detail_tab: self.detail_tab,
+            theme_mode: self.theme_mode.clone(), results_visible: self.results_visible }
+    }
+    fn navigate_history(&mut self, forward: bool) {
+        let location = if forward { self.navigation_forward.pop() } else { self.navigation_back.pop() };
+        let Some(location) = location else { return; };
+        let current = self.location();
+        if forward { self.navigation_back.push(current); } else { self.navigation_forward.push(current); }
+        self.clear_preview();
+        self.filters = location.filters.clone();
+        self.location_filters = location.filters;
+        self.selected = location.selected;
+        self.detail_tab = location.detail_tab;
+        self.theme_mode = location.theme_mode;
+        self.results_visible = location.results_visible;
+        self.products_open = !self.filters.product.is_empty();
+        self.pending_selection = self.selected.is_some();
+        self.filter_changed = Some(Instant::now());
+        self.last_interaction = Instant::now();
+    }
+    fn select(&mut self, entry: Entry) {
+        self.last_interaction = Instant::now();
+        self.selected = Some(entry);
+        self.results_visible = false;
+        self.clear_preview();
         self.pending_selection = true;
         self.detail_tab = DetailTab::Preview;
+    }
+    fn refresh_delay(&self, now: Instant) -> Duration {
+        let interval = Duration::from_secs((60_u64 << self.refresh_failures.min(4)).min(900));
+        interval.saturating_sub(now.saturating_duration_since(self.last_refresh))
+            .max(Duration::from_secs(10).saturating_sub(now.saturating_duration_since(self.last_interaction)))
+    }
+    fn next_repaint_after(&self, now: Instant) -> Option<Duration> {
+        if !self.open { return None; }
+        if self.busy || self.filter_changed.is_some() || self.pending_selection { return Some(ACTIVE_REPAINT); }
+        if !self.auto_refresh || self.summary.is_none() { return None; }
+        // Source notifications wake the UI through send_reply. This guard also
+        // preserves the absolute refresh/backoff deadline rather than adding 5 s.
+        Some(IDLE_REPAINT.min(self.refresh_delay(now)))
     }
     fn tick(&mut self) {
         self.poll();
         if self.busy {
             return;
         }
-        if self.filter_changed.is_some_and(|t| t.elapsed() >= Duration::from_millis(250)) {
+        if self.filter_changed.is_some_and(|t| t.elapsed() >= FILTER_DEBOUNCE) {
             self.filter_changed = None;
             if self.summary.is_some() {
                 self.query(0);
@@ -366,8 +459,7 @@ impl Browser {
             self.refresh();
         } else if self.auto_refresh
             && self.summary.is_some()
-            && self.last_refresh.elapsed() >= Duration::from_secs((60_u64 << self.refresh_failures.min(4)).min(900))
-            && self.last_interaction.elapsed() >= Duration::from_secs(10)
+            && self.refresh_delay(Instant::now()).is_zero()
         {
             self.refresh();
         }
