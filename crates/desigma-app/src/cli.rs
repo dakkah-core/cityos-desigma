@@ -7,6 +7,8 @@ pub struct Options {
     pub cityos_frame: bool,
     pub cityos_host_diagnostic: bool,
     pub cityos_verify_workspace: Option<PathBuf>,
+    /// Explicit exploratory native diagnostics; omitted launches do no diagnostic work.
+    pub cityos_performance_report: Option<PathBuf>,
     pub cityos_repository: Option<PathBuf>,
     pub cityos_reader: Option<PathBuf>,
     pub cityos_node: Option<PathBuf>,
@@ -130,6 +132,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
         match a.as_str() {
             "--cityos-frame" => o.cityos_frame=true,
             "--cityos-host-diagnostic" => o.cityos_host_diagnostic=true,
+            "--cityos-performance-report" => {
+                if o.cityos_performance_report.is_some() {
+                    return Err("--cityos-performance-report may only be given once".into());
+                }
+                let path = it.next().filter(|p| !p.trim().is_empty() && !p.starts_with('-'))
+                    .ok_or("--cityos-performance-report needs an output path")?;
+                o.cityos_performance_report = Some(path.into());
+            }
             "--cityos-verify-workspace" => o.cityos_verify_workspace=Some(it.next().ok_or("--cityos-verify-workspace needs a fixture/evidence directory")?.into()),
             "--cityos-repository" => o.cityos_repository = Some(it.next().ok_or("--cityos-repository needs a path")?.into()),
             "--cityos-reader" => o.cityos_reader = Some(it.next().ok_or("--cityos-reader needs the packaged reader path")?.into()),
@@ -219,6 +229,7 @@ pub const USAGE: &str = "usage: desigma [FILE] [--screenshot OUT.png] [--size Wx
   --cityos-repository PATH  open the read-only CityOS L0–L9 catalog
   --cityos-frame            open the canonical bound web-frame workspace
   --cityos-host-diagnostic  open the inert embedded WebView2 diagnostic
+  --cityos-performance-report PATH  exploratory native frame/repaint diagnostics; parent directory must exist
   --cityos-reader PATH      absolute packaged reader.mjs path
   --cityos-node PATH        Node executable (default: node)
   --cityos-cache PATH       application-owned repository cache
@@ -236,6 +247,28 @@ mod tests {
 
     fn p(a: &[&str]) -> Result<Options, String> {
         parse(a.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn cityos_performance_report_is_explicit_and_does_not_change_launch_behavior() {
+        let plain = p(&["--cityos-frame"]).unwrap();
+        assert!(plain.cityos_performance_report.is_none());
+        let mut traced = p(&["--cityos-frame", "--cityos-performance-report", "evidence/native report.json"]).unwrap();
+        assert_eq!(traced.cityos_performance_report.take(), Some("evidence/native report.json".into()));
+        assert_eq!(traced, plain);
+        assert!(p(&["--cityos-performance-report", "report.json"]).unwrap().wants_home());
+        assert!(USAGE.contains("--cityos-performance-report PATH"));
+    }
+
+    #[test]
+    fn cityos_performance_report_requires_one_nonempty_output_path() {
+        for args in [
+            vec!["--cityos-performance-report"],
+            vec!["--cityos-performance-report", ""],
+            vec!["--cityos-performance-report", "  "],
+            vec!["--cityos-performance-report", "--gpu"],
+            vec!["--cityos-performance-report", "a.json", "--cityos-performance-report", "b.json"],
+        ] { assert!(p(&args).is_err(), "{args:?}"); }
     }
 
     #[test]

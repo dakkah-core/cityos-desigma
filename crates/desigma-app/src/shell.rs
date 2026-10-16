@@ -1,5 +1,7 @@
 //! Window shell: lays out the panels, routes shortcuts and drives screenshots.
 
+pub(crate) mod performance;
+
 use crate::app::{App, MenuKind};
 use crate::canvas::tools::Tool;
 use crate::canvas::{self, interact};
@@ -32,6 +34,7 @@ pub struct Shell {
     title: String,
     cityos: crate::cityos_catalog::Browser,
     workspace: crate::design_workspace::Workspace,
+    performance: Option<performance::Reporter>,
 }
 
 impl Shell {
@@ -57,6 +60,15 @@ impl Shell {
     }
 
     pub fn build(ctx: &Context, opts: Options) -> Self {
+        let performance = opts.cityos_performance_report.clone().and_then(|path| {
+            match performance::Reporter::start(path) {
+                Ok(reporter) => Some(reporter),
+                Err(error) => {
+                    eprintln!("desigma: performance diagnostics unavailable ({:?})", error.kind());
+                    None
+                }
+            }
+        });
         let mut cityos = crate::cityos_catalog::Browser::new(
             opts.cityos_repository.clone(),
             opts.cityos_reader.clone(),
@@ -234,7 +246,7 @@ impl Shell {
             frames: 0,
             requested: false,
         });
-        Self { app, shot, title: String::new(), cityos, workspace }
+        Self { app, shot, title: String::new(), cityos, workspace, performance }
     }
 
     fn drive_screenshot(&mut self, ctx: &Context) {
@@ -543,6 +555,29 @@ impl eframe::App for Shell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // No clocks, state snapshots, allocations or I/O when the explicit flag is absent.
+        if let Some(reporter) = &mut self.performance {
+            let (pointer_down, minimized) = ui.ctx().input(|i| (i.pointer.any_down(), i.viewport().minimized.unwrap_or(false)));
+            let [busy, pending, render_waiting, current, progress_repaint] = self.workspace.performance_state();
+            reporter.record(ui.ctx(), performance::State {
+                workspace: performance::WorkspaceSnapshot {
+                    open: self.workspace.open,
+                    combined_pending: self.workspace.inline_pending(),
+                    busy: Some(busy), pending: Some(pending), render_waiting: Some(render_waiting),
+                    current: Some(current), progress_repaint: Some(progress_repaint),
+                },
+                fonts_loading: self.app.fonts.is_loading(),
+                autosave_waiting: self.app.autosave.changed_at.is_some(),
+                autosave_confirmed: self.app.autosave.confirmed,
+                autosave_retry_scheduled: self.app.autosave.retry_at.is_some(),
+                pointer_down,
+                text_editing: self.app.canvas.text.is_some(),
+                minimized,
+                catalog_open: self.cityos.open,
+                home_visible: self.app.home.is_some(),
+                screenshot_active: self.shot.is_some(),
+            });
+        }
         crate::cityos_jobs::set_background_paused(ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
         if ui.ctx().input(|i| i.smooth_scroll_delta!=egui::Vec2::ZERO || i.events.iter().any(|event|
             matches!(event,egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Key {pressed:true,..}))) {

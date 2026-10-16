@@ -19,6 +19,21 @@ enum DependencyAction { Open, Resume, Reconcile }
 
 const SPECIMEN_CANVAS_REASON: &str = "Temporary registered defaults have no canonical document binding. Open on canvas and changes are unavailable.";
 
+fn registered_availability_reason(resource: &Value) -> String {
+    let reasons = resource["availability"]["preview"]["reasons"].as_array().into_iter().flatten()
+        .filter_map(Value::as_str).map(|reason| match reason {
+            "registered-fixture-props-unavailable" => "The component owner has not declared default fixture properties.",
+            "owner-input-fixture-unavailable" => "This definition needs a declared owner-data fixture.",
+            "registered-composition-inputs-required" => "Select an authored composition supplying its required slots.",
+            "renderer-adapter-unavailable" => "No actual-renderer adapter is registered for this definition.",
+            "renderer-pins-unavailable" => "Install matching renderer dependencies to preview this definition.",
+            "semantic-catalog-entry-unavailable" => "The registered semantic catalog entry is unavailable.",
+            _ => reason,
+        }).collect::<Vec<_>>();
+    if reasons.is_empty() { "Select a canonical composition or an installed preview adapter for this definition.".into() }
+    else { reasons.join(" ") }
+}
+
 #[derive(Clone)]
 struct SpecimenRequest {
     locator: Value,
@@ -321,6 +336,7 @@ impl Workspace {
         self.begin_request(config,source,preview_only,None);
     }
     fn begin_request(&mut self, config: Config, source: Option<String>, preview_only: bool,pin:Option<Value>) {
+        self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
         self.property_text.clear();
@@ -371,7 +387,7 @@ impl Workspace {
             self.themes_loaded = true;
             self.validated = specimen_locator(&resource).is_some();
             if self.validated { self.request_specimen_preview(); }
-            else { self.error = Some("Registered specimen locator unavailable; no substitute was opened".into()); }
+            else { self.error = Some(registered_availability_reason(&resource)); }
         } else {
             self.send(json!({"op":"Open","resource":resource}));
         }
@@ -503,6 +519,7 @@ impl Workspace {
         app.show_toast("Local Desigma copy · no CityOS submission binding", false);
     }
     pub fn begin_harness(&mut self, config: Config) {
+        self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resource = None;
         self.host.reset();
@@ -519,6 +536,7 @@ impl Workspace {
         self.send(json!({"op":"Harness"}));
     }
     pub fn resume(&mut self, config: Config, app: &App) {
+        self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
         self.property_text.clear();
@@ -728,6 +746,28 @@ impl Workspace {
         self.render_started = Some(Instant::now());
         true
     }
+    fn settle_specimen_preview(&mut self, value: Value) {
+        // Panel reflow and scenario controls may change while the helper works.
+        // Retire that response quietly and coalesce one replacement. Showing an
+        // error here changes the panel height and can cause a resize/retry loop.
+        let superseded = self.specimen_request.as_ref().is_some_and(|request| {
+            self.preview_only && self.is_specimen()
+                && request.generation == self.preview_generation
+                && self.resource.as_ref().and_then(specimen_locator).as_ref() == Some(&request.locator)
+                && request.scenario != self.scenario()
+        });
+        if self.accept_specimen_preview(value, "FixturePreview") { return; }
+        self.current = false;
+        if superseded {
+            self.error = None;
+            self.pending = Some(Instant::now());
+        } else {
+            // A malformed or substituted receipt is terminal. An automatic
+            // retry of the same request cannot repair its identity.
+            self.pending = None;
+            self.error = Some("Obsolete or mismatched registered specimen preview discarded. Select the design or restart preview to retry.".into());
+        }
+    }
     fn matches_preview_event(&self, app: &App, event: &Value) -> bool {
         let receipt_matches = self.preview.as_ref().is_some_and(|p| {
             ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"].iter().all(|key| p[*key] == event[*key])
@@ -837,11 +877,7 @@ impl Workspace {
                             }
                         }
                         "FixturePreview" => {
-                            if !self.accept_specimen_preview(value, &op) {
-                                self.current = false;
-                                self.pending = Some(Instant::now());
-                                self.error = Some("Obsolete or mismatched registered specimen preview discarded".into());
-                            }
+                            self.settle_specimen_preview(value);
                         }
                         "Export" => {
                             self.compare = Some(serde_json::to_string_pretty(&value).unwrap_or_default());
@@ -956,6 +992,19 @@ impl Workspace {
         self.resources = value["resources"].as_array().cloned().unwrap_or_default();
         self.resources.extend(value["specimens"].as_array().into_iter().flatten()
             .filter(|r| r["kind"] == "registered-specimen").cloned());
+        // Metadata selection is independent of renderer availability. Keep every
+        // registered definition visible without compiling its defaults eagerly.
+        for selection in value["specimenSelections"].as_array().into_iter().flatten() {
+            let id = selection["resourceId"].as_str().filter(|id| !id.is_empty());
+            if id.is_none() || self.resources.iter().any(|r| r["kind"] == "registered-specimen" && r["resourceId"].as_str() == id) { continue; }
+            let mut resource = selection.clone();
+            resource["kind"] = json!("registered-specimen");
+            resource["actualWebPreview"] = json!(false);
+            resource["editable"] = json!(false);
+            resource["fixture"] = selection["previewAdapter"].clone();
+            resource["previewNotice"] = json!(registered_availability_reason(selection));
+            self.resources.push(resource);
+        }
     }
     fn choose_design_file(&mut self) {
         self.picker_open = self.changes_mode || !self.picker_open;
@@ -963,6 +1012,13 @@ impl Workspace {
         if self.resources.is_empty() {
             self.send(json!({"op":"Resources"}));
         }
+    }
+    fn progress_repaint_delay(&self) -> Option<Duration> {
+        let visible_pending = self.pending.is_some() && (self.preview_only || self.layout.view != layout::View::Canvas);
+        (self.busy.is_some() || visible_pending || self.render_started.is_some()).then_some(Duration::from_millis(100))
+    }
+    pub(crate) fn performance_state(&self) -> [bool; 5] {
+        [self.busy.is_some(), self.pending.is_some(), self.render_started.is_some(), self.current, self.progress_repaint_delay().is_some()]
     }
     pub fn show(&mut self, app: &mut App, ui: &mut egui::Ui, frame: &eframe::Frame) {
         ui.spacing_mut().item_spacing = egui::vec2(10., 8.);
@@ -980,14 +1036,12 @@ impl Workspace {
         self.poll(app);
         let ctx = ui.ctx().clone();
         let old_layout = self.layout.clone();
-        let visible_pending = self.pending.is_some() && (self.preview_only || self.layout.view != layout::View::Canvas);
-        ctx.request_repaint_after(Duration::from_millis(if self.busy.is_some() || visible_pending || self.render_started.is_some() {
-            100
-        } else {
-            5000
-        }));
+        // Input and WebView IPC wake the window independently. A current draft
+        // does not need an idle heartbeat that redraws the entire canvas.
+        if let Some(delay) = self.progress_repaint_delay() { ctx.request_repaint_after(delay); }
         if let Some(toast) = &app.toast {
             if app.now < toast.until {
+                ctx.request_repaint_after(Duration::from_secs_f64(toast.until - app.now));
                 egui::Panel::bottom("cityos-workspace-save-status").show(ui, |ui| {
                     ui.colored_label(if toast.error { ui.visuals().error_fg_color } else { ui.visuals().text_color() }, &toast.text);
                 });
@@ -1256,7 +1310,9 @@ impl Workspace {
                             }
                         });
                         if let Some(reason)=resource["previewNotice"].as_str(){ui.small(reason);}
-                        ui.small(if resource["kind"] == "registered-specimen" {
+                        ui.small(if resource["kind"] == "registered-specimen" && resource["actualWebPreview"] != true {
+                            "Registered definition · preview unavailable · source retained"
+                        } else if resource["kind"] == "registered-specimen" {
                             "Temporary registered defaults · actual web preview · canvas unavailable"
                         } else if resource["actualWebPreview"] == true {
                             "Actual web preview · canonical file"
@@ -1426,7 +1482,13 @@ impl Workspace {
                     if self.busy.is_some() {
                         ui.spinner();
                     }
-                    ui.label(if self.busy.is_some() { "Loading selected source…" } else { "Choose a design file to preview before opening it on canvas." });
+                    if self.is_specimen() && self.busy.is_none() {
+                        ui.label("Preview and canvas availability");
+                        if let Some(resource) = &self.resource { ui.label(registered_availability_reason(resource)); }
+                        ui.small("The selected definition is preserved. Your saved draft remains in its tab.");
+                    } else {
+                        ui.label(if self.busy.is_some() { "Loading selected source…" } else { "Choose a design file to preview before opening it on canvas." });
+                    }
                     return;
                 }
                 let app = if self.preview_only {
@@ -1522,6 +1584,25 @@ impl Workspace {
 mod tests {
     use super::*;
     #[test]
+    fn current_workspace_is_event_driven_but_pending_work_keeps_progress_repaints() {
+        let mut workspace = Workspace::default();
+        assert!(workspace.progress_repaint_delay().is_none());
+        workspace.pending = Some(Instant::now());
+        workspace.layout.view = layout::View::Canvas;
+        assert!(workspace.progress_repaint_delay().is_none(), "Hidden previews do not poll");
+        workspace.preview_only = true;
+        assert_eq!(workspace.progress_repaint_delay(), Some(Duration::from_millis(100)));
+        workspace.preview_only = false;
+        workspace.pending = None;
+        workspace.render_started = Some(Instant::now());
+        assert!(workspace.progress_repaint_delay().is_some(), "Renderer deadlines remain serviceable");
+        workspace.render_started = None;
+        workspace.busy = Some("Command".into());
+        assert!(workspace.progress_repaint_delay().is_some());
+        workspace.busy = None;
+        assert!(workspace.progress_repaint_delay().is_none());
+    }
+    #[test]
     fn semantic_change_display_resolves_frame_references_and_rfc6901_pointers() {
         let base = json!({"id":"frame","revision":"1","root":{"slots":{"material":[{"props":{"elevation":"flat","a/b~c":"before"}}]}}});
         let candidate = json!({"id":"frame","revision":"2","root":{"slots":{"material":[{"props":{"elevation":"resting","a/b~c":"after"}}]}}});
@@ -1608,6 +1689,23 @@ mod tests {
         assert!(specimen_locator(&workspace.resources[0]).is_some());
     }
     #[test]
+    fn unqualified_registered_definitions_remain_selectable_without_loading_another_design() {
+        let mut workspace = Workspace::default();
+        let specimen = registered_specimen("ready.component", "ar");
+        let unavailable = json!({"resourceId":"unqualified.component", "componentId":"unqualified.component", "label":"Owner component",
+            "availability":{"preview":{"status":"unavailable","reasons":["owner-input-fixture-unavailable"]}},
+            "provenance":{"canonicalResource":false,"temporary":true}});
+        workspace.capture_resources(&json!({"resources":[],"specimens":[specimen],"specimenSelections":[specimen,unavailable]}));
+        assert_eq!(workspace.resources.len(), 2, "Qualified descriptors must not be duplicated");
+        let selection = workspace.resources[1].clone();
+        workspace.open_resource(selection.clone());
+        assert_eq!(workspace.resource, Some(selection));
+        assert!(workspace.preview_only && workspace.is_specimen());
+        assert!(workspace.bridge.is_none() && workspace.busy.is_none());
+        assert!(workspace.preview.is_none() && workspace.staged.is_none() && workspace.temporary_canvas.is_none());
+        assert!(workspace.error.as_deref().unwrap().contains("owner-data fixture"));
+    }
+    #[test]
     fn temporary_registered_specimen_never_changes_document_history_saving_or_library() {
         let root = std::env::temp_dir().join(format!("desigma-specimen-{}", uuid::Uuid::new_v4()));
         let library = desigma_library::Library::open(&root).unwrap();
@@ -1678,6 +1776,67 @@ mod tests {
         assert!(!workspace.accept_specimen_preview(receipt.clone(), "Preview"));
         assert!(workspace.accept_specimen_preview(receipt.clone(), "FixturePreview"));
         assert!(!workspace.accept_specimen_preview(receipt, "FixturePreview"));
+    }
+    #[test]
+    fn registered_specimen_panel_reflow_coalesces_without_an_error_resize_loop() {
+        let mut workspace = specimen_workspace();
+        let previous = specimen_receipt(&workspace);
+        workspace.viewport = (1200, 640);
+        workspace.settle_specimen_preview(previous);
+        assert!(workspace.preview.is_none());
+        assert!(workspace.error.is_none(), "Expected reflow must not alter the layout with an error row");
+        assert!(workspace.pending.is_some());
+        workspace.specimen_request = workspace.captured_specimen_request();
+        workspace.pending = None;
+        let current = specimen_receipt(&workspace);
+        workspace.settle_specimen_preview(current);
+        assert!(workspace.preview.is_some());
+        assert!(workspace.pending.is_none() && workspace.error.is_none());
+    }
+    #[test]
+    fn invalid_registered_specimen_receipt_never_retries_the_same_request() {
+        let mut workspace = specimen_workspace();
+        let mut invalid = specimen_receipt(&workspace);
+        invalid["semanticDigest"] = json!("");
+        workspace.pending = Some(Instant::now());
+        workspace.settle_specimen_preview(invalid);
+        assert!(workspace.error.is_some());
+        assert!(workspace.pending.is_none() && workspace.specimen_request.is_none());
+        assert!(workspace.preview.is_none() && workspace.render_started.is_none());
+    }
+    #[test]
+    #[ignore = "requires the matching packaged renderer; exercised by the Windows delivery check"]
+    fn packaged_registered_specimens_pass_native_identity_checks_for_both_locales() {
+        let directory = std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_EVIDENCE").expect("evidence directory"));
+        let package = std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_PACKAGE").expect("package directory"));
+        let bridge = bridge::Bridge::spawn(Config {
+            node: std::env::var("CITYOS_DESIGN_WORKSPACE_NODE").expect("pinned node").into(),
+            bridge: package.join("workspace.mjs"),
+            repository: std::env::var("CITYOS_DESIGN_WORKSPACE_REPOSITORY").expect("canonical repository").into(),
+            cache: directory.join("canonical-cache"),
+        });
+        bridge.jobs.send(json!({"op":"Resources"})).unwrap();
+        let resources = bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        let specimens = resources["specimens"].as_array().expect("registered specimens");
+        assert!(!specimens.is_empty());
+        let mut receipts = Vec::new();
+        for selected in specimens {
+            for locale in ["ar", "en"] {
+                let mut workspace = Workspace::default();
+                workspace.prepare_resource(selected.clone());
+                workspace.locale = locale.into();
+                workspace.specimen_request = workspace.captured_specimen_request();
+                bridge.jobs.send(workspace.specimen_request.as_ref().unwrap().job()).unwrap();
+                let receipt = bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+                workspace.settle_specimen_preview(receipt.clone());
+                assert!(workspace.preview.is_some(), "{} / {locale}: {:?}", selected["resourceId"], workspace.error);
+                assert!(workspace.pending.is_none());
+                receipts.push(json!({"resourceId":receipt["resource"]["resourceId"],"locale":locale,
+                    "scenario":receipt["scenario"],"artifactDigest":receipt["artifactDigest"],
+                    "provenance":receipt["provenance"],"nativeIdentityAccepted":true,"embeddedRendererObserved":false}));
+            }
+        }
+        std::fs::write(directory.join("native-specimen-receipts.json"), serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
     }
     #[test]
     fn registered_specimen_locale_regenerates_defaults_with_a_stable_four_field_locator() {

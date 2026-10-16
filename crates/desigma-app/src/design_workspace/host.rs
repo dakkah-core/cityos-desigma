@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 pub struct Host {
     #[cfg(windows)]
     view: Option<wry::WebView>,
+    #[cfg(windows)]
+    context: Option<wry::WebContext>,
+    storage: Option<std::path::PathBuf>,
     pub url: Option<String>,
     pub version: Option<String>,
     pub error: Option<String>,
@@ -17,6 +20,15 @@ pub struct Host {
     origin: Option<String>,
 }
 impl Host {
+    pub fn configure_storage(&mut self, cache: &std::path::Path) {
+        let storage = cache.join("webview2-preview");
+        if self.storage.as_ref() != Some(&storage) {
+            self.reset();
+            #[cfg(windows)]
+            { self.context = None; }
+            self.storage = Some(storage);
+        }
+    }
     pub fn hide(&self) {
         #[cfg(windows)]
         if let Some(view) = &self.view {
@@ -54,7 +66,7 @@ impl Host {
                 (rect.width() * scale).max(1.).round() as i32,
                 (rect.height() * scale).max(1.).round() as i32,
             ];
-            let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
+            let parsed = url::Url::parse(url).map_err(|e: url::ParseError| e.to_string())?;
             if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") || parsed.port().is_none() {
                 return Err("Preview origin rejected".into());
             }
@@ -69,12 +81,19 @@ impl Host {
             if self.view.is_none() || self.origin.as_deref() != Some(next_origin.as_str()) {
                 self.reset();
                 self.version = Some(wry::webview_version().map_err(|e| format!("WebView2 runtime unavailable: {e}"))?);
+                // Even InPrivate WebView2 creates an environment directory. Keep
+                // mutable browser data outside the verified executable package.
+                if self.context.is_none() {
+                    let storage = self.storage.as_ref().filter(|path| path.is_absolute()).ok_or("Application preview cache is unavailable")?;
+                    std::fs::create_dir_all(storage).map_err(|e| format!("Preview cache unavailable: {e}"))?;
+                    self.context = Some(wry::WebContext::new(Some(storage.clone())));
+                }
                 let allowed = Arc::new(Mutex::new(url.to_owned()));
                 let navigation = allowed.clone();
                 let origin = parsed.origin().ascii_serialization();
                 let (tx, messages) = mpsc::sync_channel(32);
                 let repaint = ctx.clone();
-                let view = wry::WebViewBuilder::new()
+                let view = wry::WebViewBuilder::new_with_web_context(self.context.as_mut().unwrap())
                     .with_incognito(true)
                     .with_focused(false)
                     .with_devtools(false)
@@ -116,5 +135,24 @@ impl Host {
             let _ = (frame, url, rect, scale, ctx);
             Err("Embedded host is currently available on Windows only".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preview_storage_uses_the_application_cache_and_survives_view_reset() {
+        let mut host = Host::default();
+        let cache = std::env::temp_dir().join("desigma-host-storage-test");
+        host.configure_storage(&cache);
+        assert_eq!(host.storage.as_deref(), Some(cache.join("webview2-preview").as_path()));
+        host.url = Some("previous view".into());
+        host.reset();
+        assert_eq!(host.storage.as_deref(), Some(cache.join("webview2-preview").as_path()));
+        let other = cache.join("other-installation");
+        host.configure_storage(&other);
+        assert_eq!(host.storage.as_deref(), Some(other.join("webview2-preview").as_path()));
+        assert!(host.url.is_none());
     }
 }

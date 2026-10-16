@@ -230,7 +230,7 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
         }
         if open {
             let cur = scale_of(row.constraint);
-            let items: Vec<MenuItem> = ExportScale::PRESETS.iter().map(|s| MenuItem::new(s.to_string()).checked(*s == cur)).collect();
+            let items: Vec<MenuItem> = ExportScale::PRESETS.iter().map(|s: &ExportScale| MenuItem::new(s.to_string()).checked(*s == cur)).collect();
             match popup_menu(ui.ctx(), menu_id.with("popup"), scale_r.left_bottom() + Vec2::new(0.0, 2.0), scale_r.width().max(64.0), &items, Some(scale_r)) {
                 MenuResult::Picked(p) => {
                     row.constraint = constraint_of(ExportScale::PRESETS[p]);
@@ -255,7 +255,7 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
             ui.painter().text(Pos2::new(suffix_r.left() + 6.0, suffix_r.center().y), Align2::LEFT_CENTER, "Suffix", theme::font_body(), theme::TEXT_TERTIARY);
         }
 
-        let options: Vec<String> = ExportFormat::ALL.iter().map(|f| f.label().to_string()).collect();
+        let options: Vec<String> = ExportFormat::ALL.iter().map(|f: &ExportFormat| f.label().to_string()).collect();
         if let Some(p) = dropdown(ui, fmt_r, ("export-format", first, i), format_label(row.format), &options) {
             row.format = file_format_of(ExportFormat::ALL[p]);
             changed = true;
@@ -417,7 +417,8 @@ pub fn run_export(app: &mut App, ids: &[NodeId]) {
     } else {
         let Some(dir) = rfd::FileDialog::new().set_title("Choose export folder").pick_folder() else { return };
         for (file, id, s) in &jobs {
-            let bytes = s.render(&app.doc, *id);
+            let setting: &ExportSetting = s;
+            let bytes = setting.render(&app.doc, *id);
             if bytes.is_empty() {
                 continue;
             }

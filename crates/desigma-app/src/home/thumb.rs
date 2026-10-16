@@ -206,7 +206,7 @@ impl Textures {
             return self.map.get(&entry.id).and_then(|(_, t)| t.as_ref().map(|t| (t.id(), t.size_vec2())));
         }
         *budget -= 1;
-        let tex = (|| {
+        let tex: Option<egui::TextureHandle> = (|| -> Option<image::DynamicImage> {
             use std::io::Read;
             let mut bytes=Vec::new();std::fs::File::open(&path).ok()?.take(4*1024*1024+1).read_to_end(&mut bytes).ok()?;
             if bytes.len()>4*1024*1024{return None;}

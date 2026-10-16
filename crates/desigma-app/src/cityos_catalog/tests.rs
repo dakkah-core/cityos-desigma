@@ -492,6 +492,8 @@ fn catalog_refresh_filters_wait_for_cancellation_then_query_the_retained_generat
     assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, false))));
     browser.filters.search = "latest search".into();
     browser.filters_changed();
+    // Keep the debounce pending deterministically, even on a slow test host.
+    browser.filter_changed = Some(Instant::now() + Duration::from_secs(60));
     assert!(browser.cancelled.load(Ordering::Acquire));
     tx.send(Reply::SourceChanged).unwrap();
     tx.send(Reply::Scan(scan_epoch.wrapping_sub(1), Ok(json!({"generationId":"stale","snapshot":{"mode":"local"}})))).unwrap();
@@ -655,6 +657,154 @@ fn catalog_refresh_failure_preserves_display_and_explicit_refresh_reconnects_wit
     tx.send(Reply::Scan(browser.epoch, Ok(previous.unwrap()))).unwrap();
     browser.poll();
     assert!(matches!(requests.try_recv(), Ok(Job::Query(_, filters, 0, binding)) if filters.search == "changed" && binding.generation == "first"));
+}
+
+struct CatalogReaderFixture(PathBuf);
+impl Drop for CatalogReaderFixture {
+    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
+
+// A real Client against a small IPC peer exercises request/session/generation
+// validation without a repository scan, cache publication, or the heavy-job gate.
+fn cancelled_catalog_client(fence_mode: &str) -> (CatalogReaderFixture, Client, CatalogBinding, Arc<AtomicBool>, Value) {
+    let directory = std::env::temp_dir().join(format!("desigma-catalog-refresh-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let fixture = CatalogReaderFixture(directory.clone());
+    let script = r#"
+import readline from 'node:readline';
+const fenceMode = __FENCE_MODE__;
+const entry = __ENTRY__;
+let generation = 'first', scans = 0, pending = null;
+const send = (r, kind, body) => process.stdout.write(JSON.stringify({
+    protocolVersion:r.protocolVersion, requestId:r.requestId, sessionId:r.sessionId,
+    generationId:generation, kind, ...body
+})+'\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+    const r = JSON.parse(line);
+    if (r.op === 'Hello') { send(r, 'result', {result:{}}); return; }
+    if (r.op === 'Scan') {
+        if (++scans === 1) send(r, 'result', {result:{generationId:generation, snapshot:{mode:r.mode}, readerProcess:process.pid}});
+        else pending = r;
+        return;
+    }
+    if (r.op === 'Cancel') {
+        if (r.targetRequestId === 'settled-refresh') {
+            if (fenceMode === 'error') { send(r, 'error', {error:{message:'Cancellation fence failed'}}); return; }
+            if (fenceMode === 'dead') { process.exit(0); return; }
+            if (fenceMode === 'advanced') generation = 'unexpected-replacement';
+        }
+        const retired = pending; pending = null;
+        send(r, 'result', {result:{cancelled:true}});
+        // An obsolete scan frame must not update Client.generation or satisfy
+        // the subsequent fence/read, even if it arrives after the Cancel ack.
+        if (retired) setImmediate(() => send(retired, 'result', {result:{generationId:'obsolete', snapshot:{mode:'committed'}}}));
+        return;
+    }
+    if (r.op === 'Query') {
+        if (r.search !== 'new search') { send(r, 'error', {error:{message:'Wrong filters'}}); return; }
+        send(r, 'result', {result:{entries:[entry], total:1, nextOffset:null}}); return;
+    }
+    if (r.op === 'Materialize') send(r, 'result', {result:{entry, digest:'digest', data:{selected:r.entryId}, readerProcess:process.pid, scans}});
+});
+"#;
+    let script = script.replace("__FENCE_MODE__", &serde_json::to_string(fence_mode).unwrap())
+        .replace("__ENTRY__", &serde_json::to_string(&entry("one")).unwrap());
+    let reader = directory.join("reader.mjs");
+    std::fs::write(&reader, script).unwrap();
+    let config = ReaderConfig { node: "node".into(), reader, repository: directory, cache: None, canonical_ref: None };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut client = Client::connect_with_cancel(&config, cancelled.clone()).expect("IPC regression fixture requires Node on PATH");
+    let summary = client.scan(&config, "committed").unwrap();
+    cancelled.store(true, Ordering::Release);
+    let result = client.scan(&config, "committed");
+    assert!(retain_cancelled_refresh(&result, true, true, client.generation.is_some()));
+    let binding = CatalogBinding { config, mode: "committed".into(), generation: "first".into() };
+    (fixture, client, binding, cancelled, summary)
+}
+
+#[test]
+fn catalog_refresh_retained_client_serves_query_and_materialize_from_the_previous_generation() {
+    for materialize_first in [false, true] {
+        let (_fixture, client, binding, cancelled, summary) = cancelled_catalog_client("healthy");
+        let mut client = Some(client);
+        let mut session = Some(binding.clone());
+        let mut fence = true;
+        // The cancellation request has returned; this is the UI's settle boundary.
+        cancelled.store(false, Ordering::Release);
+        let first_specimen = materialize_first.then(||
+            read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize("one")).unwrap());
+        let filters = Filters { search: "new search".into(), ..Default::default() };
+        let page = read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.query(&filters, 0)).unwrap();
+        assert_eq!(page.entries[0].id, "one");
+        assert!(!fence);
+        let specimen = first_specimen.unwrap_or_else(||
+            read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize("one")).unwrap());
+        assert_eq!(specimen["data"]["selected"], "one");
+        assert_eq!(specimen["readerProcess"], summary["readerProcess"], "A healthy cancellation must keep the same Client process");
+        assert_eq!(specimen["scans"], 2, "Reads must not launch a replacement scan");
+        assert_eq!(client.as_ref().unwrap().generation.as_deref(), Some("first"));
+        assert_eq!(session.as_ref(), Some(&binding));
+        drop(client);
+    }
+}
+
+#[test]
+fn catalog_refresh_worker_read_rejects_mismatched_config_mode_and_generation() {
+    for change in 0..4 {
+        let (_fixture, client, binding, cancelled, _) = cancelled_catalog_client("healthy");
+        let mut client = Some(client);
+        let mut session = Some(binding.clone());
+        let mut fence = true;
+        let mut requested = binding;
+        match change {
+            0 => requested.config.repository = PathBuf::from("other-repository"),
+            1 => requested.mode = "local".into(),
+            2 => requested.generation = "other-generation".into(),
+            _ => client.as_mut().unwrap().generation = Some("other-generation".into()),
+        }
+        cancelled.store(false, Ordering::Release);
+        let mut read_called = false;
+        assert!(read_catalog(&mut client, &mut session, &mut fence, &requested, |_| {
+            read_called = true;
+            Ok(())
+        }).is_err());
+        assert!(!read_called && client.is_none() && session.is_none() && !fence);
+    }
+}
+
+#[test]
+fn catalog_refresh_failed_cancel_fence_discards_session_and_preserves_display_for_explicit_recovery() {
+    for mode in ["error", "dead", "advanced"] {
+        let (_fixture, client, binding, cancelled, _) = cancelled_catalog_client(mode);
+        let mut client = Some(client);
+        let mut session = Some(binding.clone());
+        let mut fence = true;
+        cancelled.store(false, Ordering::Release);
+        let mut read_called = false;
+        let error = read_catalog(&mut client, &mut session, &mut fence, &binding, |_| {
+            read_called = true;
+            Ok(())
+        }).unwrap_err();
+        assert!(!read_called && client.is_none() && session.is_none() && !fence);
+        assert!(error.contains("Use Refresh to reconnect from cache"));
+
+        let (mut browser, tx, requests) = fixture();
+        let previous = browser.summary.clone();
+        browser.filters.search = "new search".into();
+        browser.query(0);
+        assert!(matches!(requests.try_recv(), Ok(Job::Query(..))));
+        tx.send(Reply::Query(browser.epoch, browser.filters.clone(), 0, Err(error))).unwrap();
+        browser.poll();
+        assert_eq!(browser.summary, previous);
+        assert_eq!(browser.entries[0].id, "one");
+        assert!(browser.catalog_binding.is_none());
+        assert!(browser.error.as_ref().unwrap().contains("Use Refresh to reconnect from cache"));
+        browser.query(0);
+        assert!(requests.try_recv().is_err(), "A failed fence must not be bypassed by another read");
+        browser.refresh();
+        assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
+        assert_eq!(browser.activity, "Reading repository");
+    }
 }
 #[test]
 fn pagination_appends_and_unchanged_refresh_preserves_selection() {
