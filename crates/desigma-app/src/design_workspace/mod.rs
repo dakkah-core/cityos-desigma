@@ -3,6 +3,7 @@ mod bridge;
 mod host;
 mod layout;
 mod dependencies;
+mod submission_recovery;
 use crate::app::App;
 pub use bridge::Config;
 use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Color, Command, Document, Node, Paint, Rect, TextStyle};
@@ -12,10 +13,10 @@ use std::time::{Duration, Instant};
 
 struct DraftTab {
     document:Document,history:desigma_doc::History,path:Option<std::path::PathBuf>,file:Option<crate::home::LibFile>,
-    autosave:crate::home::Autosave,page:desigma_doc::NodeId,resource:Option<Value>,locale:String,theme:String,theme_id:String,interactive:bool,
+    autosave:crate::home::Autosave,page:desigma_doc::NodeId,resource:Option<Value>,locale:String,theme:String,theme_id:String,interactive:bool,selected:String,
 }
 #[derive(Clone, Copy, PartialEq)]
-enum DependencyAction { Open, Resume, Reconcile }
+enum DependencyAction { Open, Resume, Reconcile, Accepted }
 
 const SPECIMEN_CANVAS_REASON: &str = "Temporary registered defaults have no canonical document binding. Open on canvas and changes are unavailable.";
 
@@ -69,6 +70,56 @@ fn semantic_change_label(change: &Value) -> String {
         (_, Some(field)) => field.into(),
         _ => change.get("sourcePointer").and_then(Value::as_str).unwrap_or("Semantic change").into(),
     }
+}
+
+// Selection is view state. Resolve it against the new projection rather than
+// carrying a semantic node name from an unrelated document into its inspector.
+fn document_selection(document: &Document, requested: &str) -> String {
+    let contains = |id: &str| document.nodes.values().any(|node| node.source_id.as_deref() == Some(id));
+    if contains(requested) { return requested.into(); }
+    draft(document).and_then(|value| value["semanticDraft"]["root"]["id"].as_str())
+        .filter(|id| contains(id)).map(str::to_owned)
+        .or_else(|| document.nodes.values().find_map(|node| node.source_id.clone())).unwrap_or_default()
+}
+
+fn resource_picker(ui: &mut egui::Ui, resources: &[Value], active: Option<&Value>, search: &str, busy: bool) -> Option<Value> {
+    let search = search.to_lowercase();
+    let rows: Vec<_> = resources.iter().filter(|resource| {
+        search.is_empty() || format!("{} {} {} {} {}", resource["sourcePath"], resource["label"], resource["componentId"], resource["profileRef"], resource["targetProfileRef"])
+            .to_lowercase().contains(&search)
+    }).collect();
+    ui.small(format!("{} designs", rows.len()));
+    let mut selected = None;
+    egui::ScrollArea::vertical().id_salt(("cityos-design-files", &search)).auto_shrink([false, false])
+        .show_rows(ui, 68., rows.len(), |ui, range| {
+            for index in range {
+                let resource = rows[index];
+                let path = resource["sourcePath"].as_str().unwrap_or("");
+                let label = resource["label"].as_str().unwrap_or(path);
+                let is_specimen = resource["kind"] == "registered-specimen";
+                let row_selected = active.is_some_and(|current| if is_specimen {
+                    specimen_locator(resource).is_some() && specimen_locator(current) == specimen_locator(resource)
+                } else { current["kind"] != "registered-specimen" && current["sourcePath"] == path });
+                let representation = if resource["actualWebPreview"] == true { "Actual web preview" }
+                    else if is_specimen { "Preview unavailable" } else { "Authored structure" };
+                let scope = if is_specimen { "Temporary defaults" } else { "Canonical file" };
+                let detail = ["level", "target", "componentVersion"].into_iter().filter_map(|key|resource[key].as_str())
+                    .filter(|value|!value.is_empty()).collect::<Vec<_>>().join(" · ");
+                let detail = if detail.is_empty() { "Repository design".to_owned() } else { detail };
+                let hint = format!("{}\n{}\n{}", path, resource["componentId"].as_str().unwrap_or(""),
+                    resource["previewNotice"].as_str().unwrap_or("Select to preview before opening on canvas."));
+                ui.add_enabled_ui(!busy && resource["openAvailable"] != false, |ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),68.),egui::Layout::top_down(egui::Align::Min),|ui|{
+                        ui.spacing_mut().item_spacing.y=1.;
+                        let response=ui.add_sized([ui.available_width(),30.],egui::Button::new(label).selected(row_selected).wrap_mode(egui::TextWrapMode::Truncate));
+                        if response.on_hover_text(&hint).on_disabled_hover_text(&hint).clicked(){selected=Some(resource.clone());}
+                        ui.add(egui::Label::new(egui::RichText::new(detail).small()).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(format!("{representation} · {scope}")).small()).truncate());
+                    });
+                });
+            }
+        });
+    selected
 }
 
 fn semantic_change_value_text(value: Option<&Value>, document: Option<&Value>) -> String {
@@ -141,7 +192,10 @@ pub struct Workspace {
     property_text: BTreeMap<String,String>,
     resume_document: Option<Document>,
     specimen_request: Option<SpecimenRequest>,
+    local_specimen_request: Option<SpecimenRequest>,
     preview_generation: u64,
+    submissions: submission_recovery::Recovery,
+    accepted_bundle: Option<Value>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -197,32 +251,33 @@ impl Default for Workspace {
             property_text: BTreeMap::new(),
             resume_document: None,
             specimen_request: None,
+            local_specimen_request: None,
             preview_generation: 0,
+            submissions: Default::default(),
+            accepted_bundle: None,
         }
     }
 }
 
-fn binding(draft: Value, projection: &Value) -> Result<Document, String> {
-    if !matches!(draft["schemaVersion"].as_str(),Some("cityos.design-exchange.v2" | "cityos.design-exchange.v3"))
-        || !matches!(projection["schemaVersion"].as_str(), Some("cityos.desigma-canvas.v1" | "cityos.desigma-structure.v1"))
-        || projection["draftId"] != draft["draftId"]
-        || projection["draftRevision"] != draft["draftRevision"]
-        || projection["semanticDigest"] != draft["semanticDigest"]
-    {
-        return Err("Projection/draft identity mismatch".into());
-    }
+fn projection_document(projection: &Value, name: &str) -> Result<(Document,BTreeMap<String,CityosOccurrence>),String> {
     let string = |v: &Value, key: &str| v[key].as_str().map(str::to_owned).ok_or_else(|| format!("Missing {key}"));
-    let mut doc = Document::new(draft["semanticDraft"]["id"].as_str().unwrap_or("CityOS design"));
+    let mut doc = Document::new(name);
     let page = doc.add_page("Bound canvas");
     let mut occurrences = BTreeMap::new();
     let mut ids = BTreeMap::new();
     for row in projection["nodes"].as_array().ok_or("Missing canvas projection")? {
         let id = doc.alloc_id();
         let key = string(row, "id")?;
+        if key.is_empty() || ids.contains_key(&key) { return Err("Duplicate or empty native occurrence identity".into()); }
         ids.insert(key.clone(), id);
         let number =
             |name: &str| row[name].as_f64().filter(|n| n.is_finite() && n.abs() < 10000.).map(|n| n as f32).ok_or_else(|| format!("Invalid projection {name}"));
-        let parent = row["parent"].as_str().and_then(|p| ids.get(p)).copied().unwrap_or(page);
+        let parent = match row.get("parent") {
+            None | Some(Value::Null) => page,
+            Some(Value::String(parent)) => *ids.get(parent).filter(|parent| **parent != id).ok_or("Native projection parent must precede its child")?,
+            _ => return Err("Invalid native projection parent".into()),
+        };
+        if number("width")?<=0. || number("height")?<=0. { return Err("Invalid native projection extent".into()); }
         let mut node = Node::frame(id, Rect::new(number("x")?, number("y")?, number("width")?, number("height")?));
         // Adapter coordinates are page-space. Native nodes retain the named-slot parent relation.
         if parent != page {
@@ -256,6 +311,16 @@ fn binding(draft: Value, projection: &Value) -> Result<Document, String> {
             },
         );
     }
+    Ok((doc,occurrences))
+}
+fn binding(draft: Value, projection: &Value) -> Result<Document, String> {
+    if !matches!(draft["schemaVersion"].as_str(),Some("cityos.design-exchange.v2" | "cityos.design-exchange.v3"))
+        || !matches!(projection["schemaVersion"].as_str(), Some("cityos.desigma-canvas.v1" | "cityos.desigma-structure.v1"))
+        || projection["draftId"] != draft["draftId"] || projection["draftRevision"] != draft["draftRevision"] || projection["semanticDigest"] != draft["semanticDigest"] {
+        return Err("Projection/draft identity mismatch".into());
+    }
+    let string = |v: &Value, key: &str| v[key].as_str().map(str::to_owned).ok_or_else(|| format!("Missing {key}"));
+    let (mut doc,occurrences)=projection_document(projection,draft["semanticDraft"]["id"].as_str().unwrap_or("CityOS design"))?;
     let pins = draft["dependencyPins"].as_array().ok_or("Missing dependency pins")?.iter().map(|p| string(p, "digest")).collect::<Result<Vec<_>, _>>()?;
     doc.cityos = Some(CityosBinding {
         schema_version: string(&draft,"schemaVersion")?,
@@ -396,6 +461,7 @@ impl Workspace {
     fn invalidate_specimen_request(&mut self) {
         self.preview_generation = self.preview_generation.wrapping_add(1);
         self.specimen_request = None;
+        self.local_specimen_request = None;
     }
     fn is_specimen(&self) -> bool {
         self.resource.as_ref().is_some_and(|r| r["kind"] == "registered-specimen")
@@ -469,7 +535,7 @@ impl Workspace {
         if id.is_some()&&self.tabs.len()>=3{return Err("Four drafts are already loaded. Save and close an inactive tab before opening another.".into());}
         Self::save_before_switch(app)?;
         if let Some(id)=id{self.tabs.insert(id,DraftTab{document:app.doc.clone(),history:std::mem::take(&mut app.hist),path:app.file_path.clone(),file:app.lib_file.clone(),
-            autosave:std::mem::take(&mut app.autosave),page:app.page,resource:self.resource.clone(),locale:self.locale.clone(),theme:self.theme.clone(),theme_id:self.theme_id.clone(),interactive:self.interactive});}
+            autosave:std::mem::take(&mut app.autosave),page:app.page,resource:self.resource.clone(),locale:self.locale.clone(),theme:self.theme.clone(),theme_id:self.theme_id.clone(),interactive:self.interactive,selected:self.selected.clone()});}
         Ok(())
     }
     fn activate_tab(&mut self,app:&mut App,id:&str){
@@ -478,6 +544,7 @@ impl Workspace {
         if !app.replace_document(tab.document,tab.path){self.error=Some("Current draft could not be saved; tab switch cancelled".into());return;}app.hist=tab.history;app.lib_file=tab.file;app.autosave=tab.autosave;app.page=tab.page;app.home=None;
         self.resource=tab.resource;self.locale=tab.locale;self.theme=tab.theme;self.theme_id=tab.theme_id;
         self.interactive=tab.interactive;
+        let selected=document_selection(&app.doc,&tab.selected); self.select(app,&selected);
         self.changes_mode=false;self.incoming=None;
         if let Some(config)=self.config.clone(){self.resume(config,app);}
     }
@@ -498,6 +565,7 @@ impl Workspace {
         let doc = self.staged.as_ref().unwrap().clone();
         if !app.replace_document(doc, None){self.error=Some("Current draft could not be saved; open cancelled".into());return;}
         self.staged=None;
+        let selected=document_selection(&app.doc,""); self.select(app,&selected);
         app.home = None;
         self.preview_only = false;
         self.changes_mode=false;self.incoming=None;
@@ -507,9 +575,18 @@ impl Workspace {
         if let Err(error)=Self::save_before_switch(app) { self.error=Some(error); }
     }
     fn create_local_copy(&mut self, app: &mut App) {
-        if self.is_specimen() { self.error = Some(SPECIMEN_CANVAS_REASON.into()); return; }
+        if self.is_specimen() {
+            if self.busy.is_some() || !self.validated { return; }
+            let Some(request)=self.captured_specimen_request() else { return; };
+            self.send(json!({"op":"Fixtures","fixture":request.locator,"locale":self.locale}));
+            if self.busy.as_deref()==Some("Fixtures") { self.local_specimen_request=Some(request); }
+            return;
+        }
         let source = if self.preview_only { self.staged.as_ref() } else { Some(&app.doc) };
         let Some(document) = source.map(local_copy) else { return; };
+        self.open_local_document(app,document);
+    }
+    fn open_local_document(&mut self, app: &mut App, document: Document) {
         if let Err(error) = self.suspend_current(app) { self.error = Some(error); return; }
         if !app.replace_document(document, None) { self.error = Some("Save failed; local copy was not opened".into()); return; }
         app.home = None;
@@ -518,6 +595,28 @@ impl Workspace {
         self.leave_to_library = false;
         self.open = false;
         app.show_toast("Local Desigma copy · no CityOS submission binding", false);
+    }
+    fn local_specimen_document(&mut self, value: Value) -> Result<Document,String> {
+        let request=self.local_specimen_request.take().ok_or("No explicit local-copy request is pending")?;
+        let selected=self.resource.as_ref().ok_or("Selected registered definition unavailable")?;
+        let resource=&value["resource"];
+        if !self.preview_only || !self.is_specimen() || request.generation!=self.preview_generation
+            || specimen_locator(selected).as_ref()!=Some(&request.locator) || specimen_locator(resource).as_ref()!=Some(&request.locator)
+            || request.scenario["locale"]!=self.locale || value["locale"]!=self.locale || value["state"]!="projected"
+            || value["ownerWrites"]!=false || value["canonicalResource"]!=false || value.get("draft").is_some()
+            || value["provenance"]["temporary"]!=true || value["provenance"]["canonicalResource"]!=false
+            || value["provenance"]["sourceCommit"]!=selected["provenance"]["sourceCommit"]
+            || value["provenance"]["locale"]!=self.locale || resource["provenance"]!=value["provenance"]
+            || value["draftRevision"]!=0 || value["draftId"]!=format!("registered-fixture:{}",resource["resourceId"].as_str().unwrap_or(""))
+            || value["projection"]["schemaVersion"]!="cityos.desigma-canvas.v1"
+            || value["projection"]["draftId"]!=value["draftId"] || value["projection"]["draftRevision"]!=0
+            || value["projection"]["semanticDigest"]!=value["semanticDigest"]
+            || value["projection"]["nodes"].as_array().is_none_or(|nodes|nodes.is_empty()) {
+            return Err("Obsolete or substituted registered projection discarded; the current document was preserved".into());
+        }
+        let name=format!("{} · inspection",selected["label"].as_str().unwrap_or("Registered default"));
+        let (document,_)=projection_document(&value["projection"],&name)?;
+        Ok(local_copy(&document))
     }
     pub fn begin_harness(&mut self, config: Config) {
         self.host.configure_storage(&config.cache);
@@ -537,6 +636,7 @@ impl Workspace {
         self.send(json!({"op":"Harness"}));
     }
     pub fn resume(&mut self, config: Config, app: &App) {
+        self.selected=document_selection(&app.doc,&self.selected);
         self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
@@ -652,6 +752,48 @@ impl Workspace {
         })();
         if let Err(error)=result{self.error=Some(error);}
     }
+    fn recover_accepted(&mut self, app: &mut App) {
+        if self.busy.is_some() { return; }
+        let Some(record) = self.submissions.accepted().cloned() else { return; };
+        self.submissions.requested = Some(record.command.operation_id.clone());
+        match self.submissions.recover_existing(app, &record) {
+            Ok(true) => {
+                self.accepted_bundle=None; self.recovery_pending=false; self.validated=false;
+                self.current=false; self.observed=None; self.error=None;
+                if let Some(draft)=draft(&app.doc) { self.send(json!({"op":"Project","draft":draft})); }
+            }
+            Ok(false) => if let Some(draft)=self.active_draft(app) {
+                self.send(json!({"op":"AcceptedProjection","draft":draft,"submission":record}));
+            },
+            Err(error) => { self.error=Some(error); self.recovery_pending=true; },
+        }
+    }
+    fn install_accepted(&mut self, app: &mut App, value: Value) {
+        let result=(|| -> Result<(),String> {
+            let record=self.submissions.accepted().cloned().ok_or("Original accepted submission is unavailable")?;
+            if value["operationId"]!=record.command.operation_id || value["requestDigest"]!=record.request_digest
+                || value["authority"]!="projection-only" || value["ownerWrites"]!=false || value["historyBoundary"]!=true || value["operationCount"]!=0 {
+                return Err("Accepted projection does not match the retained original operation".into());
+            }
+            let mut document=binding(value["draft"].clone(),&value["projection"])?;
+            document.name=app.doc.name.clone();
+            let previous=revision(&app.doc).ok_or("Original submitted draft unavailable")?;
+            let next=revision(&document).ok_or("Accepted draft unavailable")?;
+            if previous.0!=next.0 || next.1!=previous.1+1 { return Err("Obsolete accepted projection discarded".into()); }
+            self.accepted_bundle=Some(value.clone());
+            if !self.require_dependencies(app,&document,DependencyAction::Accepted) { return Ok(()); }
+            self.submissions.install(app,&record,document)?;
+            self.accepted_bundle=None;self.recovery_pending=false;self.validated=true;
+            self.resource=Some(value["resource"].clone());self.incoming=None;self.resolutions.clear();
+            self.compare=None;self.current=false;self.observed=None;self.pending=Some(Instant::now());self.error=None;
+            app.show_toast("Accepted owner state synchronized and saved. Earlier baseline history is retained for inspection.",false);
+            Ok(())
+        })();
+        if let Err(error)=result {
+            self.error=Some(error);self.recovery_pending=true;self.validated=false;
+            self.bridge=None;self.busy=None;
+        }
+    }
     fn load_layout(&mut self, config: &Config) {
         if self.layout_loaded { return; }
         match layout::Layout::load(&config.cache) {
@@ -669,7 +811,11 @@ impl Workspace {
         if self.busy.is_some() {
             return;
         }
-        if self.is_specimen() && !matches!(value["op"].as_str(), Some("FixturePreview" | "Resources")) {
+        if (self.submissions.error.is_some() || self.submissions.records.iter().any(desigma_library::SubmissionRecord::frozen))
+            && matches!(value["op"].as_str(),Some("Command"|"Reconcile")) {
+            self.error=Some("The immutable submitted draft stays frozen until its original owner outcome is resolved.".into());return;
+        }
+        if self.is_specimen() && !matches!(value["op"].as_str(), Some("FixturePreview" | "Fixtures" | "Resources")) {
             self.error = Some(SPECIMEN_CANVAS_REASON.into());
             return;
         }
@@ -826,7 +972,11 @@ impl Workspace {
                             self.preview = Some(value);
                             self.current = false;
                         }
-                        "Open" | "Command" | "Project" => match binding(value["draft"].clone(), &value["projection"]) {
+                        "Open" | "Command" | "Project" => {
+                          if op=="Command" && app.cityos_submission_frozen() {
+                              self.error=Some("A delayed edit cannot replace the frozen submitted draft.".into());continue;
+                          }
+                          match binding(value["draft"].clone(), &value["projection"]) {
                             Err(e) => self.error = Some(e),
                             Ok(mut document) => {
                                 self.property_text.clear();
@@ -858,13 +1008,14 @@ impl Workspace {
                                     if !self.require_dependencies(app, &document, DependencyAction::Resume) {
                                         self.resume_document=Some(document);self.validated=false;return;
                                     }
-                                    app.doc = document;
-                                    app.changed();
+                                    if !app.cityos_submission_frozen() { app.doc = document; app.changed(); }
                                 }
                                 self.validated = true;
+                                if !self.preview_only { let selected=document_selection(&app.doc,&self.selected); self.select(app,&selected); }
                                 self.observed = None;
                                 self.pending = Some(Instant::now());
                             }
+                          }
                         },
                         "Preview" => {
                             let current = self.active_draft(app);
@@ -882,6 +1033,10 @@ impl Workspace {
                         "FixturePreview" => {
                             self.settle_specimen_preview(value);
                         }
+                        "Fixtures" => match self.local_specimen_document(value) {
+                            Ok(document)=>self.open_local_document(app,document),
+                            Err(error)=>self.error=Some(error),
+                        },
                         "Export" => {
                             self.compare = Some(serde_json::to_string_pretty(&value).unwrap_or_default());
                             self.compare_open = !self.changes_mode;
@@ -901,18 +1056,22 @@ impl Workspace {
                                             let history=app.lib.as_ref().zip(app.lib_file.as_ref()).map(|(lib,file)|lib.load_checkpoint(&file.id));
                                             if let Some(Err(error))=history {self.validated=false;self.error=Some(format!("Retained history dependencies are unavailable. Restore a portable checkpoint before editing: {error}"));}
                                             else {
-                                                if let Some(document)=self.resume_document.take(){app.doc=document;app.changed();}
+                                                if let Some(document)=self.resume_document.take(){if !app.cityos_submission_frozen(){app.doc=document;app.changed();}}
                                                 self.validated=true; self.observed=None; self.pending=Some(Instant::now());
                                             }
                                         },
                                         Some(DependencyAction::Reconcile) => if let Some(bundle)=self.reconciliation_bundle.take() { self.install_reconciliation(app,bundle); },
+                                        Some(DependencyAction::Accepted) => if let Some(bundle)=self.accepted_bundle.take() { self.install_accepted(app,bundle); },
                                         None => {},
                                     }
                                 }
                             }
                             if let Some(lease)=value["leaseId"].as_str() { self.send(json!({"op":"ReleaseDependencies","leaseId":lease})); }
                         },
-                        "Reconcile" => self.install_reconciliation(app, value),
+                        "Reconcile" => if app.cityos_submission_frozen() {
+                            self.error=Some("A submitted draft cannot adopt incoming changes until its original outcome is resolved.".into());
+                        } else { self.install_reconciliation(app, value); },
+                        "AcceptedProjection" => self.install_accepted(app, value),
                         _ => {}
                     }
                 }
@@ -1040,7 +1199,11 @@ impl Workspace {
         ] {
             ui.style_mut().text_styles.insert(style, egui::FontId::proportional(size));
         }
+        self.submissions.refresh_if_changed(app);
         self.poll(app);
+        if !self.preview_only && self.validated && self.busy.is_none() && self.submissions.accepted().is_some() && self.submissions.requested.is_none() {
+            self.recover_accepted(app);
+        }
         let ctx = ui.ctx().clone();
         let old_layout = self.layout.clone();
         // Input and WebView IPC wake the window independently. A current draft
@@ -1171,9 +1334,9 @@ impl Workspace {
                     ui.selectable_value(&mut self.layout.view, layout::View::Split, "Split");
                     ui.selectable_value(&mut self.layout.view, layout::View::Preview, "Preview");
                 }
-                if ui.add_enabled(self.validated && !self.is_specimen() && self.busy.is_none(), egui::Button::new("Create local copy"))
-                    .on_disabled_hover_text(if self.is_specimen() { SPECIMEN_CANVAS_REASON } else { "Wait for the selected projection to load" })
-                    .on_hover_text("Open an ordinary editable Desigma copy of this projection. It has no CityOS submission binding.").clicked() {
+                if ui.add_enabled(self.validated && self.busy.is_none(), egui::Button::new("Create local copy"))
+                    .on_disabled_hover_text("Wait for the selected preview or projection to load")
+                    .on_hover_text("Create an ordinary editable copy of the native inspection layout. It has no CityOS proposal binding; actual target rendering qualifies separately.").clicked() {
                     self.create_local_copy(app);
                 }
                 if !self.preview_only { ui.toggle_value(&mut self.layout.inspector, "Properties"); }
@@ -1200,7 +1363,18 @@ impl Workspace {
             egui::CentralPanel::default().show(ui,|ui|{
                 ui.heading("Changes");ui.label("Review incoming source changes before updating this draft's pinned baseline.");
                 if let Some(error)=&self.error{ui.colored_label(ui.visuals().error_fg_color,error);}
-                if self.recovery_pending && ui.button("Recover document generation").clicked(){self.recover_reconciliation(app);}
+                if self.recovery_pending && self.accepted_bundle.is_none() && self.submissions.accepted().is_none()
+                    && ui.button("Recover document generation").clicked(){self.recover_reconciliation(app);}
+                if ui.button("Refresh local submission status").clicked(){self.submissions.reload(app);}
+                if let Some(error)=&self.submissions.error { ui.colored_label(ui.visuals().error_fg_color,error); }
+                for record in &self.submissions.records {
+                    ui.group(|ui|{
+                        ui.strong(submission_recovery::state_label(&record.state));
+                        ui.label(format!("{} · {}",record.command.owner,record.command.operation_id));
+                        ui.small(format!("Original request {}",record.request_digest));
+                    });
+                }
+                if self.submissions.accepted().is_some() && ui.add_enabled(self.busy.is_none(),egui::Button::new("Recover accepted state")).clicked(){self.recover_accepted(app);}
                 ui.horizontal_wrapped(|ui|{
                     if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Review incoming changes")).clicked(){if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Incoming","draft":draft}));}}
                     if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Compare local edits")).clicked(){if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Export","draft":draft}));}}
@@ -1265,7 +1439,9 @@ impl Workspace {
         if let Some(error) = self.error.clone() {
             egui::Panel::top("cityos-workspace-error").show(ui, |ui| {
                 ui.colored_label(ui.visuals().error_fg_color, &error);
-                if self.recovery_pending && ui.button("Recover document generation").clicked(){self.recover_reconciliation(app);}
+                if self.recovery_pending && self.submissions.accepted().is_some() {
+                    if ui.button("Recover accepted state").clicked(){self.recover_accepted(app);}
+                } else if self.recovery_pending && ui.button("Recover document generation").clicked(){self.recover_reconciliation(app);}
                 if !self.preview_only && !self.recovery_pending && self.busy.is_none() && ui.button("Retry draft validation").clicked() {
                     if let Some(config)=self.config.clone(){self.resume(config,app);}
                 }
@@ -1297,47 +1473,16 @@ impl Workspace {
                 ui.heading("Design files");
                 ui.small("Select to preview. Canonical files can open on canvas; registered defaults stay temporary.");
                 ui.text_edit_singleline(&mut self.resource_search);
-                let search = self.resource_search.to_lowercase();
-                let mut selected = None;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for resource in &self.resources {
-                        let path = resource["sourcePath"].as_str().unwrap_or("");
-                        let label = resource["label"].as_str().unwrap_or(path);
-                        if !format!("{path} {label} {} {} {}", resource["componentId"], resource["profileRef"], resource["targetProfileRef"]).to_lowercase().contains(&search) {
-                            continue;
-                        }
-                        ui.add_enabled_ui(self.busy.is_none()&&resource["openAvailable"]!=false, |ui| {
-                            let row_selected = self.resource.as_ref().is_some_and(|r| {
-                                if resource["kind"] == "registered-specimen" {
-                                    specimen_locator(resource).is_some() && specimen_locator(r) == specimen_locator(resource)
-                                } else { r["kind"] != "registered-specimen" && r["sourcePath"] == path }
-                            });
-                            let detail = if resource["kind"] == "registered-specimen" {
-                                format!("{} · {}", resource["componentId"].as_str().unwrap_or("Registered definition"), resource["profileRef"].as_str().unwrap_or(""))
-                            } else { path.to_owned() };
-                            if ui.selectable_label(row_selected, label).on_hover_text(detail).clicked() {
-                                selected = Some(resource.clone());
+                let selected = resource_picker(ui, &self.resources, self.resource.as_ref(), &self.resource_search, self.busy.is_some());
+                if !self.resource_diagnostics.is_empty() {
+                    ui.collapsing(format!("{} discovery findings", self.resource_diagnostics.len()), |ui| {
+                        egui::ScrollArea::vertical().max_height(120.).show(ui, |ui| {
+                            for finding in &self.resource_diagnostics {
+                                ui.small(if finding["code"]=="PACKAGED_CANONICAL_REVISION" {format!("Packaged canonical revision {} · newer main {} needs a matching renderer",finding["commit"],finding["latestCommit"])}else{format!("{}: {}",finding["sourcePath"],finding["error"])});
                             }
                         });
-                        if let (Some(level), Some(target)) = (resource["level"].as_str(), resource["target"].as_str()) {
-                            ui.small(format!("{level} · {target} · {}", resource["componentVersion"].as_str().unwrap_or("")));
-                        }
-                        if let Some(reason)=resource["previewNotice"].as_str(){ui.small(reason);}
-                        ui.small(if resource["kind"] == "registered-specimen" && resource["actualWebPreview"] != true {
-                            "Registered definition · preview unavailable · source retained"
-                        } else if resource["kind"] == "registered-specimen" {
-                            "Temporary registered defaults · actual web preview · canvas unavailable"
-                        } else if resource["actualWebPreview"] == true {
-                            "Actual web preview · canonical file"
-                        } else {
-                            "Authored structure · renderer unavailable"
-                        });
-                        ui.separator();
-                    }
-                    for finding in &self.resource_diagnostics {
-                        ui.small(if finding["code"]=="PACKAGED_CANONICAL_REVISION" {format!("Packaged canonical revision {} · newer main {} needs a matching renderer",finding["commit"],finding["latestCommit"])}else{format!("{}: {}",finding["sourcePath"],finding["error"])});
-                    }
-                });
+                    });
+                }
                 if let Some(resource) = selected {
                     self.open_after_preview = false;
                     self.open_resource(resource);
@@ -1395,7 +1540,8 @@ impl Workspace {
                     let pointer=field["sourcePointer"].as_str().unwrap_or("").strip_prefix("/composition").unwrap_or(field["sourcePointer"].as_str().unwrap_or(""));
                     let previous=d["semanticDraft"].pointer(pointer).cloned().unwrap_or(Value::Null);let mut value=previous.clone();
                     ui.label(format!("{}.{}",field["nodeId"].as_str().unwrap_or(""),field["property"].as_str().unwrap_or("")));
-                    ui.add_enabled_ui(self.validated&&self.busy.is_none()&&self.selected==field["nodeId"].as_str().unwrap_or(""),|ui|{
+                    if app.cityos_submission_frozen() { ui.small("Submitted draft frozen · inspect its original outcome in Changes."); }
+                    ui.add_enabled_ui(self.validated&&!app.cityos_submission_frozen()&&self.busy.is_none()&&self.selected==field["nodeId"].as_str().unwrap_or(""),|ui|{
                         if let Some(mut boolean)=value.as_bool(){if ui.checkbox(&mut boolean,"Allow multiple open sections").changed(){value=json!(boolean);}}
                         else if let Some(values)=field["values"].as_array(){ui.horizontal_wrapped(|ui|{for option in values {ui.selectable_value(&mut value,option.clone(),option.as_str().unwrap_or(""));}});}
                         else if let Some(text)=previous.as_str() {
@@ -1916,12 +2062,15 @@ mod tests {
         assert!(!workspace.matches_preview_event(&app, &receipt));
     }
     fn tab_document(id:&str)->Document{
+        tab_document_node(id,"material")
+    }
+    fn tab_document_node(id:&str,node:&str)->Document{
         let source_digest=desigma_library::payload_digest(b"fixture");
-        let semantic=json!({"id":id,"revision":"1","root":{"id":"material","props":{}}});
+        let semantic=json!({"id":id,"revision":"1","root":{"id":node,"props":{}}});
         let draft=json!({"schemaVersion":"cityos.design-exchange.v3","semanticContract":"fixture.component","profileRef":"fixture","draftId":id,"documentId":id,
             "draftRevision":0,"base":{"kind":"canonical-git","repositoryId":"fixture","commit":"a".repeat(40),"sourcePath":"fixture.json","sourceDigest":source_digest},
             "semanticBase":semantic,"semanticDraft":semantic,"semanticDigest":"c".repeat(64),"dependencyPins":[{"path":"fixture.json","digest":source_digest}],"commandReceipts":[]});
-        binding(draft,&json!({"schemaVersion":"cityos.desigma-canvas.v1","draftId":id,"draftRevision":0,"semanticDigest":"c".repeat(64),"nodes":[{"id":"native","sourceNodeId":"material","definitionId":"fixture","parent":null,"slot":null,"x":0,"y":0,"width":100,"height":100,"label":id,"fill":"#ffffff"}]})).unwrap()
+        binding(draft,&json!({"schemaVersion":"cityos.desigma-canvas.v1","draftId":id,"draftRevision":0,"semanticDigest":"c".repeat(64),"nodes":[{"id":"native","sourceNodeId":node,"definitionId":"fixture","parent":null,"slot":null,"x":0,"y":0,"width":100,"height":100,"label":id,"fill":"#ffffff"}]})).unwrap()
     }
     #[test]
     fn explicit_local_copy_has_no_submission_binding_and_leaves_the_source_untouched() {
@@ -1932,6 +2081,75 @@ mod tests {
         assert!(copy.nodes.values().all(|node| !node.locked && node.source_id.is_none()));
         assert_eq!(source.to_json().unwrap(), before);
         assert_eq!(copy.nodes.len(), source.nodes.len());
+    }
+    fn submitted_fixture() -> (std::path::PathBuf,App,desigma_library::SubmissionRecord) {
+        let root=std::env::temp_dir().join(format!("desigma-submission-ui-{}",uuid::Uuid::new_v4()));
+        let library=desigma_library::Library::open(&root).unwrap();
+        library.retain_cityos_payload(b"fixture").unwrap();
+        let mut app=App::new(tab_document("submitted"));app.lib=Some(library.clone());
+        let mut edited=app.doc.clone();edited.name="Submitted design".into();
+        app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(edited)}).unwrap();
+        Workspace::save_to_draft_library(&mut app).unwrap();
+        let binding=app.doc.cityos.as_ref().unwrap();let exchange=binding.exchange().unwrap();
+        let command=desigma_library::SubmissionCommand{intent_id:"fixture-intent".into(),operation_id:"fixture-operation".into(),predecessor:None,
+            owner:"fixture-owner".into(),resource:"submitted".into(),scope:BTreeMap::from([("tenantId".into(),"fixture-tenant".into()),("actorId".into(),"fixture-actor".into())]),
+            base:binding.base.clone(),expected_revision:exchange["base"]["sourceDigest"].as_str().unwrap().into(),semantic_base:binding.semantic_base.clone(),
+            submitted_snapshot:exchange["semanticDraft"].clone(),dependency_pins:binding.dependency_pins.clone()};
+        let record=library.prepare_submission_for_file(&app.lib_file.as_ref().unwrap().id,command).unwrap();
+        (root,app,record)
+    }
+    #[test]
+    fn prepared_submissions_restore_freezing_and_block_semantic_and_undo_input_paths() {
+        let(root,mut app,record)=submitted_fixture();let original=app.doc.to_json().unwrap();
+        let mut workspace=Workspace::default();workspace.submissions.refresh_if_changed(&mut app);
+        assert_eq!(workspace.submissions.records,vec![record]);assert!(app.cityos_submission_frozen());
+        assert!(app.hist.can_undo());app.undo();app.redo();assert_eq!(app.doc.to_json().unwrap(),original);
+        workspace.send(json!({"op":"Command"}));assert!(workspace.busy.is_none());
+        assert!(workspace.error.as_ref().unwrap().contains("frozen"));
+        app.lib=Some(desigma_library::Library::open(&root).unwrap());workspace.submissions=Default::default();
+        workspace.submissions.refresh_if_changed(&mut app);assert!(app.cityos_submission_frozen());
+        assert_eq!(app.doc.to_json().unwrap(),original);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn accepted_generation_resumes_by_original_identity_and_seals_the_old_undo_baseline() {
+        let(root,mut app,record)=submitted_fixture();let library=app.lib.as_ref().unwrap().clone();
+        let mut accepted=app.doc.clone();
+        let new_digest=library.retain_cityos_payload(b"accepted source").unwrap();
+        let binding=accepted.cityos.as_mut().unwrap();binding.base=CityosBase::CanonicalGit{repository_id:"fixture".into(),commit:"b".repeat(40)};
+        binding.semantic_base["revision"]=json!("accepted-concurrent-revision");binding.dependency_pins=vec![new_digest.clone()];
+        let semantic=binding.semantic_base.clone();let value=binding.exchange_mut().unwrap();
+        value["base"]["commit"]=json!("b".repeat(40));value["base"]["sourceDigest"]=json!(new_digest);
+        value["dependencyPins"]=json!([{"path":"fixture.json","digest":new_digest}]);
+        value["semanticBase"]=semantic.clone();value["semanticDraft"]=semantic.clone();
+        value["draftRevision"]=json!(value["draftRevision"].as_u64().unwrap()+1);
+        value["semanticDigest"]=json!(desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap()));
+        let accepted_record=library.record_submission_observation(desigma_library::SubmissionObservation{
+            operation_id:record.command.operation_id.clone(),request_digest:record.request_digest.clone(),owner:record.command.owner.clone(),resource:record.command.resource.clone(),scope:record.command.scope.clone(),
+            state:desigma_library::SubmissionState::AcceptedSyncPending,receipt_ref:"fixture-authenticated-owner-observation".into(),owner_revision:Some("b".repeat(40)),conclusively_ineligible:false,
+            details:json!({"acceptedSemanticDigest":desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap())})}).unwrap();
+        let file=app.lib_file.as_ref().unwrap().id.clone();let mut checkpoint=library.load_checkpoint(&file).unwrap();checkpoint.install_baseline(accepted.clone());
+        library.prepare_submission_sync(&file,&accepted_record,&checkpoint).unwrap();
+        // Restart before any accepted projection is installed; recover the durable
+        // generation without requesting a new proposal or owner operation.
+        app.lib=Some(desigma_library::Library::open(&root).unwrap());
+        let mut recovery=submission_recovery::Recovery::default();recovery.reload(&mut app);
+        assert!(app.cityos_submission_frozen());assert!(recovery.recover_existing(&mut app,&accepted_record).unwrap());
+        assert_eq!(app.doc.to_json().unwrap(),accepted.to_json().unwrap());assert!(!app.hist.can_undo());assert!(!app.cityos_submission_frozen());
+        assert_eq!(draft(&app.doc).unwrap()["semanticBase"],draft(&app.doc).unwrap()["semanticDraft"]);
+        let stored=app.lib.as_ref().unwrap().load_checkpoint(&file).unwrap();assert!(stored.retained[0].history.can_undo());
+        assert_eq!(recovery.records[0].state,desigma_library::SubmissionState::Synchronized);
+        let before=app.doc.to_json().unwrap();app.undo();assert_eq!(app.doc.to_json().unwrap(),before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn unreadable_retained_submission_never_unlocks_the_current_draft() {
+        let(root,mut app,record)=submitted_fixture();let library=app.lib.as_ref().unwrap();
+        std::fs::write(library.path("cityos/submissions").join(format!("{}.json",record.command.operation_id)),b"incomplete receipt").unwrap();
+        let mut workspace=Workspace::default();workspace.submissions.refresh_if_changed(&mut app);
+        assert!(app.cityos_submission_frozen());assert!(workspace.submissions.error.is_some());
+        let before=app.doc.to_json().unwrap();app.undo();workspace.send(json!({"op":"Command"}));
+        assert_eq!(app.doc.to_json().unwrap(),before);assert!(workspace.busy.is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn reviewed_baseline_is_durable_before_display_and_previous_undo_is_retained_inactively() {
@@ -1992,13 +2210,56 @@ mod tests {
         let mut app=App::new(tab_document("first"));app.lib=Some(desigma_library::Library::open(&root).unwrap());app.home=None;
         app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
         let mut next=app.doc.clone();next.name="First edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
-        let mut workspace=Workspace::default();workspace.suspend_current(&mut app).unwrap();let first_file=app.lib_file.clone().unwrap().id;
-        app.replace_document(tab_document("second"),None);app.home=None;
+        let mut workspace=Workspace::default();workspace.selected="material".into();workspace.suspend_current(&mut app).unwrap();let first_file=app.lib_file.clone().unwrap().id;
+        app.replace_document(tab_document_node("second","accordion"),None);app.home=None;workspace.selected="accordion".into();
         workspace.activate_tab(&mut app,"first");assert_eq!(draft(&app.doc).unwrap()["draftId"],"first");assert_eq!(app.lib_file.as_ref().unwrap().id,first_file);assert!(app.hist.can_undo());
+        assert_eq!(workspace.selected,"material");assert_eq!(workspace.tabs["second"].selected,"accordion");
         assert_ne!(workspace.tabs["second"].file.as_ref().unwrap().id,first_file);app.hist.undo(&mut app.doc).unwrap();
         assert_eq!(app.lib.as_ref().unwrap().load_file(&first_file).unwrap().name,"First edited");
+        workspace.activate_tab(&mut app,"second");assert_eq!(workspace.selected,"accordion");
         crate::home::thumb::finish_library_jobs(&root);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn opening_a_different_projection_selects_its_own_root_without_authored_changes(){
+        let root=std::env::temp_dir().join(format!("desigma-selection-{}",uuid::Uuid::new_v4()));
+        let mut app=App::new(Document::new("Empty"));app.lib=Some(desigma_library::Library::open(&root).unwrap());app.home=None;
+        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
+        let document=tab_document_node("accordion-draft","accordion");let before=document.to_json().unwrap();
+        let mut workspace=Workspace::default();workspace.selected="material".into();workspace.preview_only=true;workspace.staged=Some(document);
+        workspace.install_staged(&mut app);
+        assert!(workspace.error.is_none(),"{:?}",workspace.error);assert_eq!(workspace.selected,"accordion");
+        assert_eq!(app.doc.to_json().unwrap(),before);assert!(!app.hist.can_undo());
+        assert_eq!(document_selection(&app.doc,"stale-node"),"accordion");
+        crate::home::thumb::finish_library_jobs(&root);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn design_file_picker_only_builds_visible_rows_for_a_large_estate(){
+        let resources:Vec<_>=(0..10_000).map(|index|json!({"label":format!("Design {index}"),"sourcePath":format!("designs/{index}.json"),"actualWebPreview":true})).collect();
+        let ctx=egui::Context::default();
+        let output=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(320.,400.))),..Default::default()},|ui|{
+            assert!(resource_picker(ui,&resources,None,"",false).is_none());
+        });
+        assert!(output.shapes.len()<150,"Offscreen design rows produced {} shapes",output.shapes.len());
+    }
+    #[test]
+    fn preview_panel_geometry_stays_stable_across_render_status_changes(){
+        for width in [1523.,1707.] {
+            let ctx=egui::Context::default();let frame=eframe::Frame::_new_kittest();
+            let mut app=App::new(tab_document_node("accordion-draft","accordion"));app.home=None;
+            app.autosave.saved_hash=crate::home::doc_hash(&app.doc);
+            let mut workspace=Workspace::default();workspace.open=true;workspace.validated=true;workspace.themes_loaded=true;
+            workspace.observed=revision(&app.doc);workspace.resource=Some(json!({"label":"Accordion","actualWebPreview":true,"fixture":"cityos-accordion","editable":false}));
+            workspace.preview=Some(json!({"draftRevision":0,"observedViewport":{"width":540,"height":608},"scenario":{"fixture":"cityos-accordion"}}));
+            let mut sizes=Vec::new();
+            for iteration in 0..20 {
+                workspace.current=iteration%4==0;workspace.busy=if iteration%4==1 {Some("Preview".into())}else{None};
+                workspace.render_started=if iteration%4==2 {Some(Instant::now())}else{None};workspace.pending=None;
+                let _=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(width,1019.))),..Default::default()},|ui|workspace.show(&mut app,ui,&frame));
+                if iteration>=4 {sizes.push(workspace.panel_size);}
+            }
+            assert!(sizes.windows(2).all(|pair|pair[0]==pair[1]),"Preview geometry alternates at width {width}: {sizes:?}");
+        }
     }
     #[test]
     fn failed_tab_save_preserves_the_current_document_and_history(){

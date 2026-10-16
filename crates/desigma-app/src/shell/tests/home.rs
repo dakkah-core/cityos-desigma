@@ -99,10 +99,106 @@ fn catalog_launcher_and_back_preserve_the_home_library() {
     let (mut s,_dir)=home_sim();
     let library=lib(&s);let files=library.all_files().len();
     s.shell.cityos=crate::cityos_catalog::tests::populated_browser();s.shell.cityos.open=false;
-    s.frame(vec![]);click_rect(&mut s,"open-cityos-catalog");
+    s.shell.app.home.as_mut().unwrap().search = "Welcome".into();
+    s.frame(vec![]);
+    assert!(s.rect_of("home-cityos").right() <= theme::HOME_SIDEBAR_W);
+    click_rect(&mut s,"home-cityos");
     assert!(s.shell.cityos.open);assert!(s.app().home.is_some());
     click_rect(&mut s,"catalog-back");
     assert!(!s.shell.cityos.open);assert!(s.app().home.is_some());assert_eq!(library.all_files().len(),files);
+    assert_eq!(s.app().home.as_ref().unwrap().search, "Welcome");
+}
+
+#[test]
+fn cityos_rail_and_back_preserve_unsaved_document_history_selection_and_view() {
+    let (mut s, _dir) = home_sim();
+    open(&mut s, "Welcome");
+    let card = s.by_name("Card");
+    s.shell.app.select_only(card);
+    s.shell.app.edit_nodes(&[card], |node| node.name = "Unsaved card".into());
+    s.shell.app.ui.left_collapsed = true;
+    let document = s.app().doc.to_json().unwrap();
+    let selection = s.app().selection.clone();
+    let view = s.app().view;
+    let saved_hash = s.app().autosave.saved_hash;
+    let saves = s.app().autosave.saves;
+    let history = (s.app().hist.can_undo(), s.app().hist.can_redo());
+    let files = lib(&s).all_files().len();
+    s.shell.cityos = crate::cityos_catalog::tests::populated_browser();
+    s.shell.cityos.open = false;
+    s.frame(vec![]);
+    click_rect(&mut s, "rail-CityOS");
+    assert!(s.shell.cityos.open);
+    assert!(!s.app().ui.cityos_requested, "the request is consumed once");
+    s.cmd_key(Key::S);
+    click_rect(&mut s, "catalog-back");
+    assert!(!s.shell.cityos.open);
+    assert!(s.app().home.is_none());
+    assert_eq!(s.app().doc.to_json().unwrap(), document);
+    assert_eq!(s.app().selection, selection);
+    assert_eq!(s.app().view.offset, view.offset);
+    assert_eq!(s.app().view.zoom, view.zoom);
+    assert_eq!((s.app().hist.can_undo(), s.app().hist.can_redo()), history);
+    assert_eq!(s.app().autosave.saved_hash, saved_hash);
+    assert_eq!(s.app().autosave.saves, saves);
+    assert!(s.app().ui.left_collapsed);
+    assert_eq!(lib(&s).all_files().len(), files);
+    s.rect_of("rail-CityOS");
+}
+
+#[test]
+fn cityos_rail_returns_to_the_active_theme_variables_collection() {
+    let mut s = Sim::with(Options { fixture: Some("variables".into()), ..Default::default() });
+    s.shell.app.open_variables();
+    s.shell.app.vars.full = true;
+    let collection = s.app().vars.collection.clone();
+    let document = s.app().doc.to_json().unwrap();
+    s.shell.cityos = crate::cityos_catalog::tests::populated_browser();
+    s.shell.cityos.open = false;
+    s.frame(vec![]);
+    click_rect(&mut s, "rail-CityOS");
+    assert!(s.shell.cityos.open);
+    click_rect(&mut s, "catalog-back");
+    assert!(!s.shell.cityos.open);
+    assert!(s.app().vars.open && s.app().vars.full);
+    assert_eq!(s.app().vars.collection, collection);
+    assert_eq!(s.app().doc.to_json().unwrap(), document);
+}
+
+#[test]
+fn closing_cityos_saves_only_the_existing_document_and_cancels_close_on_failure() {
+    fn close(s: &mut Sim) -> egui::FullOutput {
+        let mut raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1088.0))),
+            time: Some(s.t + 0.05),
+            ..Default::default()
+        };
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        let ctx = s.ctx.clone();
+        ctx.run_ui(raw, |ui| s.shell.draw(ui))
+    }
+    let (mut s, _dir) = home_sim();
+    open(&mut s, "Welcome");
+    let library = lib(&s);
+    let file = s.app().lib_file.as_ref().unwrap().clone();
+    let saved = library.load_file(&file.id).unwrap().to_json().unwrap();
+    let files = library.all_files().len();
+    s.shell.app.doc.name = "Unsaved beneath CityOS".into();
+    s.shell.cityos = crate::cityos_catalog::tests::populated_browser();
+    let blocked = library.path("projects").join(&file.project_id).join(".save.pending.json");
+    std::fs::create_dir(&blocked).unwrap();
+    let output = close(&mut s);
+    assert!(output.viewport_output.values().flat_map(|v| &v.commands).any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+    assert!(s.app().autosave.pending());
+    assert!(s.shell.cityos.open);
+    std::fs::remove_dir(blocked).unwrap();
+    // The injected invalid journal deliberately makes the project unavailable
+    // to readers as well as writers. Re-enable reads before checking its bytes.
+    assert_eq!(library.load_file(&file.id).unwrap().to_json().unwrap(), saved);
+    let output = close(&mut s);
+    assert!(!output.viewport_output.values().flat_map(|v| &v.commands).any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+    assert_eq!(library.load_file(&file.id).unwrap().name, "Unsaved beneath CityOS");
+    assert_eq!(library.all_files().len(), files, "a specimen never becomes another document");
 }
 
 fn lib(s: &Sim) -> Library {

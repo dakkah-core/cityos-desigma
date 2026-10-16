@@ -58,6 +58,7 @@ pub enum RailItem {
     Tools,
     Variables,
     Plugins,
+    Cityos,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +80,10 @@ pub enum MenuKind {
 
 #[derive(Default)]
 pub struct UiState {
+    /// Navigation request consumed by the window shell; never a document command.
+    pub cityos_requested: bool,
+    /// Original durable submission freezes this draft across every editor input path.
+    pub cityos_frozen_draft: Option<String>,
     pub menu: Option<MenuKind>,
     pub menu_anchor: Option<egui::Rect>,
     pub left_collapsed: bool,
@@ -241,6 +246,10 @@ impl App {
             self.autosave.changed_at = Some(self.now);
             self.autosave.confirmed = false;
         }
+    }
+
+    pub fn cityos_submission_frozen(&self) -> bool {
+        self.doc.cityos.as_ref().is_some_and(|binding| self.ui.cityos_frozen_draft.as_deref() == Some(binding.draft_id.as_str()))
     }
 
     pub fn is_selected(&self, id: NodeId) -> bool {

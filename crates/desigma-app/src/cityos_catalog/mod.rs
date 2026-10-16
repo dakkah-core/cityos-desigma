@@ -12,6 +12,7 @@ mod canvas;
 mod local_library;
 mod preview;
 mod support;
+mod tools;
 #[cfg(test)]
 pub(crate) mod tests;
 mod ui;
@@ -155,6 +156,7 @@ pub struct Browser {
     location_filters: Filters,
     navigation_back: Vec<Location>,
     navigation_forward: Vec<Location>,
+    atlas_tools: tools::AtlasTools,
 }
 
 pub struct WorkspaceRequest {
@@ -314,6 +316,7 @@ impl Browser {
             location_filters: Filters { collection: "design".into(), ..Default::default() },
             navigation_back: vec![],
             navigation_forward: vec![],
+            atlas_tools: tools::AtlasTools::default(),
         };
         if open {
             browser.refresh();

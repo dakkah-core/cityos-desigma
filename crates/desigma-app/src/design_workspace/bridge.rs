@@ -187,7 +187,7 @@ impl Bridge {
 fn compatible(hello: &Value) -> Result<(), String> {
     let supports=|key:&str,value:&str| hello[key].as_array().is_some_and(|rows|rows.iter().any(|row|row==value));
     if !supports("exchangeVersions","cityos.design-exchange.v3") || !supports("documentContainers","desigma.document.v4")
-        || ["Resources","Open","Project","Command","Export","Preview","Dependencies","ReleaseDependencies","Incoming","Reconcile"].iter().any(|op|!supports("operations",op)) {
+        || ["Resources","Open","Project","Command","Export","Preview","Dependencies","ReleaseDependencies","Incoming","Reconcile","AcceptedProjection"].iter().any(|op|!supports("operations",op)) {
         return Err("Packaged exchange helper is incompatible. Install the matching reader, bridge and desktop build.".into());
     }
     Ok(())
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn handshake_rejects_a_helper_that_would_drop_expanded_bindings_or_dependency_recovery() {
         let mut hello=json!({"exchangeVersions":["cityos.design-exchange.v3"],"documentContainers":["desigma.document.v4"],
-            "operations":["Resources","Open","Project","Command","Export","Preview","Dependencies","ReleaseDependencies","Incoming","Reconcile"]});
+            "operations":["Resources","Open","Project","Command","Export","Preview","Dependencies","ReleaseDependencies","Incoming","Reconcile","AcceptedProjection"]});
         assert!(compatible(&hello).is_ok());hello["documentContainers"]=json!(["desigma.document.v3"]);assert!(compatible(&hello).is_err());
         hello["documentContainers"]=json!(["desigma.document.v4"]);hello["operations"]=json!(["Open","Preview"]);assert!(compatible(&hello).is_err());
     }

@@ -148,6 +148,7 @@ impl Browser {
         let narrow = ui.available_width() < theme::CATALOG_NARROW;
         let stacked = ui.available_width() < theme::CATALOG_STACK;
         Frame::new().inner_margin(egui::Margin::symmetric(theme::CATALOG_PAD, 14)).show(ui, |ui| self.header(ui));
+        self.atlas_tools.feedback(ui);
         ui.separator();
         Frame::new().inner_margin(egui::Margin::symmetric(theme::CATALOG_PAD, 8)).show(ui, |ui| self.search_bar(ui, ctx));
         if narrow {
@@ -199,7 +200,7 @@ impl Browser {
     }
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
-            let back = ui.button("← Files");
+            let back = ui.button("← Desigma");
             crate::widgets::record(ui, "catalog-back", back.rect);
             if back.clicked() {
                 self.open = false;
@@ -213,6 +214,7 @@ impl Browser {
             if self.has_bound_draft && ui.button("Resume canvas draft").clicked() {
                 self.workspace_request = Some(super::WorkspaceRequest { source_path: None, preview_only: false, resume: true });
             }
+            self.atlas_tools.menu(ui);
             ui.with_layout(Layout::right_to_left(Align::Center).with_main_wrap(true), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;

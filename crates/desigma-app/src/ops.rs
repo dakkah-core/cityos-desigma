@@ -213,6 +213,7 @@ impl App {
     }
 
     pub fn undo(&mut self) {
+        if self.cityos_submission_frozen() { self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true); return; }
         if self.try_undo_restore() {
             return;
         }
@@ -227,6 +228,7 @@ impl App {
     }
 
     pub fn redo(&mut self) {
+        if self.cityos_submission_frozen() { self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true); return; }
         if self.try_redo_restore() {
             return;
         }

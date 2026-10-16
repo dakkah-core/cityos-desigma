@@ -349,6 +349,64 @@ mod tests {
     }
 
     #[test]
+    fn missing_active_undo_redo_and_inactive_dependencies_preserve_exact_recovery_and_export_closure() {
+        let (_dir, library, id) = Temp::new();
+        let payloads: Vec<_> = [b"inactive".as_slice(), b"undo-only".as_slice(), b"active".as_slice(), b"redo-only".as_slice()]
+            .into_iter().map(|bytes| (library.retain_cityos_payload(bytes).unwrap(), bytes)).collect();
+        // Whole-document history commands require an expanded exchange; a
+        // legacy binding cannot supply the monotonic draftRevision fence.
+        let expanded = |hash: String| {
+            let mut document = bound(hash.clone());
+            let binding = document.cityos.as_mut().unwrap();
+            binding.schema_version = "cityos.design-exchange.v3".into();
+            binding.exchange_v3 = Some(serde_json::json!({
+                "schemaVersion":"cityos.design-exchange.v3", "documentId":"document", "draftId":"draft", "draftRevision":0,
+                "semanticContract":"fixture", "commandReceipts":[],
+                "base":{"kind":"canonical-git", "repositoryId":"repo", "commit":"a".repeat(40)},
+                "semanticBase":binding.semantic_base, "semanticDraft":{"id":"frame"}, "dependencyPins":[{"digest":hash}],
+            }));
+            document
+        };
+        let mut checkpoint = DocumentCheckpoint::new(expanded(payloads[0].0.clone()), History::default());
+        checkpoint.install_baseline(expanded(payloads[1].0.clone()));
+        for index in [2, 3] {
+            checkpoint.history.exec(&mut checkpoint.document, desigma_doc::Command::CityosInstall {
+                document: Box::new(expanded(payloads[index].0.clone())),
+            }).unwrap();
+        }
+        checkpoint.history.undo(&mut checkpoint.document).unwrap();
+        assert!(checkpoint.history.can_undo());
+        assert!(checkpoint.history.can_redo());
+        library.save_checkpoint(&id, &checkpoint).unwrap();
+        let expected = checkpoint.to_json().unwrap();
+        let original_bytes = std::fs::read(library.checkpoint_path(&id).unwrap()).unwrap();
+        for (pin, bytes) in &payloads {
+            let path = library.path("cityos/payloads").join(pin);
+            std::fs::remove_file(&path).unwrap();
+            let restarted = Library::open(library.root()).unwrap();
+            let (recovered, missing) = restarted.load_checkpoint_for_recovery(&id).unwrap();
+            assert_eq!(recovered.to_json().unwrap(), expected);
+            assert_eq!(missing, [pin.clone()]);
+            assert!(restarted.load_checkpoint(&id).is_err());
+            assert!(restarted.export_checkpoint(&id).is_err());
+            assert!(restarted.cityos_retention_roots().unwrap().contains(pin));
+            assert_eq!(std::fs::read(restarted.checkpoint_path(&id).unwrap()).unwrap(), original_bytes);
+            std::fs::write(&path, b"corrupt dependency").unwrap();
+            assert!(restarted.load_checkpoint_for_recovery(&id).is_err(), "corruption must not become a missing-only recovery");
+            assert!(restarted.put_cityos_payload(pin, b"wrong bytes").is_err());
+            restarted.put_cityos_payload(pin, bytes).unwrap();
+            assert_eq!(restarted.load_checkpoint(&id).unwrap().to_json().unwrap(), expected);
+        }
+        let portable = library.export_checkpoint(&id).unwrap();
+        let (target_dir, target, target_id) = Temp::new();
+        target.import_checkpoint(&target_id, &portable).unwrap();
+        let imported = Library::open(&target_dir.0).unwrap();
+        assert_eq!(imported.load_checkpoint(&target_id).unwrap().to_json().unwrap(), expected);
+        assert_eq!(imported.cityos_retention_roots().unwrap(), checkpoint.dependency_pins());
+        for (pin, bytes) in &payloads { assert_eq!(imported.load_cityos_payload(pin).unwrap(), *bytes); }
+    }
+
+    #[test]
     fn complete_checkpoint_rejects_unmaterialized_dependencies_but_legacy_save_preserves_them() {
         let (_dir, library, id) = Temp::new();
         let document = bound("b".repeat(64));

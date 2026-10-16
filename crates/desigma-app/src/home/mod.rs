@@ -212,6 +212,7 @@ impl Home {
 /// Something the user asked for on the home screen.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
+    Cityos,
     Go(Section),
     Open(String),
     OpenWindow(String),
@@ -364,6 +365,10 @@ pub fn apply(app: &mut App, act: Act) {
     }
     let mut changed = true;
     match act {
+        Act::Cityos => {
+            app.ui.cityos_requested = true;
+            changed = false;
+        }
         Act::Go(section) => {
             if let Some(h) = app.home.as_mut() {
                 h.section = section;

@@ -151,8 +151,9 @@ impl Library {
         if intent.accepted.command.operation_id != operation_id {
             return Err(invalid("Submission sync operation mismatch"));
         }
-        intent.checkpoints()?;
+        let (previous, _) = intent.checkpoints()?;
         self.check_sync_acceptance(&intent.accepted)?;
+        self.check_submission_file(operation_id, &intent.file_id, &previous)?;
         Ok(intent)
     }
 
@@ -195,6 +196,7 @@ impl Library {
             return Err(invalid("Synchronized record is missing its original sync intent"));
         }
         let previous = self.load_checkpoint_locked(file_id)?;
+        self.check_submission_file(&accepted.command.operation_id, file_id, &previous)?;
         validate_candidate(accepted, &previous, candidate)?;
         for pin in candidate.dependency_pins().iter().chain(accepted.command.dependency_pins.iter()) {
             self.verify_cityos_payload(pin)?;
@@ -227,6 +229,12 @@ impl Library {
         let intent = self.load_submission_sync(operation_id)?;
         let (_, candidate) = intent.checkpoints()?;
         let mut stored = self.check_sync_acceptance(&intent.accepted)?;
+        // A submission-only pin is not necessarily in the accepted checkpoint.
+        // Verify it BEFORE any installation or pending-save replay can mutate the
+        // document, while keeping original inquiry/retention available on failure.
+        for pin in candidate.dependency_pins().iter().chain(intent.accepted.command.dependency_pins.iter()) {
+            self.verify_cityos_payload(pin)?;
+        }
         let current = self.load_checkpoint_locked(&intent.file_id)?.to_json()?;
         let mut recovered_after_error = current == intent.accepted_checkpoint && stored.state != SubmissionState::Synchronized;
         if current != intent.accepted_checkpoint {
@@ -234,6 +242,7 @@ impl Library {
                 return Err(LibraryError::CheckpointConflict(intent.file_id.clone()));
             }
             sync_phase("before-install", self, &intent.file_id)?;
+            for pin in &intent.accepted.command.dependency_pins { self.verify_cityos_payload(pin)?; }
             let saved = self.save_checkpoint_reconciled_locked(&intent.file_id, &candidate)?;
             recovered_after_error = saved.recovered_after_error;
         }
@@ -252,9 +261,12 @@ impl Library {
         sync_phase("readback", self, &intent.file_id)?;
         if stored.state != SubmissionState::Synchronized {
             sync_phase("before-synchronized", self, &intent.file_id)?;
+            for pin in checkpoint.dependency_pins().iter().chain(intent.accepted.command.dependency_pins.iter()) {
+                self.verify_cityos_payload(pin)?;
+            }
             stored.state = SubmissionState::Synchronized;
             // Preserve the ORIGINAL accepted observation, command and digest.
-            write_atomic(&self.submission_path(operation_id)?, &serde_json::to_vec(&stored)?)?;
+            self.write_submission_record(&stored)?;
         }
         sync_phase("synchronized", self, &intent.file_id)?;
         let actual = self.check_sync_acceptance(&intent.accepted)?;
@@ -413,7 +425,7 @@ mod tests {
             submitted_snapshot: semantic("resting"),
             dependency_pins: vec![submission_pin.clone()],
         };
-        let prepared = library.prepare_submission(command).unwrap();
+        let prepared = library.prepare_submission_for_file(&file, command).unwrap();
         let accepted = library
             .record_submission_observation(SubmissionObservation {
                 operation_id: prepared.command.operation_id.clone(),
@@ -462,7 +474,7 @@ mod tests {
         // identity, before any local synchronization is prepared.
         let digest = payload_digest(&serde_json::to_vec(&accepted_semantics).unwrap());
         f.accepted.outcome.as_mut().unwrap()["details"]["acceptedSemanticDigest"] = json!(digest);
-        write_atomic(&f.library.submission_path("operation").unwrap(), &serde_json::to_vec(&f.accepted).unwrap()).unwrap();
+        f.library.write_submission_record(&f.accepted).unwrap();
         let saved = f.library.synchronize_accepted_submission(&f.file, &f.accepted, &f.candidate).unwrap();
         let installed = saved.checkpoint.document.cityos.unwrap();
         assert_eq!(installed.semantic_base, accepted_semantics);
@@ -479,6 +491,10 @@ mod tests {
         assert_eq!(receipt.submission.command, f.accepted.command);
         assert_eq!(receipt.submission.request_digest, f.accepted.request_digest);
         assert_eq!(receipt.submission.outcome, f.accepted.outcome);
+        assert_eq!(f.library.document_submissions(&f.file).unwrap(), [receipt.submission.clone()]);
+        let wire: serde_json::Value = serde_json::from_slice(&std::fs::read(f.library.submission_path("operation").unwrap()).unwrap()).unwrap();
+        assert_eq!(wire["local_file"]["document_id"], "document");
+        assert_eq!(wire["local_file"]["draft_id"], "draft");
         assert_eq!(receipt.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
         assert_eq!(receipt.checkpoint.document.images["accepted image"], [9, 8, 7]);
         assert!(!receipt.checkpoint.history.can_undo());
@@ -523,6 +539,173 @@ mod tests {
             let result = reopened.resume_submission_sync("operation").unwrap();
             assert_eq!(result.sync_id, intent.sync_id);
             assert_eq!(result.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
+        }
+    }
+
+    #[test]
+    fn accepted_install_save_fault_matrix_recovers_without_resealing_or_redispatch() {
+        for phase in ["before-journal", "journal", "payloads", "document", "checkpoint", "manifest", "complete"] {
+            for repeats in [0, 1] {
+                let f = fixture();
+                let intent = f.library.prepare_submission_sync(&f.file, &f.accepted, &f.candidate).unwrap();
+                crate::store::inject_save_fault(phase, repeats);
+                let result = f.library.resume_submission_sync("operation");
+                // A one-shot after-journal error is reconciled inside the same
+                // call; repeating replay faults must leave acceptance frozen.
+                if phase == "before-journal" || (repeats == 1 && matches!(phase, "payloads" | "document" | "checkpoint" | "manifest")) {
+                    assert!(result.is_err(), "{phase}/{repeats}");
+                    assert_eq!(f.library.load_submission("operation").unwrap(), f.accepted);
+                } else {
+                    assert_eq!(result.unwrap().submission.state, SubmissionState::Synchronized, "{phase}/{repeats}");
+                }
+                // before-journal and complete cannot repeat within that save.
+                // Disarm any unused test fault before independently reopening.
+                crate::store::inject_save_fault("unused", 0);
+                let restarted = Library::open(&f.root).unwrap();
+                assert_eq!(restarted.load_submission_sync("operation").unwrap(), intent);
+                let saved = restarted.resume_submission_sync("operation").unwrap();
+                assert_eq!(saved.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
+                assert_eq!(saved.submission.command, f.accepted.command);
+                assert_eq!(saved.submission.outcome, f.accepted.outcome);
+                assert_eq!(restarted.document_submissions(&f.file).unwrap(), [saved.submission.clone()]);
+                assert_eq!(saved.checkpoint.retained.len(), f.original.retained.len() + 1);
+                assert!(restarted.save_checkpoint(&f.file, &f.original).is_err());
+                let again = Library::open(&f.root).unwrap().resume_submission_sync("operation").unwrap();
+                assert_eq!(again.sync_id, intent.sync_id);
+                assert_eq!(again.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn missing_or_corrupt_sync_dependencies_preserve_inquiry_intent_and_target_until_repair() {
+        for root in ["original-history", "accepted", "submission-only"] {
+            for damage in ["missing", "corrupt"] {
+                let f = fixture();
+                let intent = f.library.prepare_submission_sync(&f.file, &f.accepted, &f.candidate).unwrap();
+                let (pin, bytes): (String, &[u8]) = match root {
+                    "original-history" => (f.original.dependency_pins()[0].clone(), b"original history dependency"),
+                    "accepted" => (f.accepted_pin.clone(), b"accepted-only dependency"),
+                    _ => (f.submission_pin.clone(), b"original submission-only dependency"),
+                };
+                let checkpoint_path = f.library.checkpoint_path(&f.file).unwrap();
+                let checkpoint_before = std::fs::read(&checkpoint_path).unwrap();
+                let path = f.library.path("cityos/payloads").join(&pin);
+                if damage == "missing" { std::fs::remove_file(&path).unwrap(); }
+                else { std::fs::write(&path, b"damaged").unwrap(); }
+                let restarted = Library::open(&f.root).unwrap();
+                assert!(restarted.resume_submission_sync("operation").is_err(), "{root}/{damage}");
+                assert_eq!(std::fs::read(&checkpoint_path).unwrap(), checkpoint_before, "{root}/{damage}");
+                assert_eq!(restarted.load_submission_sync("operation").unwrap(), intent);
+                assert_eq!(restarted.document_submissions(&f.file).unwrap(), [f.accepted.clone()]);
+                assert!(restarted.cityos_retention_roots().unwrap().contains(&pin));
+                assert!(restarted.put_cityos_payload(&pin, b"wrong repair").is_err());
+                restarted.put_cityos_payload(&pin, bytes).unwrap();
+                let saved = restarted.resume_submission_sync("operation").unwrap();
+                assert_eq!(saved.sync_id, intent.sync_id);
+                assert_eq!(saved.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
+                assert_eq!(saved.submission.outcome, f.accepted.outcome);
+            }
+        }
+    }
+
+    #[test]
+    fn dependency_loss_during_install_or_finalization_cannot_mark_synchronized() {
+        for phase in ["before-install", "installed", "readback", "before-synchronized"] {
+            let f = fixture();
+            let intent = f.library.prepare_submission_sync(&f.file, &f.accepted, &f.candidate).unwrap();
+            let pin = f.submission_pin.clone();
+            SYNC_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(move |library, _| {
+                std::fs::remove_file(library.path("cityos/payloads").join(&pin)).unwrap();
+            }))));
+            assert!(f.library.resume_submission_sync("operation").is_err(), "{phase}");
+            assert_eq!(f.library.document_submissions(&f.file).unwrap(), [f.accepted.clone()]);
+            assert_eq!(f.library.load_submission_sync("operation").unwrap(), intent);
+            if phase == "before-install" {
+                assert_eq!(f.library.load_checkpoint(&f.file).unwrap().to_json().unwrap(), f.original.to_json().unwrap());
+            }
+            let restarted = Library::open(&f.root).unwrap();
+            restarted.put_cityos_payload(&f.submission_pin, b"original submission-only dependency").unwrap();
+            assert_eq!(restarted.resume_submission_sync("operation").unwrap().checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
+        }
+    }
+
+    #[test]
+    fn bound_submission_cannot_install_into_another_file() {
+        let f = fixture();
+        let project = f.library.create_project("Other").unwrap();
+        let other = f.library.create_file_checkpoint(&project.id, None, "Same draft copy", &f.original).unwrap();
+        assert!(f.library.prepare_submission_sync(&other.id, &f.accepted, &f.candidate).is_err());
+        assert!(!f.library.submission_sync_path("operation").unwrap().exists());
+        assert_eq!(f.library.load_checkpoint(&other.id).unwrap().to_json().unwrap(), f.original.to_json().unwrap());
+        assert!(f.library.document_submissions(&other.id).unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "worker invoked by accepted_sync_recovery_survives_process_exit"]
+    fn accepted_sync_interruption_worker() {
+        let Ok(root) = std::env::var("DESIGMA_SYNC_TEST_ROOT") else { return };
+        let file = std::env::var("DESIGMA_SYNC_TEST_FILE").unwrap();
+        let phase = std::env::var("DESIGMA_SYNC_TEST_PHASE").unwrap();
+        let library = Library::open(&root).unwrap();
+        let candidate = DocumentCheckpoint::from_json(&std::fs::read_to_string(library.path("sync-test-candidate.json")).unwrap()).unwrap();
+        let accepted = library.load_submission("operation").unwrap();
+        match phase.as_str() {
+            "save:before-journal" => crate::store::exit_during_save("before-journal"),
+            "save:journal" => crate::store::exit_during_save("journal"),
+            "save:payloads" => crate::store::exit_during_save("payloads"),
+            "save:document" => crate::store::exit_during_save("document"),
+            "save:checkpoint" => crate::store::exit_during_save("checkpoint"),
+            "save:manifest" => crate::store::exit_during_save("manifest"),
+            "save:complete" => crate::store::exit_during_save("complete"),
+            _ => {
+                let phase = match phase.as_str() {
+                    "sync:before-intent" => "before-intent", "sync:intent" => "intent",
+                    "sync:before-install" => "before-install", "sync:installed" => "installed",
+                    "sync:readback" => "readback", "sync:before-synchronized" => "before-synchronized",
+                    "sync:synchronized" => "synchronized", _ => panic!("Unexpected sync worker phase"),
+                };
+                SYNC_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(|_, _| std::process::exit(92)))));
+            }
+        }
+        let _ = library.synchronize_accepted_submission(&file, &accepted, &candidate);
+        panic!("Worker must exit inside the requested persistence phase");
+    }
+
+    #[test]
+    fn accepted_sync_recovery_survives_process_exit() {
+        for phase in ["sync:before-intent", "sync:intent", "sync:before-install", "sync:installed", "sync:readback",
+            "sync:before-synchronized", "sync:synchronized", "save:before-journal", "save:journal", "save:payloads",
+            "save:document", "save:checkpoint", "save:manifest", "save:complete"] {
+            let f = fixture();
+            std::fs::write(f.library.path("sync-test-candidate.json"), f.candidate.to_json().unwrap()).unwrap();
+            let worker = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "submission_sync::tests::accepted_sync_interruption_worker", "--ignored", "--test-threads=1"])
+                .env("DESIGMA_SYNC_TEST_ROOT", &f.root).env("DESIGMA_SYNC_TEST_FILE", &f.file)
+                .env("DESIGMA_SYNC_TEST_PHASE", phase).output().unwrap();
+            assert_eq!(worker.status.code(), Some(92), "{phase}: {}", String::from_utf8_lossy(&worker.stderr));
+            let restarted = Library::open(&f.root).unwrap();
+            let original = restarted.document_submissions(&f.file).unwrap();
+            assert_eq!(original.len(), 1, "{phase}");
+            assert_eq!(original[0].command, f.accepted.command);
+            assert_eq!(original[0].outcome, f.accepted.outcome);
+            if phase == "sync:before-intent" {
+                assert!(!restarted.submission_sync_path("operation").unwrap().exists());
+                assert_eq!(restarted.load_checkpoint(&f.file).unwrap().to_json().unwrap(), f.original.to_json().unwrap());
+                restarted.prepare_submission_sync(&f.file, &f.accepted, &f.candidate).unwrap();
+            }
+            let intent = restarted.load_submission_sync("operation").unwrap();
+            let saved = restarted.resume_submission_sync("operation").unwrap();
+            assert_eq!(saved.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap(), "{phase}");
+            assert_eq!(saved.submission.state, SubmissionState::Synchronized);
+            assert_eq!(saved.submission.request_digest, f.accepted.request_digest);
+            assert_eq!(saved.checkpoint.retained.len(), f.original.retained.len() + 1);
+            assert_eq!(restarted.document_submissions(&f.file).unwrap(), [saved.submission]);
+            assert!(restarted.cityos_retention_roots().unwrap().contains(&f.submission_pin));
+            assert!(restarted.save_checkpoint(&f.file, &f.original).is_err());
+            let again = Library::open(&f.root).unwrap().resume_submission_sync("operation").unwrap();
+            assert_eq!(again.sync_id, intent.sync_id);
+            assert_eq!(again.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
         }
     }
 

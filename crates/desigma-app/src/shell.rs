@@ -698,13 +698,6 @@ impl Shell {
 
     /// One frame of the home screen (file browser): files dropped on the window are imported.
     fn home_frame(&mut self, ui: &mut egui::Ui, ctx: &Context) {
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 8)).show(ui, |ui| {
-            let response = ui.button("CityOS design library  →");
-            crate::widgets::record(ui, "open-cityos-catalog", response.rect);
-            if response.clicked() {
-                self.cityos.open = true;
-            }
-        });
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() && self.app.dialog.is_none() {
             let target = self.app.home_target().or_else(|| self.app.home.as_ref().and_then(|h| h.snap.projects.first().map(|p| (p.id.clone(), None))));
@@ -712,8 +705,7 @@ impl Shell {
                 self.app.import_into_library(&dropped, &p, f.as_deref());
             }
         }
-        // Home paints its whole max_rect; reserve the catalog launcher above it.
-        ui.scope_builder(egui::UiBuilder::new().max_rect(ui.available_rect_before_wrap()), |ui| crate::home::show(&mut self.app, ui));
+        crate::home::show(&mut self.app, ui);
         crate::home::dialog::show(&mut self.app, ctx);
         let full = ui.max_rect();
         self.toast(ui, full);
@@ -726,16 +718,26 @@ impl Shell {
         crate::cityos_jobs::set_background_paused(ctx.input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
         self.app.now = ctx.input(|i| i.time);
         self.drive_screenshot(&ctx);
-        if self.cityos.open {
-            self.cityos.show(ui, &ctx);
-            return;
+        if std::mem::take(&mut self.app.ui.cityos_requested) {
+            self.cityos.open = true;
+            self.app.ui.menu = None;
+            self.app.ui.ctx_menu = None;
         }
-        self.app.poll_plugins();
+        // The catalog is temporary, but an existing document underneath it still
+        // owns its save/recovery obligations when the application closes.
+        let mut close_failed = false;
         if ctx.input(|i| i.viewport().close_requested()) {
             crate::decks::ui::flush_notes(&mut self.app);
             self.app.save_close_version();
-            if !self.app.flush_autosave(){ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);}
+            close_failed = !self.app.flush_autosave();
+            if close_failed { ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose); }
         }
+        if self.cityos.open {
+            self.cityos.show(ui, &ctx);
+            if close_failed { self.toast(ui, ui.max_rect()); }
+            return;
+        }
+        self.app.poll_plugins();
         self.app.scrub_sync(&ctx);
         if self.app.home.is_some() {
             self.home_frame(ui, &ctx);

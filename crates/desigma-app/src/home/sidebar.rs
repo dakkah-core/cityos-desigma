@@ -60,6 +60,17 @@ pub fn show(h: &mut Home, ui: &mut Ui, rect: Rect, acts: &mut Vec<Act>) {
     }
     y += 12.0;
 
+    // CityOS is an application workspace, alongside the ordinary file library.
+    let cityos = Rect::from_min_size(Pos2::new(x0 + 8.0, y), Vec2::new(w - 16.0, ROW_H));
+    let response = row(ui, cityos, Id::new("home-cityos"), Icon::Assets, "CityOS", 0.0, false, false, "cityos");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "CityOS"));
+    widgets::record(ui, "open-cityos-catalog", cityos);
+    if response.on_hover_text("Browse CityOS designs, themes and L0–L9 libraries").clicked() {
+        acts.push(Act::Cityos);
+        ui.ctx().request_repaint();
+    }
+    y += ROW_H + 12.0;
+
     // ---- Projects header
     p.text(Pos2::new(x0 + 20.0, y + 14.0), Align2::LEFT_CENTER, "Projects", theme::font_body_strong(), theme::TEXT_SECONDARY);
     let plus = Rect::from_min_size(Pos2::new(x0 + w - 12.0 - 24.0, y + 2.0), Vec2::splat(24.0));

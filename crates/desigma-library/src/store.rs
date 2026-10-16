@@ -205,9 +205,23 @@ pub(crate) fn remove_durable(path: &Path) -> Result<()> {
 thread_local! {
     static SAVE_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     static SAVE_FAULT_REPEATS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SAVE_EXIT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_save_fault(phase: &'static str, repeats: usize) {
+    SAVE_FAULT.with(|fault| fault.set(Some(phase)));
+    SAVE_FAULT_REPEATS.with(|remaining| remaining.set(repeats));
+}
+
+#[cfg(test)]
+pub(crate) fn exit_during_save(phase: &'static str) {
+    SAVE_EXIT.with(|fault| fault.set(Some(phase)));
 }
 
 fn save_fault(_phase: &str) -> Result<()> {
+    #[cfg(test)]
+    if SAVE_EXIT.with(|fault| fault.get() == Some(_phase)) { std::process::exit(92); }
     #[cfg(test)]
     if SAVE_FAULT.with(|fault| {
         if fault.get() == Some(_phase) {
