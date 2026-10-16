@@ -223,7 +223,137 @@ fn composition_preview_exposes_captured_slots_and_props_without_claiming_target_
     for shape in &output.shapes {
         shape_text(&shape.shape, &mut text);
     }
-    for expected in ["Composition structure", "Target rendering is not yet available", "Material", "Horizon", "flat", "split"] {
+    for expected in ["Composition structure", "structure workspace preserves", "Material", "Horizon", "flat", "split"] {
         assert!(text.contains(expected), "Missing {expected}: {text}");
     }
+}
+
+fn editable_fixture() -> (Entry, Value, Value) {
+    let mut e = entry("local-theme");
+    e.kind = "theme".into();
+    e.label = "Arctic fixture".into();
+    e.source_digest = "d".repeat(64);
+    let specimen = json!({"entry":e,"digest":e.source_digest,"data":{"metadata":{"id":"fixture"}},"presentation":{"modes":{
+        "light":[{"name":"colors.primary","type":"color","value":"#123456","resolvedValue":"#123456"},
+            {"name":"colors.link","type":"color","value":"{colors.primary}","resolvedValue":"#123456"},
+            {"name":"spacing.small","type":"dimension","value":"0.5rem","resolvedValue":"0.5rem"}],
+        "dark":[{"name":"colors.primary","type":"color","value":"#abcdef","resolvedValue":"#abcdef"}]}}});
+    (e, specimen, json!({"mode":"committed","canonicalCommit":"a".repeat(40)}))
+}
+#[test]
+fn explicit_native_theme_copy_has_editable_variables_aliases_samples_and_source_provenance() {
+    use desigma_doc::*;
+    let (e, specimen, snapshot) = editable_fixture();
+    let mut doc = local_library::create(&e, &specimen, &snapshot, "light").unwrap();
+    assert!(doc.cityos.is_none());
+    assert_eq!(doc.variable_collections.len(), 2);
+    assert_eq!(doc.variables.len(), 4);
+    assert_eq!(doc.styles.len(), 3);
+    assert_eq!(doc.get(doc.pages[0]).unwrap().name, "light");
+    let collection = doc.variable_collections.values().find(|c| c.name.ends_with(" / light")).unwrap().clone();
+    let primary = doc.variables.values().find(|v| v.collection == collection.id && v.name == "colors/primary").unwrap().id.clone();
+    let alias = doc.variables.values().find(|v| v.collection == collection.id && v.name == "colors/link").unwrap();
+    assert_eq!(alias.values[&collection.default_mode], VariableValue::Alias(primary.clone()));
+    assert!(doc.variables.values().any(|v| v.values.values().any(|v| matches!(v,VariableValue::String(s) if s=="0.5rem"))));
+    assert!(doc.nodes.values().all(|n| !n.locked));
+    let sample = doc.nodes.values().find(|n| n.variables.bindings.get("fills/0") == Some(&primary)).unwrap().id;
+    let before = doc.to_json().unwrap();
+    let mut store = VariableStore::from_doc(&doc);
+    assert!(store.set_value(&primary, &collection.default_mode, VariableValue::Color(Color::from_hex("#aabbcc").unwrap())));
+    let mut history = History::default();
+    history.exec(&mut doc, store.command()).unwrap();
+    assert_eq!(doc.bound_value(sample, "fills/0"), Some(VariableValue::Color(Color::from_hex("#aabbcc").unwrap())));
+    let reopened = Document::from_json(&doc.to_json().unwrap()).unwrap();
+    assert_eq!(reopened.variables, doc.variables);
+    assert!(reopened.cityos.is_none());
+    assert!(reopened.variables[&primary].description.contains(&e.source_digest));
+    history.undo(&mut doc).unwrap();
+    assert_eq!(doc.to_json().unwrap(), before);
+}
+#[test]
+fn native_import_blocks_local_overlays_stale_selection_unresolved_aliases_and_partial_failure() {
+    let (e, specimen, mut snapshot) = editable_fixture();
+    snapshot["mode"] = json!("local");
+    assert!(local_library::create(&e, &specimen, &snapshot, "light").is_err());
+    snapshot["mode"] = json!("committed");
+    let mut stale = specimen.clone();
+    stale["entry"]["id"] = json!("other");
+    assert!(local_library::create(&e, &stale, &snapshot, "light").is_err());
+    stale = specimen.clone();
+    stale["digest"] = json!("old");
+    assert!(local_library::create(&e, &stale, &snapshot, "light").is_err());
+    stale = specimen.clone();
+    stale["presentation"]["modes"]["light"][1]["resolvedValue"] = Value::Null;
+    assert!(local_library::create(&e, &stale, &snapshot, "light").is_err());
+    stale = specimen.clone();
+    stale["presentation"]["modes"]["light"][1]["value"] = json!("{missing}");
+    assert!(local_library::create(&e, &stale, &snapshot, "light").is_err());
+}
+#[test]
+fn number_token_creates_a_real_editable_native_number_variable() {
+    let mut e = entry("ratio");
+    e.kind = "design-token".into();
+    let specimen = json!({"entry":e,"digest":e.source_digest,"data":{"$type":"number","$value":3}});
+    let doc = local_library::create(&e, &specimen, &json!({"mode":"committed","canonicalCommit":"b".repeat(40)}), "Value").unwrap();
+    let variable = doc.variables.values().next().unwrap();
+    assert_eq!(variable.kind, desigma_doc::VariableKind::Number);
+    assert!(variable.values.values().any(|v| *v == desigma_doc::VariableValue::Number(3.)));
+}
+#[test]
+fn supported_frame_specimen_links_to_actual_preview_instead_of_claiming_unavailability() {
+    let mut e = entry("frame");
+    e.source_path = "config/experience/living-canvas-frame/cityos-web.input.json".into();
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(Default::default(), |ui| preview::show(ui, &e, &json!({"root":{"id":"frame","slots":{}}})));
+    let mut text = String::new();
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
+    assert!(text.contains("Open actual web preview"));
+    assert!(!text.contains("Target rendering is not yet available"));
+}
+
+#[test]
+fn native_colors_preserve_transparency_and_reject_unsafe_css() {
+    let color = local_library::parse_color("rgba(12, 24, 48, 0.15)").unwrap();
+    assert_eq!(color.a, 0.15);
+    assert_eq!(local_library::parse_color("#1234").unwrap().a, 68.0 / 255.0);
+    for value in ["rgba(1,2,3,2)", "rgb(-1,0,0)", "rgba(NaN,0,0,1)", "var(--unresolved)", "url(file:///secret)"] {
+        assert!(local_library::parse_color(value).is_none());
+    }
+}
+#[test]
+fn provider_inspector_explains_why_the_record_has_no_visual_preview() {
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(Default::default(), |ui| preview::show(ui, &entry("provider"), &json!({"reclassificationReason":"Context provider"})));
+    let mut text = String::new();
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
+    assert!(text.contains("no standalone visual appearance"));
+    assert!(!text.contains("Component rendering is not yet available"));
+}
+#[test]
+#[ignore = "requires captured repository theme fixtures; run by the local native-library delivery check"]
+fn captured_repository_themes_create_editable_libraries_and_survive_save_reopen() {
+    let directory = std::path::PathBuf::from(std::env::var("CITYOS_NATIVE_LIBRARY_EVIDENCE").unwrap());
+    let fixture: Value = serde_json::from_slice(&std::fs::read(directory.join("fixtures.json")).unwrap()).unwrap();
+    let mut reports = vec![];
+    for value in fixture["themes"].as_array().unwrap() {
+        let e: Entry = serde_json::from_value(value["entry"].clone()).unwrap();
+        let document = local_library::create(&e, value, &fixture["snapshot"], "light").unwrap_or_else(|error| panic!("{}: {}", e.label, error));
+        let rows = value["presentation"]["modes"].as_object().unwrap().values().map(|v| v.as_array().unwrap().len()).sum::<usize>();
+        assert_eq!(document.variables.len(), rows);
+        assert!(document.cityos.is_none());
+        assert!(document.nodes.values().all(|n| !n.locked));
+        let target = directory.join(format!("{}.desigma", e.semantic_id));
+        let path = crate::io::save_path(&document, &target).unwrap();
+        let reopened = crate::io::load_path(&path).unwrap();
+        assert_eq!(reopened.variables, document.variables);
+        assert_eq!(reopened.variable_collections, document.variable_collections);
+        reports.push(json!({"id":e.semantic_id,"variables":rows,"collections":document.variable_collections.len(),"sourceDigest":e.source_digest,"saveReopen":true,"ownerWrites":false}));
+    }
+    assert!(reports.len() > 1);
+    std::fs::write(directory.join("native-results.json"), serde_json::to_vec_pretty(&json!({"themes":reports,"snapshot":fixture["snapshot"]})).unwrap())
+        .unwrap();
 }

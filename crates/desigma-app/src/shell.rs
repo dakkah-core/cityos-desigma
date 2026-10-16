@@ -560,7 +560,31 @@ impl eframe::App for Shell {
             self.workspace.hide();
             self.cityos.has_bound_draft = self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some());
             self.draw(ui);
-            if self.cityos.host_diagnostic_request {
+            if let Some(document) = self.cityos.local_design_request.take() {
+                let preserved = if self.app.lib_file.is_some() {
+                    self.app.save_library_file()
+                } else if let Some(path) = &self.app.file_path {
+                    crate::io::save_path(&self.app.doc, path).map(|_| ())
+                } else if self.app.home.is_none() && (self.app.doc.cityos.is_some() || self.app.hist.can_undo()) {
+                    Err("Save the current draft before creating another design. Your draft was preserved.".into())
+                } else {
+                    Ok(())
+                };
+                match preserved {
+                    Err(error) => {
+                        self.cityos.local_design_error = Some(error.clone());
+                        self.app.show_toast(error, true);
+                    }
+                    Ok(()) => {
+                        self.app.replace_document(document, None);
+                        self.app.home = None;
+                        self.cityos.open = false;
+                        self.app.open_variables();
+                        self.app.vars.full = false;
+                        self.app.show_toast("Local design library created. Edit Variables or canvas objects, then Save. CityOS source is unchanged.", false);
+                    }
+                }
+            } else if self.cityos.host_diagnostic_request {
                 self.cityos.host_diagnostic_request = false;
                 self.cityos.open = false;
                 self.workspace.begin_harness(self.cityos.workspace_config());

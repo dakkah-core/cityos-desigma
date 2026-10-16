@@ -413,6 +413,35 @@ impl Browser {
         ui.add_space(theme::CATALOG_GAP);
         ui.label(RichText::new(preview::display_name(&entry)).size(theme::CATALOG_TITLE).strong());
         ui.label(RichText::new(&entry.label).small().color(theme::TEXT_SECONDARY));
+        let native_tokens = matches!(entry.kind.as_str(), "theme" | "design-token" | "token");
+        if native_tokens {
+            let committed = self.summary.as_ref().is_some_and(|s| s["snapshot"]["mode"] == "committed");
+            if ui
+                .add_enabled(
+                    committed && self.specimen.is_some(),
+                    egui::Button::new(if entry.kind == "theme" { "Create editable theme library" } else { "Create editable token" }),
+                )
+                .clicked()
+            {
+                self.local_design_error = None;
+                let snapshot = &self.summary.as_ref().unwrap()["snapshot"];
+                match super::local_library::create(&entry, self.specimen.as_ref().unwrap(), snapshot, &self.theme_mode) {
+                    Ok(document) => self.local_design_request = Some(document),
+                    Err(error) => self.local_design_error = Some(error),
+                }
+            }
+            if let Some(error) = &self.local_design_error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+                if ui.button("Return to current design").clicked() {
+                    self.open = false;
+                }
+            }
+            ui.small(if committed {
+                "Creates a local Desigma design with editable variables. Save it normally; source submission is not enabled."
+            } else {
+                "Switch to GitLab main to create a local design copy. Local changes remain previews."
+            });
+        }
         if entry.kind == "theme" {
             let selectable = self.specimen.as_ref().is_some_and(|s| s["data"]["metadata"]["selectable"] != false);
             if ui
@@ -452,7 +481,17 @@ impl Browser {
         let composition = self.specimen.as_ref().is_some_and(|value| value["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1");
         if composition || entry.source_path.ends_with(".input.json") {
             ui.horizontal_wrapped(|ui| {
-                if ui.button(if self.mode == "local" { "Preview canonical design" } else { "Preview selected design" }).clicked() {
+                let actual = entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json";
+                if ui
+                    .button(if actual {
+                        "Open actual web preview"
+                    } else if self.mode == "local" {
+                        "Open canonical structure"
+                    } else {
+                        "Open structure workspace"
+                    })
+                    .clicked()
+                {
                     self.workspace_request = Some(super::WorkspaceRequest::selected(&entry.source_path, true));
                 }
                 if entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json"
@@ -465,7 +504,7 @@ impl Browser {
         }
         ui.add_space(theme::CATALOG_GAP);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.detail_tab, DetailTab::Preview, "Preview");
+            ui.selectable_value(&mut self.detail_tab, DetailTab::Preview, "Specimen");
             ui.selectable_value(&mut self.detail_tab, DetailTab::Inspector, "Source & support");
             ui.selectable_value(&mut self.detail_tab, DetailTab::Source, "Raw data");
         });

@@ -58,6 +58,7 @@ pub(super) fn kind_name(kind: &str) -> &str {
         "source-file" => "Source file",
         "public-declaration" => "Export",
         "source-consumer" => "Consumer",
+        "nonvisual-dependency" => "Code dependency",
         "package-export" => "Package export",
         "asset" => "Asset",
         _ => "Source record",
@@ -70,17 +71,9 @@ pub(super) fn source_text(specimen: &Value) -> String {
     }
 }
 pub(super) fn color(value: &Value) -> Option<Color32> {
-    let hex = value.as_str()?.strip_prefix('#')?;
-    if !hex.is_ascii() {
-        return None;
-    }
-    let pairs = match hex.len() {
-        3 | 4 => hex.chars().flat_map(|ch| [ch, ch]).collect::<String>(),
-        6 | 8 => hex.into(),
-        _ => return None,
-    };
-    let channel = |index| u8::from_str_radix(&pairs[index..index + 2], 16).ok();
-    Some(Color32::from_rgba_unmultiplied(channel(0)?, channel(2)?, channel(4)?, if pairs.len() == 8 { channel(6)? } else { 255 }))
+    let color = super::local_library::parse_color(value.as_str()?)?;
+    let channel = |v: f32| (v * 255.).round() as u8;
+    Some(Color32::from_rgba_unmultiplied(channel(color.r), channel(color.g), channel(color.b), channel(color.a)))
 }
 fn compact(value: &Value) -> String {
     match value {
@@ -202,7 +195,14 @@ pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
         ui.small("Token data preview");
     } else if data["composition"]["root"].is_object() || data["root"].is_object() || (data["kind"] == "component" && data["id"].is_string()) {
         ui.strong("Composition structure");
-        ui.label(RichText::new("Authored nodes, properties and slots. Target rendering is not yet available.").color(theme::TEXT_SECONDARY));
+        ui.label(
+            RichText::new(if entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json" {
+                "Authored structure. Use Open actual web preview above to render this frame, or Open on canvas to edit supported properties."
+            } else {
+                "Authored structure. The structure workspace preserves these nodes; an actual renderer adapter is not connected for this item."
+            })
+            .color(theme::TEXT_SECONDARY),
+        );
         ui.add_space(12.0);
         let root = if data["composition"]["root"].is_object() {
             &data["composition"]["root"]
@@ -214,7 +214,8 @@ pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
         composition_node(ui, root, &entry.id, 0, &mut 120);
     } else if data.is_object() || data.is_array() {
         ui.strong("Contract overview");
-        ui.label(RichText::new("Captured source data. Component rendering is not yet available.").color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(if nonvisual(data) {"This is a code dependency, such as a context provider or utility. It has no standalone visual appearance; preview the component or page that consumes it."}
+            else {"Source declaration only. This item still needs a renderer fixture and a native editing adapter."}).color(theme::TEXT_SECONDARY));
         ui.add_space(16.0);
         structured(ui, data, &entry.id, 0);
     } else {
@@ -223,6 +224,12 @@ pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
         ui.add_space(16.0);
         inspector(ui, entry);
     }
+}
+fn nonvisual(data: &Value) -> bool {
+    data["reclassificationReason"]
+        .as_str()
+        .is_some_and(|s| ["context provider", "non-visual utility", "nonvisual utility"].contains(&s.to_lowercase().as_str()))
+        || matches!(data["kind"].as_str(), Some("provider" | "context" | "utility"))
 }
 pub(super) fn theme_sheet(ui: &mut Ui, presentation: &Value, mode: &mut String) -> bool {
     let Some(modes) = presentation["modes"].as_object() else {

@@ -9,6 +9,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 mod canvas;
+mod local_library;
 mod preview;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -37,6 +38,8 @@ pub struct Browser {
     pub open: bool,
     pub workspace_request: Option<WorkspaceRequest>,
     pub workspace_theme: Option<String>,
+    pub local_design_request: Option<desigma_doc::Document>,
+    pub local_design_error: Option<String>,
     pub has_bound_draft: bool,
     pub host_diagnostic_request: bool,
     repository: String,
@@ -165,6 +168,8 @@ impl Browser {
             open,
             workspace_request: None,
             workspace_theme: None,
+            local_design_request: None,
+            local_design_error: None,
             has_bound_draft: false,
             host_diagnostic_request: false,
             repository: repository.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -320,6 +325,7 @@ impl Browser {
         self.pending_selection = false;
     }
     fn select(&mut self, entry: Entry) {
+        self.local_design_error = None;
         self.last_interaction = Instant::now();
         self.selected = Some(entry);
         self.specimen_canvas = None;
