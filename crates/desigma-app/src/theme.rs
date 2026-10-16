@@ -578,6 +578,17 @@ pub fn install_fonts(ctx: &egui::Context) {
     fonts.font_data.insert("ui-medium".into(), instance(UI_FONT_WEIGHT_MEDIUM));
     fonts.font_data.insert("ui-semibold".into(), instance(UI_FONT_WEIGHT_SEMIBOLD));
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "ui-regular".into());
+    // The bundled Latin UI font has no Arabic glyphs. Use the installed Windows
+    // fallback without downloading fonts or changing the user's font settings.
+    #[cfg(windows)]
+    if let Some(directory) = std::env::var_os("WINDIR") {
+        if let Ok(bytes) = std::fs::read(std::path::PathBuf::from(directory).join("Fonts/tahoma.ttf")) {
+            fonts.font_data.insert("ui-arabic-fallback".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push("ui-arabic-fallback".into());
+            }
+        }
+    }
     let mut strong_family = vec!["ui-strong".to_string()];
     strong_family.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
     fonts.families.insert(FontFamily::Name(FAMILY_STRONG.into()), strong_family);

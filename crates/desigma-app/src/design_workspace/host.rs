@@ -1,6 +1,8 @@
 //! UI-thread-only child WebView2 adapter. WGPU retains ownership of the editor.
 use serde_json::Value;
+use std::cell::Cell;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 #[derive(Default)]
 pub struct Host {
     #[cfg(windows)]
@@ -9,12 +11,18 @@ pub struct Host {
     pub version: Option<String>,
     pub error: Option<String>,
     messages: Option<Receiver<Value>>,
+    bounds: Option<[i32; 4]>,
+    visible: Cell<bool>,
+    allowed: Option<Arc<Mutex<String>>>,
+    origin: Option<String>,
 }
 impl Host {
     pub fn hide(&self) {
         #[cfg(windows)]
         if let Some(view) = &self.view {
-            let _ = view.set_visible(false);
+            if self.visible.replace(false) {
+                let _ = view.set_visible(false);
+            }
         }
     }
     pub fn reset(&mut self) {
@@ -25,6 +33,10 @@ impl Host {
         self.url = None;
         self.messages = None;
         self.error = None;
+        self.bounds = None;
+        self.visible.set(false);
+        self.allowed = None;
+        self.origin = None;
     }
     pub fn poll(&mut self) -> Vec<Value> {
         self.messages.as_ref().map(|rx| rx.try_iter().take(16).collect()).unwrap_or_default()
@@ -36,14 +48,29 @@ impl Host {
                 position: wry::dpi::PhysicalPosition::new((rect.min.x * scale).round() as i32, (rect.min.y * scale).round() as i32).into(),
                 size: wry::dpi::PhysicalSize::new((rect.width() * scale).max(1.).round() as u32, (rect.height() * scale).max(1.).round() as u32).into(),
             };
+            let bounds_key = [
+                (rect.min.x * scale).round() as i32,
+                (rect.min.y * scale).round() as i32,
+                (rect.width() * scale).max(1.).round() as i32,
+                (rect.height() * scale).max(1.).round() as i32,
+            ];
             let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
             if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") || parsed.port().is_none() {
                 return Err("Preview origin rejected".into());
             }
-            if self.url.as_deref() != Some(url) {
+            let next_origin = parsed.origin().ascii_serialization();
+            if self.view.is_some() && self.origin.as_deref() == Some(next_origin.as_str()) && self.url.as_deref() != Some(url) {
+                if let Some(allowed) = &self.allowed {
+                    *allowed.lock().map_err(|_| "Preview navigation lock failed")? = url.to_owned();
+                }
+                self.view.as_ref().unwrap().load_url(url).map_err(|e| e.to_string())?;
+                self.url = Some(url.into());
+            }
+            if self.view.is_none() || self.origin.as_deref() != Some(next_origin.as_str()) {
                 self.reset();
                 self.version = Some(wry::webview_version().map_err(|e| format!("WebView2 runtime unavailable: {e}"))?);
-                let allowed = url.to_owned();
+                let allowed = Arc::new(Mutex::new(url.to_owned()));
+                let navigation = allowed.clone();
                 let origin = parsed.origin().ascii_serialization();
                 let (tx, messages) = mpsc::sync_channel(32);
                 let view = wry::WebViewBuilder::new()
@@ -52,7 +79,7 @@ impl Host {
                     .with_devtools(false)
                     .with_url(url)
                     .with_bounds(bounds)
-                    .with_navigation_handler(move |candidate| candidate == allowed)
+                    .with_navigation_handler(move |candidate| navigation.lock().is_ok_and(|allowed| candidate == *allowed))
                     .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
                     .with_ipc_handler(move |request| {
                         if !request.uri().to_string().starts_with(&format!("{origin}/")) || request.body().len() > 8192 {
@@ -67,9 +94,19 @@ impl Host {
                 self.view = Some(view);
                 self.url = Some(url.into());
                 self.messages = Some(messages);
+                self.allowed = Some(allowed);
+                self.origin = Some(next_origin);
+                self.bounds = Some(bounds_key);
+                self.visible.set(true);
             }
             if let Some(view) = &self.view {
-                view.set_bounds(bounds).and_then(|_| view.set_visible(true)).map_err(|e| e.to_string())?;
+                if self.bounds != Some(bounds_key) {
+                    view.set_bounds(bounds).map_err(|e| e.to_string())?;
+                    self.bounds = Some(bounds_key);
+                }
+                if !self.visible.replace(true) {
+                    view.set_visible(true).map_err(|e| e.to_string())?;
+                }
             }
             Ok(())
         }

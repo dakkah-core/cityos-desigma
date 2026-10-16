@@ -28,6 +28,16 @@ pub(super) fn humanize(value: &str) -> String {
 }
 pub(super) fn display_name(entry: &Entry) -> String {
     let label = entry.label.trim_start_matches("token:/");
+    if let Some(rest) = label.strip_prefix("auto.") {
+        if let Some(name) = rest.split('.').nth(1) {
+            return humanize(name);
+        }
+    }
+    if label.starts_with("@{") {
+        if let Some(id) = label.split("shellId=").nth(1).and_then(|text| text.split(';').next()) {
+            return humanize(id);
+        }
+    }
     if entry.kind == "source-file" || entry.kind == "public-declaration" || entry.kind == "package-export" {
         return label.to_string();
     }
@@ -38,9 +48,10 @@ pub(super) fn display_name(entry: &Entry) -> String {
 }
 pub(super) fn kind_name(kind: &str) -> &str {
     match kind {
-        "token" => "Token",
+        "token" | "design-token" => "Token",
+        "theme" => "Theme",
         "registered-component" => "Component",
-        "registered-artifact" => "Definition",
+        "registered-artifact" | "registration" | "artifact" => "Definition",
         "authored-composition" => "Composition",
         "authored-node" => "Composition node",
         "product" => "Product",
@@ -212,6 +223,31 @@ pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
         ui.add_space(16.0);
         inspector(ui, entry);
     }
+}
+pub(super) fn theme_sheet(ui: &mut Ui, presentation: &Value, mode: &mut String) -> bool {
+    let Some(modes) = presentation["modes"].as_object() else {
+        return false;
+    };
+    if !modes.contains_key(mode.as_str()) {
+        *mode = modes.keys().next().cloned().unwrap_or_default();
+    }
+    ui.strong("Theme token sheet");
+    ui.small("Captured repository theme · aliases resolved within the selected mode");
+    let rows = modes[mode.as_str()].as_array();
+    if let Some(rows) = rows {
+        egui::Grid::new("theme-token-sheet").num_columns(3).spacing(egui::vec2(16., 8.)).striped(true).show(ui, |ui| {
+            for row in rows {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(36., 24.), egui::Sense::hover());
+                if let Some(value) = color(&row["resolvedValue"]) {
+                    ui.painter().rect_filled(rect, 4, value);
+                }
+                ui.label(row["name"].as_str().unwrap_or(""));
+                ui.monospace(if row["resolvedValue"].is_null() { "Unresolved alias".into() } else { compact(&row["resolvedValue"]) });
+                ui.end_row();
+            }
+        });
+    }
+    true
 }
 pub(super) fn inspector(ui: &mut Ui, entry: &Entry) {
     ui.strong("Source");

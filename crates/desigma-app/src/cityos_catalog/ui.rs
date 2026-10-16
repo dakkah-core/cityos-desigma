@@ -5,9 +5,10 @@ use egui::{Align, Align2, Context, FontId, Frame, Layout, RichText, Sense, Strok
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-const COLLECTIONS: [(&str, &str); 7] = [
+const COLLECTIONS: [(&str, &str); 8] = [
     ("design", "Design library"),
-    ("components", "Components & foundations"),
+    ("themes", "Themes"),
+    ("components", "Components"),
     ("tokens", "Design tokens"),
     ("compositions", "Compositions"),
     ("products", "Products & surfaces"),
@@ -100,7 +101,7 @@ impl Browser {
             self.last_interaction = Instant::now();
         }
         self.tick();
-        ctx.request_repaint_after(Duration::from_millis(100));
+        ctx.request_repaint_after(Duration::from_millis(if self.busy || self.filter_changed.is_some() || self.pending_selection { 100 } else { 1000 }));
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
         for (style, size) in [
@@ -169,12 +170,18 @@ impl Browser {
             ui.add_space(theme::CATALOG_GAP);
             ui.label(RichText::new("CityOS").size(theme::CATALOG_TITLE).strong());
             ui.label(RichText::new("Design library").size(theme::CATALOG_TITLE).color(theme::TEXT_SECONDARY));
-            if ui.button(if self.has_bound_draft {"Resume canvas draft"} else {"Design CityOS web frame"}).clicked() {self.workspace_request=Some(false);}
+            if ui.button("Design files…").clicked() {
+                self.workspace_request = Some(super::WorkspaceRequest::browse());
+            }
+            if self.has_bound_draft && ui.button("Resume canvas draft").clicked() {
+                self.workspace_request = Some(super::WorkspaceRequest { source_path: None, preview_only: false, resume: true });
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
                 }
-                if ui.button("Embedded host diagnostic").clicked() {self.host_diagnostic_request=true;}
+                ui.checkbox(&mut self.auto_refresh, "Live updates")
+                    .on_hover_text("Off by default to keep the machine quiet. Refresh checks committed changes without rebuilding unchanged snapshots.");
                 if self.busy {
                     if ui.button("Cancel").clicked() {
                         self.cancelled.store(true, Ordering::Release);
@@ -273,12 +280,13 @@ impl Browser {
                 }
                 if id == "compositions" {
                     ui.add_space(theme::CATALOG_GAP);
-                    ui.label(RichText::new("Composition levels").small().color(theme::TEXT_SECONDARY));
+                    ui.label(RichText::new("L0–L9 · generated from repository").small().color(theme::TEXT_SECONDARY));
                     let levels = self.summary.as_ref().and_then(|s| s["navigation"]["levels"].as_array()).cloned().unwrap_or_default();
                     for level in levels {
                         let id = level["id"].as_str().unwrap_or("");
                         let name = level["name"].as_str().unwrap_or("");
-                        if nav_row(ui, self.filters.level == id, &format!("{id}  {name}"), "").clicked() {
+                        let total = level["count"].as_u64().unwrap_or(0) as usize;
+                        if nav_row(ui, self.filters.level == id, &format!("{id}  {name}"), &count(total)).clicked() {
                             self.filters = Filters { collection: "design".into(), level: id.into(), ..Default::default() };
                         }
                     }
@@ -405,12 +413,55 @@ impl Browser {
         ui.add_space(theme::CATALOG_GAP);
         ui.label(RichText::new(preview::display_name(&entry)).size(theme::CATALOG_TITLE).strong());
         ui.label(RichText::new(&entry.label).small().color(theme::TEXT_SECONDARY));
-        if entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json" {
+        if entry.kind == "theme" {
+            let selectable = self.specimen.as_ref().is_some_and(|s| s["data"]["metadata"]["selectable"] != false);
+            if ui
+                .add_enabled(
+                    selectable,
+                    egui::Button::new(if self.mode == "local" { "Preview canonical theme on web frame" } else { "Preview theme on web frame" }),
+                )
+                .clicked()
+            {
+                self.workspace_theme = Some(entry.semantic_id.clone());
+                self.workspace_request = Some(super::WorkspaceRequest::selected("config/experience/living-canvas-frame/cityos-web.input.json", true));
+            }
+        }
+        if self.specimen.is_some() {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Actual web preview").clicked() {self.workspace_request=Some(true);}
-                if ui.button(if self.mode=="local" {"Open canonical draft"}else{"Open on canvas"}).clicked() {self.workspace_request=Some(false);}
+                if ui.button(if self.specimen_canvas.is_some() { "Reload inspection canvas" } else { "Load inspection canvas" }).clicked() {
+                    self.specimen_canvas = Some(super::canvas::SpecimenCanvas::new(&entry, self.specimen.as_ref().unwrap(), &self.theme_mode));
+                    self.detail_tab = DetailTab::Preview;
+                }
+                if self.specimen_canvas.is_some() && ui.button("Back to specimen").clicked() {
+                    self.specimen_canvas = None;
+                }
+                ui.small("Temporary · does not create a saved design");
             });
-            ui.small("Opens the canonical GitLab frame. Local overlay changes stay in this preview.");
+            if let Some(modes) = self.specimen.as_ref().and_then(|s| s["presentation"]["modes"].as_object()) {
+                let old = self.theme_mode.clone();
+                ui.horizontal_wrapped(|ui| {
+                    for key in modes.keys() {
+                        ui.selectable_value(&mut self.theme_mode, key.clone(), preview::humanize(key));
+                    }
+                });
+                if old != self.theme_mode && self.specimen_canvas.is_some() {
+                    self.specimen_canvas = Some(super::canvas::SpecimenCanvas::new(&entry, self.specimen.as_ref().unwrap(), &self.theme_mode));
+                }
+            }
+        }
+        let composition = self.specimen.as_ref().is_some_and(|value| value["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1");
+        if composition || entry.source_path.ends_with(".input.json") {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(if self.mode == "local" { "Preview canonical design" } else { "Preview selected design" }).clicked() {
+                    self.workspace_request = Some(super::WorkspaceRequest::selected(&entry.source_path, true));
+                }
+                if entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json"
+                    && ui.button(if self.mode == "local" { "Open canonical draft" } else { "Open on canvas" }).clicked()
+                {
+                    self.workspace_request = Some(super::WorkspaceRequest::selected(&entry.source_path, false));
+                }
+            });
+            ui.small("Opens this source from canonical GitLab. Local overlay changes remain previews. Renderer availability is shown per file.");
         }
         ui.add_space(theme::CATALOG_GAP);
         ui.horizontal(|ui| {
@@ -419,6 +470,12 @@ impl Browser {
             ui.selectable_value(&mut self.detail_tab, DetailTab::Source, "Raw data");
         });
         ui.separator();
+        if self.detail_tab == DetailTab::Preview {
+            if let Some(canvas) = &mut self.specimen_canvas {
+                canvas.show(ui);
+                return;
+            }
+        }
         egui::ScrollArea::vertical().id_salt(("catalog-detail", &entry.id, self.detail_tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(theme::CATALOG_GAP);
             match self.detail_tab {
@@ -444,7 +501,9 @@ impl Browser {
                             self.pending_selection = true;
                         }
                     } else if let Some(specimen) = &self.specimen {
-                        preview::show(ui, &entry, &specimen["data"]);
+                        if !preview::theme_sheet(ui, &specimen["presentation"], &mut self.theme_mode) {
+                            preview::show(ui, &entry, &specimen["data"]);
+                        }
                     } else {
                         ui.spinner();
                         ui.label(if self.activity == "Refreshing repository" {
@@ -459,32 +518,49 @@ impl Browser {
     }
     fn welcome(&mut self, ui: &mut Ui) {
         ui.add_space(24.0);
-        ui.label(RichText::new("Explore the CityOS\ndesign system.").size(32.0).strong());
+        ui.label(RichText::new("Your generated design system").size(30.0).strong());
         ui.add_space(theme::CATALOG_GAP);
         ui.label(
-            RichText::new("Browse foundations, components, compositions and the products built from them.")
+            RichText::new("Loaded from repository registries, exports and captured theme files. Select a level, inspect a specimen, or load its native inspection canvas.")
                 .size(theme::CATALOG_BODY)
                 .color(theme::TEXT_SECONDARY),
         );
         ui.add_space(24.0);
-        for (id, title, detail) in [
-            ("components", "Components & foundations", "Registered building blocks, organized from L0 to L9."),
-            ("tokens", "Design tokens", "Color values, aliases and token contracts."),
-            ("compositions", "Compositions", "Authored structure, slots and properties."),
-        ] {
-            Frame::new().fill(theme::BG).corner_radius(theme::CATALOG_RADIUS).inner_margin(16).show(ui, |ui| {
-                ui.set_width((ui.available_width()).max(120.0));
-                if ui.button(RichText::new(format!("{title}  →")).strong()).clicked() {
-                    self.filters = Filters { collection: id.into(), ..Default::default() };
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Browse themes →").clicked() {
+                self.filters = Filters { collection: "themes".into(), ..Default::default() };
+                self.filters_changed();
+            }
+            if ui.button("Choose a design file →").clicked() {
+                self.workspace_request = Some(super::WorkspaceRequest::browse());
+            }
+        });
+        ui.add_space(16.);
+        let levels = self.summary.as_ref().and_then(|s| s["navigation"]["levels"].as_array()).cloned().unwrap_or_default();
+        if levels.is_empty() {
+            ui.label("The L0–L9 overview appears when the repository capture is ready.");
+        }
+        egui::Grid::new("catalog-level-overview").num_columns(3).spacing(egui::vec2(16., 10.)).striped(true).show(ui, |ui| {
+            ui.strong("Level");
+            ui.strong("Records");
+            ui.strong("Loading support");
+            ui.end_row();
+            for level in levels {
+                let id = level["id"].as_str().unwrap_or("");
+                let name = level["name"].as_str().unwrap_or("");
+                let total = level["count"].as_u64().unwrap_or(0);
+                if ui.button(format!("{id} · {name}")).clicked() {
+                    self.filters = Filters { collection: "design".into(), level: id.into(), ..Default::default() };
                     self.filters_changed();
                 }
-                ui.label(RichText::new(detail).color(theme::TEXT_SECONDARY));
-            });
-            ui.add_space(8.0);
-        }
+                ui.label(count(total as usize));
+                ui.small(if total == 0 { "No classified records" } else { "Specimen + inspection canvas" });
+                ui.end_row();
+            }
+        });
         ui.add_space(theme::CATALOG_GAP);
         ui.label(
-            RichText::new("Select an item to see its data preview. Source records and unresolved classifications remain available in the sidebar.")
+            RichText::new("Inspection canvases show source data as native objects. Actual web rendering and editable drafts are currently qualified for the canonical web frame. Other renderer and editing adapters remain unavailable.")
                 .small()
                 .color(theme::TEXT_SECONDARY),
         );

@@ -57,10 +57,21 @@ impl Shell {
     }
 
     pub fn build(ctx: &Context, opts: Options) -> Self {
-        let mut cityos=crate::cityos_catalog::Browser::new(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone(),opts.cityos_canonical_ref.clone());
-        let mut workspace=crate::design_workspace::Workspace::default();
-        if opts.cityos_host_diagnostic {workspace.begin_harness(cityos.workspace_config());cityos.open=false;}
-        else if opts.cityos_frame {workspace.begin(cityos.workspace_config(),false);cityos.open=false;}
+        let mut cityos = crate::cityos_catalog::Browser::new(
+            opts.cityos_repository.clone(),
+            opts.cityos_reader.clone(),
+            opts.cityos_node.clone(),
+            opts.cityos_cache.clone(),
+            opts.cityos_canonical_ref.clone(),
+        );
+        let mut workspace = crate::design_workspace::Workspace::default();
+        if opts.cityos_host_diagnostic {
+            workspace.begin_harness(cityos.workspace_config());
+            cityos.open = false;
+        } else if opts.cityos_frame {
+            workspace.begin(cityos.workspace_config(), Some("config/experience/living-canvas-frame/cityos-web.input.json".into()), false);
+            cityos.open = false;
+        }
         theme::install_fonts(ctx);
         theme::apply(ctx);
         let mut app = App::new(match opts.fixture.as_deref() {
@@ -510,7 +521,9 @@ impl eframe::App for Shell {
     /// Tab belongs to the text session (it nests list items): take it out of the input before egui
     /// uses it to move keyboard focus between widgets.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        if self.cityos.open || self.workspace.open {return;}
+        if self.cityos.open || self.workspace.open {
+            return;
+        }
         if self.app.plugins.open {
             return;
         }
@@ -534,24 +547,36 @@ impl eframe::App for Shell {
         if self.app.fonts.is_loading() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
-        if !self.workspace.open && !self.cityos.open && self.app.home.is_none() && self.app.doc.cityos.as_ref().is_some_and(|b|b.exchange_v2.is_some()) {
-            self.workspace.resume(self.cityos.workspace_config(),&self.app);
+        if !self.workspace.open && !self.cityos.open && self.app.home.is_none() && self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {
+            self.workspace.resume(self.cityos.workspace_config(), &self.app);
         }
         if self.workspace.open {
-            self.app.now=ui.ctx().input(|i|i.time);
-            self.workspace.show(&mut self.app,ui,_frame);
-            if !self.workspace.open {self.cityos.open=true;}
+            self.app.now = ui.ctx().input(|i| i.time);
+            self.workspace.show(&mut self.app, ui, _frame);
+            if !self.workspace.open {
+                self.cityos.open = true;
+            }
         } else {
             self.workspace.hide();
-            self.cityos.has_bound_draft=self.app.doc.cityos.as_ref().is_some_and(|b|b.exchange_v2.is_some());
+            self.cityos.has_bound_draft = self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some());
             self.draw(ui);
-            if self.cityos.host_diagnostic_request {self.cityos.host_diagnostic_request=false;self.cityos.open=false;self.workspace.begin_harness(self.cityos.workspace_config());}
-            else if let Some(preview_only)=self.cityos.workspace_request.take(){
-                self.cityos.open=false;
-                if !preview_only && self.cityos.has_bound_draft {self.workspace.resume(self.cityos.workspace_config(),&self.app);}
-                else {self.workspace.begin(self.cityos.workspace_config(),preview_only);}
+            if self.cityos.host_diagnostic_request {
+                self.cityos.host_diagnostic_request = false;
+                self.cityos.open = false;
+                self.workspace.begin_harness(self.cityos.workspace_config());
+            } else if let Some(request) = self.cityos.workspace_request.take() {
+                self.cityos.open = false;
+                if request.resume {
+                    self.workspace.resume(self.cityos.workspace_config(), &self.app);
+                } else {
+                    self.workspace.begin(self.cityos.workspace_config(), request.source_path, request.preview_only);
+                }
+                if let Some(theme) = self.cityos.workspace_theme.take() {
+                    self.workspace.set_preview_theme(theme);
+                }
+            } else if self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) && self.app.home.is_none() && !self.cityos.open {
+                self.workspace.resume(self.cityos.workspace_config(), &self.app);
             }
-            else if self.app.doc.cityos.as_ref().is_some_and(|b|b.exchange_v2.is_some()) && self.app.home.is_none() && !self.cityos.open {self.workspace.resume(self.cityos.workspace_config(),&self.app);}
         }
     }
 }
@@ -601,10 +626,12 @@ impl Shell {
 
     /// One frame of the home screen (file browser): files dropped on the window are imported.
     fn home_frame(&mut self, ui: &mut egui::Ui, ctx: &Context) {
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(16,8)).show(ui, |ui| {
-            let response=ui.button("CityOS design library  →");
-            crate::widgets::record(ui,"open-cityos-catalog",response.rect);
-            if response.clicked() { self.cityos.open=true; }
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 8)).show(ui, |ui| {
+            let response = ui.button("CityOS design library  →");
+            crate::widgets::record(ui, "open-cityos-catalog", response.rect);
+            if response.clicked() {
+                self.cityos.open = true;
+            }
         });
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() && self.app.dialog.is_none() {
@@ -627,7 +654,7 @@ impl Shell {
         self.app.now = ctx.input(|i| i.time);
         self.drive_screenshot(&ctx);
         if self.cityos.open {
-            self.cityos.show(ui,&ctx);
+            self.cityos.show(ui, &ctx);
             return;
         }
         self.app.poll_plugins();

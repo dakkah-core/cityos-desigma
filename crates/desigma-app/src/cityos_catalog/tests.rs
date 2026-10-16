@@ -1,6 +1,17 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn selected_workspace_requests_preserve_the_source_and_do_not_resume_unrelated_drafts() {
+    let request = WorkspaceRequest::selected("config/experience/another-page.input.json", true);
+    assert_eq!(request.source_path.as_deref(), Some("config/experience/another-page.input.json"));
+    assert!(request.preview_only);
+    assert!(!request.resume);
+    let browse = WorkspaceRequest::browse();
+    assert!(browse.source_path.is_none());
+    assert!(!browse.resume);
+}
+
 fn entry(id: &str) -> Entry {
     serde_json::from_value(json!({"id":id,"semanticId":"token:/colors/surface/page","label":"token:/colors/surface/page","level":"L0","family":"foundations","kind":"token","owner":"design-system","package":"@cityos/design-tokens","product":null,"targets":["web"],"locales":["ar","en"],"sourcePath":"tokens.json","sourcePointer":"/colors/page","sourceDigest":"digest","observationId":"git:fixture","dependencies":[],"generationStatus":"not-applicable","classificationStatus":"classified","temporaryView":"token-sheet","persistentDraft":false,"editable":false,"rendererQualified":false,"diagnostics":[]})).unwrap()
 }
@@ -88,6 +99,20 @@ fn token_previews_use_literal_values_and_keep_aliases_unresolved() {
     assert!(preview::color(&json!("{colors.primary}")).is_none());
     assert!(preview::color(&json!("#💚💚💚")).is_none());
     assert_eq!(preview::display_name(&entry("one")), "Colors surface page");
+    let mut generated = entry("generated");
+    generated.label = "auto.l2.control.packages-design-system".into();
+    assert_eq!(preview::display_name(&generated), "Control");
+    generated.label = "@{shellId=shell.mobile; name=; source=...}.shellId".into();
+    assert_eq!(preview::display_name(&generated), "Shell mobile");
+}
+#[test]
+#[cfg(windows)]
+fn windows_catalog_font_fallback_contains_arabic_glyphs() {
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx);
+    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        assert!(ui.fonts_mut(|fonts| fonts.has_glyphs(&egui::FontId::proportional(16.), "سيتي أو إس")));
+    });
 }
 
 #[test]
@@ -104,6 +129,29 @@ fn failed_refresh_waits_after_completion_instead_of_entering_a_retry_loop() {
     assert!(browser.last_refresh.elapsed() < Duration::from_secs(1));
     assert!(requests.try_recv().is_err());
     assert!(browser.summary.is_some());
+}
+#[test]
+fn idle_catalog_does_not_schedule_background_scans_by_default() {
+    let (mut browser, _, requests) = fixture();
+    browser.last_refresh = Instant::now() - Duration::from_secs(3600);
+    browser.last_interaction = Instant::now() - Duration::from_secs(3600);
+    browser.source_changed = true;
+    browser.mode = "local".into();
+    browser.tick();
+    assert!(!browser.busy);
+    assert!(requests.try_recv().is_err());
+    browser.auto_refresh = true;
+    browser.tick();
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(..))));
+}
+#[test]
+fn inspection_canvas_has_real_native_nodes_and_no_editor_binding_or_history() {
+    let e = entry("theme");
+    let s = json!({"presentation":{"modes":{"light":[{"name":"colors.primary","resolvedValue":"#123456"}]}},"data":{}});
+    let canvas = canvas::SpecimenCanvas::new(&e, &s, "light");
+    assert!(canvas.document().cityos.is_none());
+    assert!(canvas.document().nodes.values().any(|n| n.name == "colors.primary"));
+    assert!(canvas.document().nodes.values().filter(|n| !canvas.document().pages.contains(&n.id)).all(|n| n.locked));
 }
 #[test]
 fn catalog_layout_keeps_search_and_results_reachable_at_supported_sizes() {

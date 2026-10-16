@@ -8,6 +8,7 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
+mod canvas;
 mod preview;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -34,7 +35,8 @@ enum Reply {
 }
 pub struct Browser {
     pub open: bool,
-    pub workspace_request: Option<bool>,
+    pub workspace_request: Option<WorkspaceRequest>,
+    pub workspace_theme: Option<String>,
     pub has_bound_draft: bool,
     pub host_diagnostic_request: bool,
     repository: String,
@@ -71,12 +73,33 @@ pub struct Browser {
     last_interaction: Instant,
     preview_error: Option<String>,
     refresh_failures: u32,
+    auto_refresh: bool,
+    specimen_canvas: Option<canvas::SpecimenCanvas>,
+    theme_mode: String,
+}
+
+pub struct WorkspaceRequest {
+    pub source_path: Option<String>,
+    pub preview_only: bool,
+    pub resume: bool,
+}
+impl WorkspaceRequest {
+    pub fn browse() -> Self {
+        Self { source_path: None, preview_only: true, resume: false }
+    }
+    pub fn selected(source: &str, preview_only: bool) -> Self {
+        Self { source_path: Some(source.into()), preview_only, resume: false }
+    }
 }
 
 impl Browser {
     pub fn workspace_config(&self) -> crate::design_workspace::Config {
-        crate::design_workspace::Config {node: PathBuf::from(&self.node), bridge:PathBuf::from(&self.reader).with_file_name("workspace.mjs"),
-            repository:PathBuf::from(&self.repository), cache:self.cache.clone().unwrap_or_else(||std::env::temp_dir().join("desigma-cityos-cache"))}
+        crate::design_workspace::Config {
+            node: PathBuf::from(&self.node),
+            bridge: PathBuf::from(&self.reader).with_file_name("workspace.mjs"),
+            repository: PathBuf::from(&self.repository),
+            cache: self.cache.clone().unwrap_or_else(|| std::env::temp_dir().join("desigma-cityos-cache")),
+        }
     }
     pub fn new(repository: Option<PathBuf>, reader: Option<PathBuf>, node: Option<PathBuf>, cache: Option<PathBuf>, canonical_ref: Option<String>) -> Self {
         let (jobs, requests) = mpsc::channel();
@@ -141,6 +164,7 @@ impl Browser {
         let mut browser = Self {
             open,
             workspace_request: None,
+            workspace_theme: None,
             has_bound_draft: false,
             host_diagnostic_request: false,
             repository: repository.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -177,6 +201,9 @@ impl Browser {
             last_interaction: Instant::now(),
             preview_error: None,
             refresh_failures: 0,
+            auto_refresh: false,
+            specimen_canvas: None,
+            theme_mode: "light".into(),
         };
         if open {
             browser.refresh();
@@ -231,6 +258,7 @@ impl Browser {
                                 let changed = self.summary.as_ref().is_none_or(|old| old["generationId"] != summary["generationId"]);
                                 self.summary = Some(summary);
                                 if changed {
+                                    self.specimen_canvas = None;
                                     self.specimen = None;
                                     self.source_text.clear();
                                     self.pending_selection = self.selected.is_some();
@@ -285,6 +313,7 @@ impl Browser {
         self.last_interaction = Instant::now();
         self.filter_changed = Some(Instant::now());
         self.selected = None;
+        self.specimen_canvas = None;
         self.specimen = None;
         self.source_text.clear();
         self.preview_error = None;
@@ -293,6 +322,7 @@ impl Browser {
     fn select(&mut self, entry: Entry) {
         self.last_interaction = Instant::now();
         self.selected = Some(entry);
+        self.specimen_canvas = None;
         self.specimen = None;
         self.source_text.clear();
         self.preview_error = None;
@@ -318,10 +348,11 @@ impl Browser {
                 self.activity = "Loading preview";
                 let _ = self.jobs.send(Job::Materialize(self.epoch, entry.id.clone()));
             }
-        } else if self.source_changed && self.mode == "local" {
+        } else if self.auto_refresh && self.source_changed && self.mode == "local" {
             self.source_changed = false;
             self.refresh();
-        } else if self.summary.is_some()
+        } else if self.auto_refresh
+            && self.summary.is_some()
             && self.last_refresh.elapsed() >= Duration::from_secs((60_u64 << self.refresh_failures.min(4)).min(900))
             && self.last_interaction.elapsed() >= Duration::from_secs(10)
         {
