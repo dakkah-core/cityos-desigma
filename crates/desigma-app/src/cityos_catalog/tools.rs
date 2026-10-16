@@ -44,7 +44,7 @@ impl Destination {
             Self::Overview => "Review the latest accepted analysis and its coverage.",
             Self::Graph => "Trace systems, services, packages and dependencies.",
             Self::Findings => "Inspect issues, retained evidence and source locations.",
-            Self::Reports => "Prepare scoped reports and download Codex Markdown for fixes.",
+            Self::Reports => "Prepare scoped reports and download Codex batches for fixes.",
             Self::Runs => "Inspect analysis history, source revisions and execution status.",
         }
     }
@@ -84,6 +84,7 @@ struct LaunchFailure {
 #[derive(Default)]
 pub(super) struct AtlasTools {
     failure: Option<LaunchFailure>,
+    menu_open: bool,
 }
 
 impl AtlasTools {
@@ -97,10 +98,10 @@ impl AtlasTools {
         let menu = ui.menu_button("Atlas ↗", |ui| {
             ui.set_max_width(320.0);
             ui.strong("CityOS Atlas");
-            ui.label(RichText::new("Investigate architecture · prepare fixes").small().color(theme::TEXT_SECONDARY));
+            ui.add(egui::Label::new(RichText::new("Investigate architecture · prepare fixes").small().color(theme::TEXT_SECONDARY)).wrap());
             ui.separator();
             if !cfg!(feature = "open-url") {
-                ui.label(RichText::new(BROWSER_DISABLED).small().color(theme::TEXT_SECONDARY));
+                ui.add(egui::Label::new(RichText::new(BROWSER_DISABLED).small().color(theme::TEXT_SECONDARY)).wrap());
             }
             for destination in DESTINATIONS {
                 ui.push_id(destination.page(), |ui| {
@@ -122,15 +123,21 @@ impl AtlasTools {
                 });
             }
             ui.separator();
-            ui.label(RichText::new(PRIVATE_ACCESS).small().color(theme::TEXT_SECONDARY));
+            ui.add(egui::Label::new(RichText::new(PRIVATE_ACCESS).small().color(theme::TEXT_SECONDARY)).wrap());
             ui.collapsing("Prepare fixes for Codex", |ui| {
-                ui.label("In Atlas, choose a findings scope, open Reports and export Codex Markdown. Load the downloaded .codex.md file into Codex.");
-                ui.label("For large reports, use scripts/atlas-codex-pack.mjs in the Atlas repository to create dependency-aware batches.");
-                ui.label("These links open the latest accepted analysis. Check its source revision against your design source, then pin the intended run before preparing fixes.");
+                ui.add(egui::Label::new("In Atlas Reports, use a completed report's Download Codex batches action. The ZIP contains README.md, numbered batches of up to 25 tasks, and the original full report.").wrap());
+                ui.add(egui::Label::new("Open Codex in C:/Dakkah-CityOS/dakkah-cityos-cms. Load README.md plus one downloaded .codex.md batch at a time. Run batches serially by default.").wrap());
+                ui.add(egui::Label::new("Before changing code, match the report's exact source pin to the CMS checkout. These links follow the latest accepted analysis; choose and pin the intended run in Atlas.").wrap());
+                ui.add(egui::Label::new("Optional CLI fallback: scripts/atlas-codex-pack.mjs in the Atlas repository.").wrap());
             });
         });
+        self.menu_open = menu.inner.is_some();
         crate::widgets::record(ui, "catalog-atlas-menu", menu.response.rect);
         menu.response.on_hover_text("Open private Atlas tools in your default browser");
+    }
+
+    pub(super) fn is_open(&self) -> bool {
+        self.menu_open
     }
 
     pub(super) fn feedback(&mut self, ui: &mut Ui) {
@@ -141,7 +148,7 @@ impl AtlasTools {
         let mut dismiss = false;
         egui::Frame::new().inner_margin(egui::Margin::symmetric(theme::CATALOG_PAD, 6)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("Atlas could not open: {message}")).color(theme::DANGER));
+                ui.add(egui::Label::new(RichText::new(format!("Atlas could not open: {message}")).color(theme::DANGER)).wrap());
                 retry = ui.add_enabled(cfg!(feature = "open-url"), egui::Button::new("Retry"))
                     .on_disabled_hover_text(BROWSER_DISABLED).clicked();
                 let copy = ui.button("Copy Atlas link");
@@ -243,11 +250,13 @@ mod tests {
             let closed = frame(&mut tools, &ctx, width, vec![]);
             let mut text = String::new();
             for shape in &closed.shapes { painted_text(&shape.shape, &mut text); }
+            assert!(!tools.is_open());
             assert!(text.contains("Atlas ↗"));
             assert!(!text.contains("CityOS Atlas") && !text.contains("Codex Markdown"));
             click(&mut tools, &ctx, width, "catalog-atlas-menu");
             frame(&mut tools, &ctx, width, vec![]);
             let open = frame(&mut tools, &ctx, width, vec![]);
+            assert!(tools.is_open());
             text.clear();
             for shape in &open.shapes { painted_text(&shape.shape, &mut text); }
             assert!(text.contains("CityOS Atlas"));
@@ -264,9 +273,30 @@ mod tests {
     }
 
     #[test]
+    fn atlas_access_is_available_without_a_catalog_capture() {
+        for width in [390.0, 1200.0] {
+            let ctx = egui::Context::default();
+            let mut browser = super::super::Browser::new(None, None, None, None, None);
+            browser.open = true;
+            browser.settings_open = false;
+            browser.auto_refresh = false;
+            for _ in 0..2 {
+                let _ = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 900.0))),
+                    ..Default::default()
+                }, |ui| browser.show(ui, &ctx));
+            }
+            let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", "catalog-atlas-menu".to_string())))).unwrap();
+            assert!(rect.left() >= 0.0 && rect.right() <= width && rect.bottom() <= 900.0);
+            assert!(browser.summary.is_none());
+            assert!(!browser.busy, "Opening Atlas does not require a repository scan");
+        }
+    }
+
+    #[test]
     fn browser_failure_offers_the_exact_destination_for_manual_recovery() {
         let ctx = egui::Context::default();
-        let mut tools = AtlasTools { failure: Some(LaunchFailure { destination: Destination::Reports, message: "No default browser is configured".into() }) };
+        let mut tools = AtlasTools { failure: Some(LaunchFailure { destination: Destination::Reports, message: "No default browser is configured".into() }), ..Default::default() };
         frame(&mut tools, &ctx, 390.0, vec![]);
         let output = frame(&mut tools, &ctx, 390.0, vec![]);
         let mut text = String::new();

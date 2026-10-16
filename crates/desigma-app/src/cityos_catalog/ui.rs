@@ -193,6 +193,7 @@ impl Browser {
         self.settings(ctx);
         self.coverage(ctx);
         if self.settings_open||self.coverage_open {self.inline_preview=None;}
+        if self.atlas_tools.is_open() { self.inline_preview = None; }
         if let Some(delay) = self.next_repaint_after(Instant::now()) { ctx.request_repaint_after(delay); }
         if !self.open {
             if let Ok(mut repaint) = self.repaint.lock() { *repaint = None; }
