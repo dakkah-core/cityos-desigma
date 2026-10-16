@@ -544,6 +544,10 @@ impl eframe::App for Shell {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         crate::cityos_jobs::set_background_paused(ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
+        if ui.ctx().input(|i| i.smooth_scroll_delta!=egui::Vec2::ZERO || i.events.iter().any(|event|
+            matches!(event,egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Key {pressed:true,..}))) {
+            crate::cityos_jobs::note_interaction();
+        }
         self.app.poll_fonts();
         if self.app.fonts.is_loading() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));

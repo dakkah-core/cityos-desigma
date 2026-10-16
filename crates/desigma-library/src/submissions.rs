@@ -133,8 +133,32 @@ impl Library {
         if payload_digest(bytes) != expected_digest {
             return Err(LibraryError::Invalid("Dependency digest mismatch".into()));
         }
+        match self.verify_cityos_payload(expected_digest) {
+            Ok(()) => return Ok(()),
+            Err(LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // A caller supplying the verified canonical bytes may still repair
+            // a damaged object, as before. Verified immutable objects are a no-op.
+            Err(LibraryError::Invalid(_)) => {}
+            Err(error) => return Err(error),
+        }
         write_atomic(&path, bytes)?;
-        self.load_cityos_payload(expected_digest)?;
+        self.verify_cityos_payload(expected_digest)
+    }
+
+    /// Verify a durable CAS reference without allocating the entire payload.
+    pub(crate) fn verify_cityos_payload(&self, hash: &str) -> Result<()> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(self.payload_path(hash)?)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 { break; }
+            digest.update(&buffer[..read]);
+        }
+        if format!("{:x}", digest.finalize()) != hash {
+            return Err(LibraryError::Invalid("Dependency digest mismatch".into()));
+        }
         Ok(())
     }
     pub fn load_cityos_payload(&self, hash: &str) -> Result<Vec<u8>> {

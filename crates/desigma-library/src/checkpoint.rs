@@ -70,7 +70,7 @@ impl Library {
 
     pub(crate) fn load_checkpoint_locked(&self, id: &str) -> Result<DocumentCheckpoint> {
         let checkpoint = self.load_checkpoint_state_locked(id)?;
-        for hash in checkpoint.dependency_pins() { self.load_cityos_payload(&hash)?; }
+        for hash in checkpoint.dependency_pins() { self.verify_cityos_payload(&hash)?; }
         Ok(checkpoint)
     }
 
@@ -83,7 +83,7 @@ impl Library {
         let checkpoint = self.load_checkpoint_state_locked(id)?;
         let mut missing = Vec::new();
         for hash in checkpoint.dependency_pins() {
-            match self.load_cityos_payload(&hash) {
+            match self.verify_cityos_payload(&hash) {
                 Ok(_) => {}
                 Err(LibraryError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => missing.push(hash),
                 Err(e) => return Err(e),
@@ -115,15 +115,13 @@ impl Library {
     /// `save_checkpoint` instead so the pre-baseline document is also retained.
     pub fn save_file_with_history(&self, id: &str, document: &Document, history: &History) -> Result<()> {
         let _guard = crate::store::write_lock();
-        let mut checkpoint = self.load_checkpoint_locked(id)?;
+        let mut checkpoint = self.load_checkpoint_state_locked(id)?;
         if checkpoint.history.baseline_id() != history.baseline_id() {
             return Err(LibraryError::CheckpointConflict(id.into()));
         }
         checkpoint.document = document.clone();
         checkpoint.history = history.clone();
-        let payloads = checkpoint.dependency_pins().into_iter()
-            .map(|hash| self.load_cityos_payload(&hash).map(|bytes| (hash, bytes))).collect::<Result<_>>()?;
-        self.save_checkpoint_payloads_locked(id, &checkpoint, payloads)
+        self.save_checkpoint_payloads_locked(id, &checkpoint, BTreeMap::new())
     }
 
     /// Save, recover an error-after-journal, and read back without releasing the
@@ -133,9 +131,7 @@ impl Library {
     pub fn save_checkpoint_reconciled(&self, id: &str, candidate: &DocumentCheckpoint) -> Result<CheckpointSaveReceipt> {
         let _guard = crate::store::write_lock();
         let expected = DocumentCheckpoint::from_json(&candidate.to_json()?)?.to_json()?;
-        let payloads = candidate.dependency_pins().into_iter()
-            .map(|hash| self.load_cityos_payload(&hash).map(|bytes| (hash, bytes))).collect::<Result<_>>()?;
-        let outcome = self.save_checkpoint_payloads_locked(id, candidate, payloads);
+        let outcome = self.save_checkpoint_payloads_locked(id, candidate, BTreeMap::new());
         match self.load_checkpoint_locked(id) {
             Ok(checkpoint) if checkpoint.to_json()? == expected => Ok(CheckpointSaveReceipt {
                 checkpoint, recovered_after_error: outcome.is_err(),

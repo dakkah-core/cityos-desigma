@@ -117,6 +117,10 @@ struct PendingSave {
     checkpoint: Option<String>,
     #[serde(default)]
     payloads: BTreeMap<String, Vec<u8>>,
+    /// Durable CAS references plus any new objects carried by `payloads`.
+    /// Absent only in legacy journals that predate explicit reference closure.
+    #[serde(default)]
+    required_pins: Option<Vec<String>>,
 }
 
 /// Serialises manifest read-modify-write cycles within the process (the app saves
@@ -310,7 +314,7 @@ impl Library {
         let journal=self.project_dir(project).join(".save.pending.json");
         let text=match std::fs::read_to_string(&journal){Ok(t)=>t,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(e)=>return Err(e.into())};
         let pending:PendingSave=serde_json::from_str(&text)?;
-        if pending.schema_version.as_deref().is_some_and(|version| version != "desigma.file-save.v2") {
+        if pending.schema_version.as_deref().is_some_and(|version| !["desigma.file-save.v2", "desigma.file-save.v3"].contains(&version)) {
             return Err(LibraryError::Invalid("Unsupported pending save version".into()));
         }
         crate::validate_id(&pending.file_id)?;
@@ -331,19 +335,26 @@ impl Library {
                 return Err(LibraryError::Invalid("Pending checkpoint/document mismatch".into()));
             }
         }
-        let roots = checkpoint.as_ref().map(DocumentCheckpoint::dependency_pins)
-            .unwrap_or_else(|| document.cityos.as_ref().map(|b| b.dependency_pins.clone()).unwrap_or_default());
+        let roots: BTreeSet<_> = checkpoint.as_ref().map(DocumentCheckpoint::dependency_pins)
+            .unwrap_or_else(|| DocumentCheckpoint::new(document.clone(), desigma_doc::History::default()).dependency_pins()).into_iter().collect();
+        let required: BTreeSet<_> = pending.required_pins.as_ref().map(|pins| pins.iter().cloned().collect())
+            .unwrap_or_else(|| if checkpoint.is_some() { roots.clone() } else { pending.payloads.keys().cloned().collect() });
+        if (pending.schema_version.as_deref() == Some("desigma.file-save.v3") && pending.required_pins.is_none())
+            || !required.is_subset(&roots) || (checkpoint.is_some() && required != roots)
+        {
+            return Err(LibraryError::Invalid("Pending dependency reference closure mismatch".into()));
+        }
         // Validate the entire transaction before changing any target. Old journals
         // may refer to payloads already durable in the library.
         for (hash, bytes) in &pending.payloads {
-            if crate::payload_digest(bytes) != *hash || !roots.contains(hash) {
+            if crate::payload_digest(bytes) != *hash || !required.contains(hash) {
                 return Err(LibraryError::Invalid("Invalid pending dependency payload".into()));
             }
         }
-        for hash in &roots {
-            if checkpoint.is_some() && !pending.payloads.contains_key(hash) { self.load_cityos_payload(hash)?; }
+        for hash in &required {
+            if !pending.payloads.contains_key(hash) { self.verify_cityos_payload(hash)?; }
         }
-        for bytes in pending.payloads.values() { self.retain_cityos_payload(bytes)?; }
+        for (hash, bytes) in &pending.payloads { self.put_cityos_payload(hash, bytes)?; }
         save_fault("payloads")?;
         write_atomic(&self.file_path(project,&pending.file_id),pending.document.as_bytes())?;
         save_fault("document")?;
@@ -362,18 +373,9 @@ impl Library {
     }
 
     fn commit_document(&self,file_id:&str,doc:&Document,manifest:Manifest)->Result<()> {
-        let roots = doc.cityos.as_ref().map(|b| b.dependency_pins.clone()).unwrap_or_default();
         // Legacy native saves preserve unresolved pins (including remote-only
         // drafts). Complete checkpoints/export deliberately require their bytes.
-        let mut payloads = BTreeMap::new();
-        for hash in roots {
-            match self.load_cityos_payload(&hash) {
-                Ok(bytes) => { payloads.insert(hash, bytes); }
-                Err(crate::LibraryError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        }
-        self.commit_document_state(file_id, doc, None, payloads, manifest)
+        self.commit_document_state(file_id, doc, None, BTreeMap::new(), manifest)
     }
 
     fn commit_document_state(&self, file_id: &str, doc: &Document, checkpoint: Option<String>, payloads: BTreeMap<String, Vec<u8>>, manifest: Manifest) -> Result<()> {
@@ -388,7 +390,31 @@ impl Library {
         }
         let document = doc.to_json()?;
         Document::from_json(&document)?;
-        let pending=PendingSave{schema_version:Some("desigma.file-save.v2".into()),file_id:file_id.into(),document,manifest,checkpoint,payloads};
+        let state = checkpoint.as_deref().map(DocumentCheckpoint::from_json).transpose()?;
+        let roots: BTreeSet<_> = state.as_ref().map(DocumentCheckpoint::dependency_pins)
+            .unwrap_or_else(|| DocumentCheckpoint::new(doc.clone(), desigma_doc::History::default()).dependency_pins()).into_iter().collect();
+        if payloads.iter().any(|(hash, bytes)| !roots.contains(hash) || crate::payload_digest(bytes) != *hash) {
+            return Err(LibraryError::Invalid("Checkpoint dependency closure mismatch".into()));
+        }
+        let mut supplied = payloads;
+        let mut payloads = BTreeMap::new();
+        let mut required_pins = Vec::new();
+        for hash in roots {
+            match self.verify_cityos_payload(&hash) {
+                Ok(()) => { required_pins.push(hash); }
+                Err(LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(bytes) = supplied.remove(&hash) {
+                        payloads.insert(hash.clone(), bytes);
+                        required_pins.push(hash);
+                    } else if state.is_some() {
+                        return Err(error.into());
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        drop(supplied);
+        let pending=PendingSave{schema_version:Some("desigma.file-save.v3".into()),file_id:file_id.into(),document,manifest,checkpoint,payloads,required_pins:Some(required_pins)};
         save_fault("before-journal")?;
         write_atomic(&self.project_dir(&project).join(".save.pending.json"),serde_json::to_string(&pending)?.as_bytes())?;
         save_fault("journal")?;
@@ -396,13 +422,12 @@ impl Library {
     }
 
     /// Saves the complete native document, undo/redo, inactive baseline histories,
-    /// dependency bytes and project manifest under one replayable durable intent.
+    /// dependency closure and project manifest under one replayable durable intent.
+    /// Existing verified CAS objects are references; only missing objects carry bytes.
     /// On an I/O error after intent creation, reopen/reload to reconcile before
     /// deciding whether the old or new candidate is current. No owner action occurs.
     pub fn save_checkpoint(&self, id: &str, checkpoint: &DocumentCheckpoint) -> Result<()> {
-        let payloads = checkpoint.dependency_pins().into_iter()
-            .map(|hash| self.load_cityos_payload(&hash).map(|bytes| (hash, bytes))).collect::<Result<_>>()?;
-        self.save_checkpoint_payloads(id, checkpoint, payloads)
+        self.save_checkpoint_payloads(id, checkpoint, BTreeMap::new())
     }
 
     pub(crate) fn save_checkpoint_payloads(&self, id: &str, checkpoint: &DocumentCheckpoint, payloads: BTreeMap<String, Vec<u8>>) -> Result<()> {
@@ -415,7 +440,7 @@ impl Library {
         let checkpoint_json = checkpoint.to_json()?;
         DocumentCheckpoint::from_json(&checkpoint_json)?;
         let roots: BTreeSet<_> = checkpoint.dependency_pins().into_iter().collect();
-        if roots != payloads.keys().cloned().collect() || payloads.iter().any(|(hash, bytes)| crate::payload_digest(bytes) != *hash) {
+        if payloads.iter().any(|(hash, bytes)| !roots.contains(hash) || crate::payload_digest(bytes) != *hash) {
             return Err(LibraryError::Invalid("Checkpoint dependency closure mismatch".into()));
         }
         self.check_checkpoint_lineage_locked(id, checkpoint)?;
@@ -589,9 +614,7 @@ impl Library {
     pub fn create_file_checkpoint(&self, project: &str, folder: Option<&str>, name: &str, checkpoint: &DocumentCheckpoint) -> Result<FileEntry> {
         let text = checkpoint.to_json()?;
         DocumentCheckpoint::from_json(&text)?;
-        let payloads = checkpoint.dependency_pins().into_iter()
-            .map(|hash| self.load_cityos_payload(&hash).map(|bytes| (hash, bytes))).collect::<Result<_>>()?;
-        self.create_file_state(project, folder, name, &checkpoint.document, Some((text, payloads)))
+        self.create_file_state(project, folder, name, &checkpoint.document, Some((text, BTreeMap::new())))
     }
 
     fn create_file_state(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>) -> Result<FileEntry> {
@@ -982,6 +1005,127 @@ mod tests {
         d
     }
 
+    fn cas_checkpoint(pins: Vec<String>) -> DocumentCheckpoint {
+        let mut document = doc("CAS checkpoint", 1);
+        document.cityos = Some(desigma_doc::CityosBinding {
+            schema_version: "cityos.design-exchange.v1".into(), document_id: "d".into(), draft_id: "draft".into(),
+            base: desigma_doc::CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
+            semantic_base: serde_json::json!({}), dependency_pins: pins, occurrences: BTreeMap::new(), exchange_v2: None, exchange_v3: None,
+        });
+        DocumentCheckpoint::new(document, desigma_doc::History::default())
+    }
+
+    fn backdate_cas(library: &Library, hash: &str) -> SystemTime {
+        let path = library.path("cityos/payloads").join(hash);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH + std::time::Duration::from_secs(946_684_800))).unwrap();
+        drop(file);
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    #[test]
+    fn cas_checkpoint_refs_preserve_payload_mtime_on_put_autosave_and_restart() {
+        let (temp, library) = Tmp::new();
+        let project = library.create_project("P").unwrap();
+        let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
+        let bytes = b"already durable immutable payload";
+        let hash = library.retain_cityos_payload(bytes).unwrap();
+        let path = library.path("cityos/payloads").join(&hash);
+        let modified = backdate_cas(&library, &hash);
+        let mut checkpoint = cas_checkpoint(vec![hash.clone()]);
+        for i in 0..3 {
+            library.put_cityos_payload(&hash, bytes).unwrap();
+            checkpoint.document.name = format!("save {i}");
+            library.save_checkpoint(&file.id, &checkpoint).unwrap();
+            library.save_file_with_history(&file.id, &checkpoint.document, &checkpoint.history).unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        }
+        SAVE_FAULT.with(|fault| fault.set(Some("journal")));
+        assert!(library.save_checkpoint(&file.id, &checkpoint).is_err());
+        let journal = library.project_dir(&project.id).join(".save.pending.json");
+        let pending: PendingSave = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        assert_eq!(pending.schema_version.as_deref(), Some("desigma.file-save.v3"));
+        assert!(pending.payloads.is_empty(), "existing immutable bytes must not be copied into autosave journals");
+        assert_eq!(pending.required_pins, Some(vec![hash.clone()]));
+        drop(library);
+        let reopened = Library::open(&temp.0).unwrap();
+        assert_eq!(reopened.load_checkpoint(&file.id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
+        assert_eq!(reopened.load_cityos_payload(&hash).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), modified);
+        assert!(!journal.exists());
+    }
+
+    #[test]
+    fn cas_import_journals_only_missing_bytes_and_replay_preserves_materialized_objects() {
+        for phase in ["journal", "payloads", "document"] {
+            let (temp, library) = Tmp::new();
+            let project = library.create_project("P").unwrap();
+            let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
+            let existing = b"existing dependency";
+            let incoming = b"new imported dependency";
+            let first = library.retain_cityos_payload(existing).unwrap();
+            let second = crate::payload_digest(incoming);
+            let first_modified = backdate_cas(&library, &first);
+            let checkpoint = cas_checkpoint(vec![first.clone(), second.clone()]);
+            let portable = serde_json::json!({
+                "schemaVersion":"desigma.portable-checkpoint.v1", "checkpoint":checkpoint.to_json().unwrap(),
+                "payloads":BTreeMap::from([(first.clone(), existing.to_vec()), (second.clone(), incoming.to_vec())])
+            });
+            SAVE_FAULT.with(|fault| fault.set(Some(phase)));
+            assert!(library.import_checkpoint(&file.id, &portable.to_string()).is_err());
+            let journal = library.project_dir(&project.id).join(".save.pending.json");
+            let pending: PendingSave = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(pending.payloads, BTreeMap::from([(second.clone(), incoming.to_vec())]));
+            assert_eq!(pending.required_pins.unwrap().into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([first.clone(), second.clone()]));
+            let second_modified = (phase != "journal").then(|| backdate_cas(&library, &second));
+            drop(library);
+            let reopened = Library::open(&temp.0).unwrap();
+            assert_eq!(reopened.load_checkpoint(&file.id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
+            assert_eq!(reopened.load_cityos_payload(&second).unwrap(), incoming);
+            assert_eq!(std::fs::metadata(reopened.path("cityos/payloads").join(&first)).unwrap().modified().unwrap(), first_modified);
+            if let Some(modified) = second_modified {
+                assert_eq!(std::fs::metadata(reopened.path("cityos/payloads").join(&second)).unwrap().modified().unwrap(), modified,
+                    "replay must not rewrite an imported object already materialized before the interruption");
+            }
+            assert!(!journal.exists());
+        }
+    }
+
+    #[test]
+    fn cas_required_refs_fail_closed_before_recovery_writes_when_missing_corrupt_or_omitted() {
+        for fault in ["missing", "corrupt", "omitted"] {
+            let (_temp, library) = Tmp::new();
+            let project = library.create_project("P").unwrap();
+            let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
+            let bytes = b"durable reference";
+            let hash = library.retain_cityos_payload(bytes).unwrap();
+            let checkpoint = cas_checkpoint(vec![hash.clone()]);
+            let document_path = library.file_path(&project.id, &file.id);
+            let old_document = std::fs::read(&document_path).unwrap();
+            SAVE_FAULT.with(|point| point.set(Some("journal")));
+            assert!(library.save_checkpoint(&file.id, &checkpoint).is_err());
+            let journal = library.project_dir(&project.id).join(".save.pending.json");
+            let original_journal = std::fs::read(&journal).unwrap();
+            let payload_path = library.path("cityos/payloads").join(&hash);
+            match fault {
+                "missing" => std::fs::remove_file(&payload_path).unwrap(),
+                "corrupt" => std::fs::write(&payload_path, b"corrupt bytes").unwrap(),
+                _ => {
+                    let mut pending: PendingSave = serde_json::from_slice(&original_journal).unwrap();
+                    pending.required_pins = Some(vec![]);
+                    std::fs::write(&journal, serde_json::to_vec(&pending).unwrap()).unwrap();
+                }
+            }
+            assert!(Library::open(library.root()).is_err(), "{fault}");
+            assert_eq!(std::fs::read(&document_path).unwrap(), old_document, "{fault}");
+            assert!(journal.exists());
+            library.put_cityos_payload(&hash, bytes).unwrap();
+            std::fs::write(&journal, original_journal).unwrap();
+            let reopened = Library::open(library.root()).unwrap();
+            assert_eq!(reopened.load_checkpoint(&file.id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
+        }
+    }
+
     #[test]
     fn project_crud_and_trash() {
         let (_t, lib) = Tmp::new();
@@ -1113,7 +1257,7 @@ mod tests {
     #[test]
     fn interrupted_document_manifest_commit_recovers_on_reopen(){
         let (_t,lib)=Tmp::new();let project=lib.create_project("P").unwrap();let file=lib.create_file(&project.id,None,"File",&doc("before",1)).unwrap();
-        let mut manifest=lib.load_manifest(&project.id).unwrap();manifest.files[0].modified=now_ms();let pending=PendingSave{schema_version:None,file_id:file.id.clone(),document:doc("accepted-new",2).to_json().unwrap(),manifest,checkpoint:None,payloads:BTreeMap::new()};
+        let mut manifest=lib.load_manifest(&project.id).unwrap();manifest.files[0].modified=now_ms();let pending=PendingSave{schema_version:None,file_id:file.id.clone(),document:doc("accepted-new",2).to_json().unwrap(),manifest,checkpoint:None,payloads:BTreeMap::new(),required_pins:None};
         write_atomic(&lib.project_dir(&project.id).join(".save.pending.json"),serde_json::to_string(&pending).unwrap().as_bytes()).unwrap();
         let reopened=Library::open(lib.root()).unwrap();assert_eq!(reopened.load_file(&file.id).unwrap().name,"accepted-new");assert!(!lib.project_dir(&project.id).join(".save.pending.json").exists());
     }
@@ -1328,6 +1472,7 @@ mod tests {
             if fault == "manifest" { manifest.files[0].project = "another-project".into(); }
             let pending = PendingSave {
                 schema_version: Some(if fault == "future" { "future".into() } else { "desigma.file-save.v2".into() }),
+                required_pins: None,
                 file_id: if fault == "identity" { "..".into() } else { file.id.clone() },
                 document: doc("new", 2).to_json().unwrap(), manifest,
                 checkpoint: (fault == "checkpoint").then(|| DocumentCheckpoint::new(doc("wrong", 1), desigma_doc::History::default()).to_json().unwrap()),

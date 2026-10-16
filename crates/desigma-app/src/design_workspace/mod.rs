@@ -14,7 +14,7 @@ struct DraftTab {
     document:Document,history:desigma_doc::History,path:Option<std::path::PathBuf>,file:Option<crate::home::LibFile>,
     autosave:crate::home::Autosave,page:desigma_doc::NodeId,resource:Option<Value>,locale:String,theme:String,theme_id:String,interactive:bool,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum DependencyAction { Open, Resume, Reconcile }
 
 pub struct Workspace {
@@ -67,6 +67,7 @@ pub struct Workspace {
     recovery_pending: bool,
     interactive: bool,
     property_text: BTreeMap<String,String>,
+    resume_document: Option<Document>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -120,6 +121,7 @@ impl Default for Workspace {
             recovery_pending: false,
             interactive: false,
             property_text: BTreeMap::new(),
+            resume_document: None,
         }
     }
 }
@@ -259,6 +261,7 @@ impl Workspace {
         self.begin_request(config,source,preview_only,None);
     }
     fn begin_request(&mut self, config: Config, source: Option<String>, preview_only: bool,pin:Option<Value>) {
+        self.resume_document=None;
         self.property_text.clear();
         self.interactive=false;
         self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
@@ -418,6 +421,7 @@ impl Workspace {
         self.send(json!({"op":"Harness"}));
     }
     pub fn resume(&mut self, config: Config, app: &App) {
+        self.resume_document=None;
         self.property_text.clear();
         self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
         self.leave_to_library = true;
@@ -454,7 +458,12 @@ impl Workspace {
     pub fn library_requested(&self) -> bool { self.leave_to_library }
     fn require_dependencies(&mut self, app: &App, document: &Document, action: DependencyAction) -> bool {
         let Some(library) = &app.lib else { self.error=Some("The dependency library is unavailable; this draft remains read-only".into()); return false; };
-        if dependencies::complete(library, document) { return true; }
+        if dependencies::complete(library, document) {
+            if action==DependencyAction::Resume {if let Some(file)=&app.lib_file {if let Err(error)=library.load_checkpoint(&file.id){
+                self.error=Some(format!("Retained history dependencies are unavailable; restore a portable checkpoint before editing: {error}"));return false;
+            }}}
+            return true;
+        }
         let Some(draft) = draft(document).cloned() else { self.error=Some("Missing bound draft".into()); return false; };
         self.dependency_action=Some(action); self.dependency_draft=Some(draft.clone());
         self.send(json!({"op":"Dependencies","draft":draft}));
@@ -640,12 +649,11 @@ impl Workspace {
                                         Err(e) => self.error = Some(e.to_string()),
                                     }
                                 } else {
+                                    if !self.require_dependencies(app, &document, DependencyAction::Resume) {
+                                        self.resume_document=Some(document);self.validated=false;return;
+                                    }
                                     app.doc = document;
                                     app.changed();
-                                }
-                                if op == "Project" && !self.require_dependencies(app, &app.doc, DependencyAction::Resume) {
-                                    self.validated=false;
-                                    return;
                                 }
                                 self.validated = true;
                                 self.observed = None;
@@ -680,12 +688,20 @@ impl Workspace {
                                     self.dependency_draft=None;
                                     match self.dependency_action.take() {
                                         Some(DependencyAction::Open) => self.install_staged(app),
-                                        Some(DependencyAction::Resume) => { self.validated=true; self.observed=None; self.pending=Some(Instant::now()); },
+                                        Some(DependencyAction::Resume) => {
+                                            let history=app.lib.as_ref().zip(app.lib_file.as_ref()).map(|(lib,file)|lib.load_checkpoint(&file.id));
+                                            if let Some(Err(error))=history {self.validated=false;self.error=Some(format!("Retained history dependencies are unavailable. Restore a portable checkpoint before editing: {error}"));}
+                                            else {
+                                                if let Some(document)=self.resume_document.take(){app.doc=document;app.changed();}
+                                                self.validated=true; self.observed=None; self.pending=Some(Instant::now());
+                                            }
+                                        },
                                         Some(DependencyAction::Reconcile) => if let Some(bundle)=self.reconciliation_bundle.take() { self.install_reconciliation(app,bundle); },
                                         None => {},
                                     }
                                 }
                             }
+                            if let Some(lease)=value["leaseId"].as_str() { self.send(json!({"op":"ReleaseDependencies","leaseId":lease})); }
                         },
                         "Reconcile" => self.install_reconciliation(app, value),
                         _ => {}
@@ -948,6 +964,7 @@ impl Workspace {
             egui::CentralPanel::default().show(ui,|ui|{
                 ui.heading("Changes");ui.label("Review incoming source changes before updating this draft's pinned baseline.");
                 if let Some(error)=&self.error{ui.colored_label(ui.visuals().error_fg_color,error);}
+                if self.recovery_pending && ui.button("Recover document generation").clicked(){self.recover_reconciliation(app);}
                 ui.horizontal_wrapped(|ui|{
                     if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Review incoming changes")).clicked(){if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Incoming","draft":draft}));}}
                     if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Compare local edits")).clicked(){if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Export","draft":draft}));}}
