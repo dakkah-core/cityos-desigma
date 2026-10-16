@@ -2151,6 +2151,48 @@ mod tests {
         assert_eq!(app.doc.to_json().unwrap(),before);assert!(workspace.busy.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
+    fn specimen_projection(workspace: &Workspace) -> Value {
+        let mut receipt=specimen_receipt(workspace);
+        receipt["state"]=json!("projected");receipt["locale"]=json!(workspace.locale);
+        receipt["projection"]=json!({"schemaVersion":"cityos.desigma-canvas.v1","draftId":receipt["draftId"],"draftRevision":0,
+            "semanticDigest":receipt["semanticDigest"],"nodes":[{"id":"fixture-occurrence","sourceNodeId":"specimen-root","definitionId":"fixture.component",
+                "parent":null,"slot":null,"x":0,"y":0,"width":360,"height":180,"label":"Declared registered default","fill":"#ffffff","protected":true}]});
+        receipt
+    }
+    #[test]
+    fn explicit_registered_local_copy_has_native_objects_and_no_canonical_or_submission_binding() {
+        let(root,mut app,record)=submitted_fixture();let library=app.lib.as_ref().unwrap().clone();
+        let file=app.lib_file.as_ref().unwrap().id.clone();let saved=library.load_checkpoint(&file).unwrap().to_json().unwrap();
+        let count=library.all_files().len();let mut workspace=specimen_workspace();
+        workspace.local_specimen_request=workspace.captured_specimen_request();
+        let receipt=specimen_projection(&workspace);let document=workspace.local_specimen_document(receipt).unwrap();
+        assert!(document.cityos.is_none());assert!(document.nodes.values().all(|node|!node.locked&&node.source_id.is_none()));
+        assert!(document.nodes.values().any(|node|node.name=="Declared registered default"));
+        assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(),saved,"projection alone never persists a document");
+        workspace.open_local_document(&mut app,document);
+        assert!(!workspace.open);assert!(app.doc.cityos.is_none());assert!(app.lib_file.is_none());
+        assert_eq!(library.all_files().len(),count);assert_eq!(library.load_submission(&record.command.operation_id).unwrap(),record);
+        crate::home::thumb::finish_library_jobs(&root);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn local_copy_rejects_substituted_or_stale_registered_projections_before_touching_the_document() {
+        for variant in ["selection","commit","locale","digest","authority","parent","extent"] {
+            let mut workspace=specimen_workspace();workspace.local_specimen_request=workspace.captured_specimen_request();
+            let mut receipt=specimen_projection(&workspace);
+            match variant {
+                "selection"=>receipt["resource"]["componentId"]=json!("other"),
+                "commit"=>receipt["provenance"]["sourceCommit"]=json!("d".repeat(40)),
+                "locale"=>receipt["locale"]=json!("en"),
+                "digest"=>receipt["projection"]["semanticDigest"]=json!("d".repeat(64)),
+                "authority"=>receipt["ownerWrites"]=json!(true),
+                "parent"=>receipt["projection"]["nodes"][0]["parent"]=json!("missing"),
+                "extent"=>receipt["projection"]["nodes"][0]["width"]=json!(-1),
+                _=>unreachable!(),
+            }
+            assert!(workspace.local_specimen_document(receipt).is_err(),"{variant}");
+            assert!(workspace.preview_only);assert!(workspace.staged.is_none());assert!(workspace.tabs.is_empty());
+        }
+    }
     #[test]
     fn reviewed_baseline_is_durable_before_display_and_previous_undo_is_retained_inactively() {
         let root=std::env::temp_dir().join(format!("desigma-incoming-{}",uuid::Uuid::new_v4()));
