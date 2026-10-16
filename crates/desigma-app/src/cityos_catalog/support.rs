@@ -23,6 +23,10 @@ fn hex(value: &Value, length: usize) -> bool {
 
 fn profile_matches(profile: &Value, entry: &Entry, specimen: Option<&Value>) -> bool {
     if entry.kind == "nonvisual-dependency" { return false; }
+    // A bundled fixture never silently represents different committed bytes.
+    if profile["kind"] == "registered-specimen" && (!hex(&profile["sourceDigest"],64)
+        || profile["sourceDigest"] != profile["implementationDigest"]
+        || (profile["sourcePath"] == entry.source_path && profile["sourceDigest"] != entry.source_digest)) { return false; }
     let Some(source) = profile["sourcePath"].as_str() else { return false; };
     let data = specimen.map(|s| &s["data"]);
     if let Some(export) = profile["publicExport"].as_str() {
@@ -90,7 +94,8 @@ pub(super) fn actions(entry: &Entry, specimen: Option<&Value>, summary: Option<&
     };
     let inline_pin = profile.filter(|p| actual_preview && mode == "committed" && snapshot["mode"] == "committed"
         && hex(&p["sourceDigest"], 64) && hex(&snapshot["canonicalCommit"], 40))
-        .map(|p| json!({"sourcePath":p["sourcePath"],"sourceDigest":p["sourceDigest"],"commit":snapshot["canonicalCommit"]}));
+        .map(|p| if p["kind"] == "registered-specimen" { p.clone() }
+            else { json!({"sourcePath":p["sourcePath"],"sourceDigest":p["sourceDigest"],"commit":snapshot["canonicalCommit"]}) });
     Actions { source, actual_preview, editable, preview_reason, edit_reason, copy_reason, theme_reason, inline_pin }
 }
 

@@ -24,13 +24,21 @@ pub struct Bridge {
 impl Drop for Bridge {fn drop(&mut self){self.cancel.store(true,Ordering::Release);}}
 struct Client {
     child: Child,
-    input: ChildStdin,
+    input: Option<ChildStdin>,
     output: Receiver<Result<Value, String>>,
     session: String,
     sequence: u64,
 }
 impl Drop for Client {
     fn drop(&mut self) {
+        // EOF lets a healthy helper release its transfer leases and loopback
+        // server. Cancellation still terminates a wedged helper within bounds.
+        self.input.take();
+        let start=Instant::now();
+        while start.elapsed()<Duration::from_millis(1500) {
+            if self.child.try_wait().ok().flatten().is_some(){return;}
+            std::thread::sleep(Duration::from_millis(25));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -105,7 +113,7 @@ impl Client {
                 }
             }
         });
-        let mut client = Self { child, input, output, session: uuid::Uuid::new_v4().to_string(), sequence: 0 };
+        let mut client = Self { child, input:Some(input), output, session: uuid::Uuid::new_v4().to_string(), sequence: 0 };
         compatible(&client.request(json!({"op":"Hello"}),cancel)?)?;
         Ok(client)
     }
@@ -121,7 +129,8 @@ impl Client {
         if bytes.len() > MAX_FRAME {
             return Err("Exchange request exceeds 4 MiB".into());
         }
-        self.input.write_all(&bytes).and_then(|_| self.input.write_all(b"\n")).and_then(|_| self.input.flush()).map_err(|e| e.to_string())?;
+        let input=self.input.as_mut().ok_or("Exchange helper input is closed")?;
+        input.write_all(&bytes).and_then(|_| input.write_all(b"\n")).and_then(|_| input.flush()).map_err(|e| e.to_string())?;
         let started=Instant::now();
         let response=loop {
             if cancel.load(Ordering::Acquire){return Err("Obsolete workspace request cancelled".into());}

@@ -17,6 +17,34 @@ struct DraftTab {
 #[derive(Clone, Copy, PartialEq)]
 enum DependencyAction { Open, Resume, Reconcile }
 
+const SPECIMEN_CANVAS_REASON: &str = "Temporary registered defaults have no canonical document binding. Open on canvas and changes are unavailable.";
+
+#[derive(Clone)]
+struct SpecimenRequest {
+    locator: Value,
+    scenario: Value,
+    generation: u64,
+}
+impl SpecimenRequest {
+    fn job(&self) -> Value {
+        json!({"op":"FixturePreview","fixture":self.locator,"scenario":self.scenario})
+    }
+}
+
+fn specimen_locator(resource: &Value) -> Option<Value> {
+    if resource["kind"] != "registered-specimen" || resource["actualWebPreview"] != true
+        || resource["editable"] != false || resource["provenance"]["canonicalResource"] != false {
+        return None;
+    }
+    let mut locator = serde_json::Map::new();
+    for key in ["componentId", "componentVersion", "profileRef", "targetProfileRef"] {
+        let value = resource[key].as_str().filter(|s| !s.is_empty())?;
+        locator.insert(key.into(), json!(value));
+    }
+    resource["fixture"].as_str().filter(|s| !s.is_empty())?;
+    Some(Value::Object(locator))
+}
+
 pub struct Workspace {
     pub open: bool,
     config: Option<Config>,
@@ -68,6 +96,8 @@ pub struct Workspace {
     interactive: bool,
     property_text: BTreeMap<String,String>,
     resume_document: Option<Document>,
+    specimen_request: Option<SpecimenRequest>,
+    preview_generation: u64,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -122,6 +152,8 @@ impl Default for Workspace {
             interactive: false,
             property_text: BTreeMap::new(),
             resume_document: None,
+            specimen_request: None,
+            preview_generation: 0,
         }
     }
 }
@@ -253,7 +285,7 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
 }
 impl Workspace {
     pub fn set_preview_theme(&mut self, id: String) {
-        self.theme_id = id;
+        self.theme_id = if self.is_specimen() { String::new() } else { id };
         self.current = false;
         self.pending = Some(Instant::now());
     }
@@ -261,6 +293,7 @@ impl Workspace {
         self.begin_request(config,source,preview_only,None);
     }
     fn begin_request(&mut self, config: Config, source: Option<String>, preview_only: bool,pin:Option<Value>) {
+        self.invalidate_specimen_request();
         self.resume_document=None;
         self.property_text.clear();
         self.interactive=false;
@@ -294,10 +327,43 @@ impl Workspace {
         self.render_started = None;
         self.compare = None;
         self.compare_open = false;
-        if let Some(pin)=pin {self.requested_source=None;self.send(json!({"op":"Open","resource":pin}));}
+        if let Some(pin)=pin {
+            self.requested_source=None;
+            if pin["kind"] == "registered-specimen" { self.open_resource(pin); }
+            else { self.send(json!({"op":"Open","resource":pin})); }
+        }
         else{self.send(json!({"op":"Resources"}));}
     }
     fn open_resource(&mut self, resource: Value) {
+        if self.busy.is_some() { return; }
+        self.prepare_resource(resource.clone());
+        if self.is_specimen() {
+            self.open_after_preview = false;
+            self.theme_id.clear();
+            self.themes_loaded = true;
+            self.validated = specimen_locator(&resource).is_some();
+            if self.validated { self.request_specimen_preview(); }
+            else { self.error = Some("Registered specimen locator unavailable; no substitute was opened".into()); }
+        } else {
+            self.send(json!({"op":"Open","resource":resource}));
+        }
+    }
+    fn invalidate_specimen_request(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.specimen_request = None;
+    }
+    fn is_specimen(&self) -> bool {
+        self.resource.as_ref().is_some_and(|r| r["kind"] == "registered-specimen")
+    }
+    fn prepare_resource(&mut self, resource: Value) {
+        self.invalidate_specimen_request();
+        self.harness = false;
+        self.error = None;
+        self.property_text.clear();
+        self.dependency_action = None;
+        self.dependency_draft = None;
+        self.reconciliation_bundle = None;
+        self.resume_document = None;
         self.changes_mode=false;self.incoming=None;
         self.host.reset();
         self.preview_only = true;
@@ -314,13 +380,13 @@ impl Workspace {
         self.resource = Some(resource.clone());
         self.themes.clear();
         self.themes_loaded = false;
-        self.send(json!({"op":"Open","resource":resource}));
     }
     pub fn show_inline(&mut self,app:&mut App,frame:&eframe::Frame,config:Config,pin:Value,rect:egui::Rect,scale:f32,ctx:&egui::Context)->String {
         let key=serde_json::to_string(&pin).unwrap_or_default();
         if self.inline_identity.as_deref()!=Some(&key){
-            let Some(source)=pin["sourcePath"].as_str() else{return "Preview source unavailable".into();};
-            self.begin_request(config,Some(source.into()),true,Some(pin));self.open=false;self.inline_identity=Some(key);
+            let source=pin["sourcePath"].as_str().map(str::to_owned);
+            if source.is_none() && pin["kind"] != "registered-specimen" { return "Preview source unavailable".into(); }
+            self.begin_request(config,source,true,Some(pin));self.open=false;self.inline_identity=Some(key);
         }
         self.poll(app);
         if let Some(error)=&self.error{self.host.hide();return error.clone();}
@@ -371,6 +437,7 @@ impl Workspace {
         if let Some(config)=self.config.clone(){self.resume(config,app);}
     }
     fn install_staged(&mut self, app: &mut App) {
+        if self.is_specimen() { self.error = Some(SPECIMEN_CANVAS_REASON.into()); return; }
         if self.staged.is_none() {
             return;
         }
@@ -395,6 +462,7 @@ impl Workspace {
         if let Err(error)=Self::save_before_switch(app) { self.error=Some(error); }
     }
     fn create_local_copy(&mut self, app: &mut App) {
+        if self.is_specimen() { self.error = Some(SPECIMEN_CANVAS_REASON.into()); return; }
         let source = if self.preview_only { self.staged.as_ref() } else { Some(&app.doc) };
         let Some(document) = source.map(local_copy) else { return; };
         if let Err(error) = self.suspend_current(app) { self.error = Some(error); return; }
@@ -407,6 +475,8 @@ impl Workspace {
         app.show_toast("Local Desigma copy · no CityOS submission binding", false);
     }
     pub fn begin_harness(&mut self, config: Config) {
+        self.invalidate_specimen_request();
+        self.resource = None;
         self.host.reset();
         self.bridge = Some(bridge::Bridge::spawn(config.clone()));
         self.config = Some(config);
@@ -421,6 +491,7 @@ impl Workspace {
         self.send(json!({"op":"Harness"}));
     }
     pub fn resume(&mut self, config: Config, app: &App) {
+        self.invalidate_specimen_request();
         self.resume_document=None;
         self.property_text.clear();
         self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
@@ -551,6 +622,10 @@ impl Workspace {
         if self.busy.is_some() {
             return;
         }
+        if self.is_specimen() && !matches!(value["op"].as_str(), Some("FixturePreview" | "Resources")) {
+            self.error = Some(SPECIMEN_CANVAS_REASON.into());
+            return;
+        }
         if self.bridge.is_none() {
             if let Some(config) = &self.config {
                 self.bridge = Some(bridge::Bridge::spawn(config.clone()));
@@ -567,6 +642,7 @@ impl Workspace {
         }
     }
     fn active_draft(&self, app: &App) -> Option<Value> {
+        if self.is_specimen() { return None; }
         if self.preview_only {
             self.staged.as_ref().and_then(draft).cloned()
         } else {
@@ -574,9 +650,67 @@ impl Workspace {
         }
     }
     fn request_preview(&mut self, app: &App) {
+        if self.is_specimen() { self.request_specimen_preview(); return; }
         if let Some(draft) = self.active_draft(app) {
             self.current = false;
             self.send(json!({"op":"Preview","draft":draft,"scenario":self.scenario()}));
+        }
+    }
+    fn captured_specimen_request(&self) -> Option<SpecimenRequest> {
+        Some(SpecimenRequest { locator: specimen_locator(self.resource.as_ref()?)?,
+            scenario: self.scenario(), generation: self.preview_generation })
+    }
+    fn request_specimen_preview(&mut self) {
+        if self.busy.is_some() { self.current = false; self.pending = Some(Instant::now()); return; }
+        self.invalidate_specimen_request();
+        let Some(request) = self.captured_specimen_request() else { return; };
+        self.current = false;
+        self.preview = None;
+        self.host.hide();
+        self.render_started = None;
+        self.pending = None;
+        self.send(request.job());
+        self.specimen_request = (self.busy.as_deref() == Some("FixturePreview")).then_some(request);
+    }
+    fn accept_specimen_preview(&mut self, value: Value, operation: &str) -> bool {
+        // The bridge checks the outer session/request envelope before returning.
+        // Capture selection and scenario independently so even a correctly routed
+        // reply cannot substitute another resource or an obsolete presentation.
+        if operation != "FixturePreview" || self.busy.is_some() { return false; }
+        let Some(request) = self.specimen_request.take() else { return false; };
+        let Some(selected) = self.resource.as_ref() else { return false; };
+        let resource = &value["resource"];
+        let identity = ["sessionId", "requestId", "semanticDigest"].iter()
+            .all(|key| value[*key].as_str().is_some_and(|s| !s.is_empty()));
+        let matches = self.preview_only && self.is_specimen() && self.staged.is_none() && self.temporary_canvas.is_none()
+            && request.generation == self.preview_generation && request.scenario == self.scenario()
+            && specimen_locator(selected).as_ref() == Some(&request.locator)
+            && specimen_locator(resource).as_ref() == Some(&request.locator)
+            && resource["fixture"] == selected["fixture"] && value["scenario"] == request.scenario
+            && value["canonicalResource"] == false && value["ownerWrites"] == false && value.get("draft").is_none()
+            && value["provenance"]["canonicalResource"] == false && value["provenance"]["temporary"] == true
+            && value["provenance"]["locale"] == self.locale && resource["provenance"] == value["provenance"]
+            && value["provenance"]["sourceCommit"] == selected["provenance"]["sourceCommit"]
+            && resource["resourceId"].as_str().is_some_and(|id| value["draftId"] == format!("registered-fixture:{id}"))
+            && value["draftRevision"] == 0 && value["state"] == "prepared" && identity;
+        if !matches { return false; }
+        self.preview = Some(value);
+        self.validated = true;
+        self.current = false;
+        self.render_started = Some(Instant::now());
+        true
+    }
+    fn matches_preview_event(&self, app: &App, event: &Value) -> bool {
+        let receipt_matches = self.preview.as_ref().is_some_and(|p| {
+            ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"].iter().all(|key| p[*key] == event[*key])
+        }) && event["scenario"] == self.scenario();
+        if self.is_specimen() {
+            receipt_matches && self.preview_only && self.specimen_request.is_none() && self.busy.as_deref() != Some("FixturePreview")
+                && self.preview.as_ref().is_some_and(|p| p["canonicalResource"] == false
+                    && specimen_locator(&p["resource"]) == self.resource.as_ref().and_then(specimen_locator))
+        } else {
+            receipt_matches && self.active_draft(app).is_some_and(|d| d["draftId"] == event["draftId"]
+                && d["draftRevision"] == event["draftRevision"] && d["semanticDigest"] == event["semanticDigest"])
         }
     }
     fn scenario(&self) -> Value {
@@ -590,6 +724,7 @@ impl Workspace {
             let op = self.busy.take().unwrap_or_default();
             match result {
                 Err(error) => {
+                    if op == "FixturePreview" { self.specimen_request = None; }
                     if op == "Themes" {
                         self.themes_loaded = true;
                     }
@@ -600,7 +735,7 @@ impl Workspace {
                     self.error = None;
                     match op.as_str() {
                         "Resources" => {
-                            self.resources = value["resources"].as_array().cloned().unwrap_or_default();
+                            self.capture_resources(&value);
                             self.resource_diagnostics = value["diagnostics"].as_array().cloned().unwrap_or_default();
                             if let Some(source) = self.requested_source.take() {
                                 if let Some(resource) = self.resources.iter().find(|r| r["sourcePath"] == source && r["openAvailable"]!=false).cloned() {
@@ -673,6 +808,13 @@ impl Workspace {
                                 self.render_started = Some(Instant::now());
                             }
                         }
+                        "FixturePreview" => {
+                            if !self.accept_specimen_preview(value, &op) {
+                                self.current = false;
+                                self.pending = Some(Instant::now());
+                                self.error = Some("Obsolete or mismatched registered specimen preview discarded".into());
+                            }
+                        }
                         "Export" => {
                             self.compare = Some(serde_json::to_string_pretty(&value).unwrap_or_default());
                             self.compare_open = !self.changes_mode;
@@ -710,15 +852,7 @@ impl Workspace {
             }
         }
         for event in self.host.poll() {
-            let matches =
-                self.preview.as_ref().is_some_and(|p| {
-                    ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"].iter().all(|key| p[*key] == event[*key])
-                }) && self.active_draft(app).is_some_and(|d| {
-                    d["draftId"] == event["draftId"] && d["draftRevision"] == event["draftRevision"] && d["semanticDigest"] == event["semanticDigest"]
-                }) && event["scenario"]["locale"] == self.locale
-                    && event["scenario"]["theme"] == self.theme;
-            let matches = matches && event["scenario"] == self.scenario();
-            if !matches {
+            if !self.matches_preview_event(app, &event) {
                 continue;
             }
             match event["kind"].as_str() {
@@ -771,7 +905,7 @@ impl Workspace {
             self.current = false;
             self.pending = Some(Instant::now());
         }
-        if self.validated && self.actual_preview() && !self.themes_loaded && self.busy.is_none() {
+        if self.validated && self.actual_preview() && !self.is_specimen() && !self.themes_loaded && self.busy.is_none() {
             if let Some(d) = self.active_draft(app) {
                 self.send(json!({"op":"Themes","draft":d}));
             }
@@ -784,10 +918,16 @@ impl Workspace {
         }
     }
     fn select(&mut self, app: &mut App, node: &str) {
+        if self.is_specimen() { return; }
         self.selected = node.into();
         if let Some(id) = app.doc.nodes.values().find(|n| n.source_id.as_deref() == Some(node)).map(|n| n.id) {
             app.select_only(id);
         }
+    }
+    fn capture_resources(&mut self, value: &Value) {
+        self.resources = value["resources"].as_array().cloned().unwrap_or_default();
+        self.resources.extend(value["specimens"].as_array().into_iter().flatten()
+            .filter(|r| r["kind"] == "registered-specimen").cloned());
     }
     pub fn show(&mut self, app: &mut App, ui: &mut egui::Ui, frame: &eframe::Frame) {
         ui.spacing_mut().item_spacing = egui::vec2(10., 8.);
@@ -841,7 +981,8 @@ impl Workspace {
                     self.open = false;
                 }
                 if ui.selectable_label(!self.changes_mode,"Design").clicked(){self.changes_mode=false;}
-                if ui.add_enabled(self.validated&&self.busy.is_none(),egui::Button::new("Changes").selected(self.changes_mode)).clicked(){
+                if ui.add_enabled(self.validated&&!self.is_specimen()&&self.busy.is_none(),egui::Button::new("Changes").selected(self.changes_mode))
+                    .on_disabled_hover_text(if self.is_specimen() { SPECIMEN_CANVAS_REASON } else { "Wait for a canonical draft to load" }).clicked(){
                     self.changes_mode=true;self.compare_open=false;
                     if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Export","draft":draft}));}
                 }
@@ -855,9 +996,10 @@ impl Workspace {
                 if self.preview_only && !self.harness {
                     if ui
                         .add_enabled(
-                            self.staged.is_some() && self.busy.is_none(),
+                            !self.is_specimen() && self.staged.is_some() && self.busy.is_none(),
                             egui::Button::new(if self.actual_preview() { "Open on canvas" } else { "Open protected canvas" }),
                         )
+                        .on_disabled_hover_text(if self.is_specimen() { SPECIMEN_CANVAS_REASON } else { "Wait for the selected source to load" })
                         .clicked()
                     {
                         self.install_staged(app);
@@ -936,7 +1078,8 @@ impl Workspace {
                     ui.selectable_value(&mut self.layout.view, layout::View::Split, "Split");
                     ui.selectable_value(&mut self.layout.view, layout::View::Preview, "Preview");
                 }
-                if ui.add_enabled(self.validated && self.busy.is_none(), egui::Button::new("Create local copy"))
+                if ui.add_enabled(self.validated && !self.is_specimen() && self.busy.is_none(), egui::Button::new("Create local copy"))
+                    .on_disabled_hover_text(if self.is_specimen() { SPECIMEN_CANVAS_REASON } else { "Wait for the selected projection to load" })
                     .on_hover_text("Open an ordinary editable Desigma copy of this projection. It has no CityOS submission binding.").clicked() {
                     self.create_local_copy(app);
                 }
@@ -1057,7 +1200,7 @@ impl Workspace {
         if self.picker_open {
             egui::Panel::left("cityos-design-file-picker").default_size(310.).size_range(240.0..=460.0).resizable(true).show(ui, |ui| {
                 ui.heading("Design files");
-                ui.small("Select to preview. Open on canvas when ready.");
+                ui.small("Select to preview. Canonical files can open on canvas; registered defaults stay temporary.");
                 ui.text_edit_singleline(&mut self.resource_search);
                 let search = self.resource_search.to_lowercase();
                 let mut selected = None;
@@ -1065,17 +1208,24 @@ impl Workspace {
                     for resource in &self.resources {
                         let path = resource["sourcePath"].as_str().unwrap_or("");
                         let label = resource["label"].as_str().unwrap_or(path);
-                        if !format!("{path} {label}").to_lowercase().contains(&search) {
+                        if !format!("{path} {label} {} {} {}", resource["componentId"], resource["profileRef"], resource["targetProfileRef"]).to_lowercase().contains(&search) {
                             continue;
                         }
                         ui.add_enabled_ui(self.busy.is_none()&&resource["openAvailable"]!=false, |ui| {
-                            if ui.selectable_label(self.resource.as_ref().is_some_and(|r| r["sourcePath"] == path), label).on_hover_text(path).clicked() {
+                            let row_selected = self.resource.as_ref().is_some_and(|r| {
+                                if resource["kind"] == "registered-specimen" {
+                                    specimen_locator(resource).is_some() && specimen_locator(r) == specimen_locator(resource)
+                                } else { r["kind"] != "registered-specimen" && r["sourcePath"] == path }
+                            });
+                            if ui.selectable_label(row_selected, label).on_hover_text(path).clicked() {
                                 selected = Some(resource.clone());
                             }
                         });
                         if let Some(reason)=resource["previewNotice"].as_str(){ui.small(reason);}
-                        ui.small(if resource["actualWebPreview"] == true {
-                            "Actual web preview · canvas edit"
+                        ui.small(if resource["kind"] == "registered-specimen" {
+                            "Temporary registered defaults · actual web preview · canvas unavailable"
+                        } else if resource["actualWebPreview"] == true {
+                            "Actual web preview · canonical file"
                         } else {
                             "Authored structure · renderer unavailable"
                         });
@@ -1095,9 +1245,16 @@ impl Workspace {
             egui::Panel::top("cityos-selected-resource").show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.strong(resource["label"].as_str().or_else(|| resource["resourceId"].as_str()).unwrap_or("Selected design"));
-                    ui.small(if self.preview_only { "Temporary preview" } else { "Canonical bound draft" });
+                    ui.small(if self.is_specimen() { "Temporary registered defaults" } else if self.preview_only { "Temporary preview" } else { "Canonical bound draft" });
                     ui.menu_button("Source details", |ui| {
                         ui.set_max_width(600.);
+                        if self.is_specimen() {
+                            ui.label(SPECIMEN_CANVAS_REASON);
+                            for key in ["componentId", "componentVersion", "profileRef", "targetProfileRef"] {
+                                ui.label(format!("{key}: {}", resource[key].as_str().unwrap_or("unavailable")));
+                            }
+                            if let Some(commit) = resource["provenance"]["sourceCommit"].as_str() { ui.monospace(format!("Installed renderer source {commit}")); }
+                        }
                         ui.label(resource["sourcePath"].as_str().unwrap_or(""));
                         if let Some(commit) = resource["commit"].as_str() { ui.monospace(format!("GitLab commit {commit}")); }
                         if resource["packagedRevision"]==true {ui.label("Pinned packaged revision. Newer main needs a matching renderer package.");}
@@ -1106,6 +1263,7 @@ impl Workspace {
                         }
                     });
                     if let Some(d) = self.active_draft(app) { ui.small(format!("Draft revision {}", d["draftRevision"])); }
+                    if self.is_specimen() { ui.small(SPECIMEN_CANVAS_REASON); }
                     if let Some(messages) = resource["diagnostics"].as_array() {
                         if !messages.is_empty() { ui.small(format!("{} source findings", messages.len())); }
                     }
@@ -1163,8 +1321,9 @@ impl Workspace {
             ui.heading("Actual web renderer");
             if let Some(p) = &self.preview {
                 let status = if self.current { "Current" } else if self.error.is_some() { "Failed — previous preview retained" }
-                    else if self.busy.as_deref() == Some("Preview") || self.render_started.is_some() { "Rendering" } else { "Out of date" };
-                ui.label(format!("{status} · rendered revision {}", p["draftRevision"]));
+                    else if matches!(self.busy.as_deref(), Some("Preview" | "FixturePreview")) || self.render_started.is_some() { "Rendering" } else { "Out of date" };
+                if self.is_specimen() { ui.label(format!("{status} · temporary registered defaults")); }
+                else { ui.label(format!("{status} · rendered revision {}", p["draftRevision"])); }
                 if p["scenario"]["fixture"]=="cityos-web-frame" {
                     ui.small(format!("Rendered elevation: {}", p["observedElevation"].as_str().unwrap_or("pending")));
                 }
@@ -1174,7 +1333,9 @@ impl Workspace {
             }
             ui.small(if self.harness { "Inert embedded-host diagnostic · no repository code" } else { "Registered CityOS renderer · deterministic fixture · owner actions disabled" });
             let old = (self.locale.clone(), self.theme.clone(), self.theme_id.clone(), self.interactive);
-            egui::ComboBox::from_id_salt("workspace-theme")
+            if self.is_specimen() {
+                ui.small("Registered default theme · light/dark presentation only");
+            } else { egui::ComboBox::from_id_salt("workspace-theme")
                 .width(250.)
                 .selected_text(self.themes.iter().find(|t| t["id"] == self.theme_id).and_then(|t| t["name"].as_str()).unwrap_or("Renderer default theme"))
                 .show_ui(ui, |ui| {
@@ -1184,7 +1345,7 @@ impl Workspace {
                             ui.selectable_value(&mut self.theme_id, id.into(), name);
                         }
                     }
-                });
+                }); }
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut self.locale, "ar".into(), "Arabic · RTL");
                 ui.selectable_value(&mut self.locale, "en".into(), "English · LTR");
@@ -1326,6 +1487,157 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn registered_specimen(component: &str, locale: &str) -> Value {
+        json!({"kind":"registered-specimen","resourceId":format!("web-fixture/{component}@1/{locale}"),
+            "componentId":component,"componentVersion":"1","profileRef":"fixture-profile","targetProfileRef":"web-fixture",
+            "label":component,"fixture":"cityos-lower-level","actualWebPreview":true,"editable":false,"openAvailable":true,
+            "provenance":{"kind":"registered-defaults","canonicalResource":false,"temporary":true,"locale":locale,"sourceCommit":"a".repeat(40)}})
+    }
+    fn specimen_receipt(workspace: &Workspace) -> Value {
+        let component = workspace.resource.as_ref().unwrap()["componentId"].as_str().unwrap();
+        let resource = registered_specimen(component, &workspace.locale);
+        json!({"sessionId":"session-1","requestId":"workspace-3","draftId":format!("registered-fixture:{}",resource["resourceId"].as_str().unwrap()),
+            "draftRevision":0,"semanticDigest":"c".repeat(64),"scenario":workspace.scenario(),
+            "url":"http://127.0.0.1:12345/fixture","resource":resource,"provenance":resource["provenance"],
+            "canonicalResource":false,"ownerWrites":false,"state":"prepared"})
+    }
+    fn specimen_workspace() -> Workspace {
+        let mut workspace = Workspace::default();
+        workspace.prepare_resource(registered_specimen("fixture.component", "ar"));
+        workspace.specimen_request = workspace.captured_specimen_request();
+        workspace
+    }
+    #[test]
+    fn registered_specimens_are_listed_even_when_no_canonical_resource_is_qualified() {
+        let mut workspace = Workspace::default();
+        let specimen = registered_specimen("fixture.component", "ar");
+        workspace.capture_resources(&json!({"resources":[],"specimens":[specimen],"diagnostics":[{"code":"UNQUALIFIED"}]}));
+        assert_eq!(workspace.resources, vec![specimen]);
+        assert!(specimen_locator(&workspace.resources[0]).is_some());
+    }
+    #[test]
+    fn temporary_registered_specimen_never_changes_document_history_saving_or_library() {
+        let root = std::env::temp_dir().join(format!("desigma-specimen-{}", uuid::Uuid::new_v4()));
+        let library = desigma_library::Library::open(&root).unwrap();
+        library.put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
+        let mut app = App::new(tab_document("persistent")); app.home = None; app.lib = Some(library.clone());
+        let mut edited = app.doc.clone(); edited.name = "Saved draft with undo".into();
+        app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(edited) }).unwrap();
+        Workspace::save_to_draft_library(&mut app).unwrap();
+        let file_id = app.lib_file.as_ref().unwrap().id.clone();
+        let stored_before = library.load_checkpoint(&file_id).unwrap();
+        app.doc.name = "Existing unsaved work".into(); app.changed();
+        let before = app.doc.to_json().unwrap();
+        let history = serde_json::to_value(&app.hist).unwrap();
+        let pending = app.autosave.pending();
+        let mut workspace = Workspace::default();
+        // No configured helper is started in this state-transition unit test.
+        workspace.open_resource(registered_specimen("fixture.component", "ar"));
+        workspace.specimen_request = workspace.captured_specimen_request();
+        let receipt = specimen_receipt(&workspace);
+        assert!(workspace.accept_specimen_preview(receipt.clone(), "FixturePreview"));
+        assert!(workspace.matches_preview_event(&app, &receipt));
+        workspace.select(&mut app, "material");
+        workspace.install_staged(&mut app);
+        workspace.create_local_copy(&mut app);
+        workspace.send(json!({"op":"Command"}));
+        assert!(workspace.active_draft(&app).is_none());
+        assert!(workspace.staged.is_none() && workspace.temporary_canvas.is_none());
+        assert!(workspace.preview_only && !workspace.changes_mode && workspace.tabs.is_empty());
+        assert!(workspace.error.as_ref().unwrap().contains("no canonical document binding"));
+        assert_eq!(app.doc.to_json().unwrap(), before);
+        assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
+        assert_eq!(app.autosave.pending(), pending);
+        assert_eq!(app.lib_file.as_ref().unwrap().id, file_id);
+        let stored_after = library.load_checkpoint(&file_id).unwrap();
+        assert_eq!(stored_after.document.to_json().unwrap(), stored_before.document.to_json().unwrap());
+        assert_eq!(serde_json::to_value(&stored_after.history).unwrap(), serde_json::to_value(&stored_before.history).unwrap());
+        crate::home::thumb::finish_library_jobs(&root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn registered_specimen_receipts_reject_busy_obsolete_and_substituted_results() {
+        for field in ["componentId", "componentVersion", "profileRef", "targetProfileRef"] {
+            let mut workspace = specimen_workspace();
+            let mut receipt = specimen_receipt(&workspace);
+            receipt["resource"][field] = json!("other");
+            assert!(!workspace.accept_specimen_preview(receipt, "FixturePreview"), "{field}");
+            assert!(workspace.preview.is_none());
+        }
+        for change in ["selection", "generation", "locale", "theme", "viewport", "busy", "draft", "authority", "source"] {
+            let mut workspace = specimen_workspace();
+            let mut receipt = specimen_receipt(&workspace);
+            match change {
+                "selection" => workspace.resource = Some(registered_specimen("other.component", "ar")),
+                "generation" => workspace.preview_generation += 1,
+                "locale" => workspace.locale = "en".into(),
+                "theme" => workspace.theme = "dark".into(),
+                "viewport" => workspace.viewport.0 += 1,
+                "busy" => workspace.busy = Some("FixturePreview".into()),
+                "draft" => receipt["draft"] = json!({"draftId":"must-not-bind"}),
+                "authority" => receipt["canonicalResource"] = json!(true),
+                "source" => receipt["provenance"]["sourceCommit"] = json!("b".repeat(40)),
+                _ => unreachable!(),
+            }
+            assert!(!workspace.accept_specimen_preview(receipt, "FixturePreview"), "{change}");
+        }
+        let mut workspace = specimen_workspace();
+        let receipt = specimen_receipt(&workspace);
+        assert!(!workspace.accept_specimen_preview(receipt.clone(), "Preview"));
+        assert!(workspace.accept_specimen_preview(receipt.clone(), "FixturePreview"));
+        assert!(!workspace.accept_specimen_preview(receipt, "FixturePreview"));
+    }
+    #[test]
+    fn registered_specimen_locale_regenerates_defaults_with_a_stable_four_field_locator() {
+        let mut workspace = specimen_workspace();
+        let original_locator = workspace.specimen_request.as_ref().unwrap().locator.clone();
+        let old_receipt = specimen_receipt(&workspace);
+        workspace.locale = "en".into();
+        assert!(!workspace.accept_specimen_preview(old_receipt, "FixturePreview"));
+        workspace.specimen_request = workspace.captured_specimen_request();
+        let request = workspace.specimen_request.as_ref().unwrap();
+        assert_eq!(request.locator, original_locator);
+        assert_eq!(request.scenario["locale"], "en");
+        assert_eq!(request.locator.as_object().unwrap().len(), 4);
+        let job = request.job();
+        assert_eq!(job["op"], "FixturePreview");
+        assert_eq!(job["fixture"], original_locator);
+        assert_eq!(job["scenario"]["locale"], "en");
+        assert!(job.get("draft").is_none());
+        let receipt = specimen_receipt(&workspace);
+        assert!(receipt["resource"]["resourceId"].as_str().unwrap().ends_with("/en"));
+        assert!(workspace.accept_specimen_preview(receipt, "FixturePreview"));
+        assert!(workspace.resource.as_ref().unwrap()["resourceId"].as_str().unwrap().ends_with("/ar"));
+        workspace.set_preview_theme("repository-theme-must-not-load".into());
+        assert!(workspace.theme_id.is_empty());
+        let mut app = App::new(Document::new("Underlying document"));
+        workspace.pending = None; workspace.error = None; workspace.themes_loaded = false;
+        workspace.poll(&mut app);
+        assert!(workspace.busy.is_none() && workspace.error.is_none());
+        assert!(workspace.themes.is_empty() && !workspace.themes_loaded);
+    }
+    #[test]
+    fn registered_specimen_render_events_are_fenced_by_exact_request_session_and_scenario() {
+        let mut workspace = specimen_workspace();
+        let app = App::new(Document::new("Untouched"));
+        let receipt = specimen_receipt(&workspace);
+        assert!(workspace.accept_specimen_preview(receipt.clone(), "FixturePreview"));
+        for key in ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"] {
+            let mut stale = receipt.clone(); stale[key] = json!("obsolete");
+            assert!(!workspace.matches_preview_event(&app, &stale), "{key}");
+        }
+        workspace.busy = Some("FixturePreview".into());
+        assert!(!workspace.matches_preview_event(&app, &receipt));
+        let selected = workspace.resource.clone();
+        workspace.open_resource(registered_specimen("other.component", "ar"));
+        assert_eq!(workspace.resource, selected, "Busy requests must retain the selected resource");
+        workspace.busy = None;
+        workspace.specimen_request = workspace.captured_specimen_request();
+        assert!(!workspace.matches_preview_event(&app, &receipt));
+        workspace.invalidate_specimen_request();
+        workspace.resource = Some(registered_specimen("other.component", "ar"));
+        assert!(!workspace.matches_preview_event(&app, &receipt));
+    }
     fn tab_document(id:&str)->Document{
         let source_digest=desigma_library::payload_digest(b"fixture");
         let semantic=json!({"id":id,"revision":"1","root":{"id":"material","props":{}}});

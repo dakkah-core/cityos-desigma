@@ -20,6 +20,27 @@ fn profile_summary() -> Value {
 }
 
 #[test]
+fn registered_default_inline_preview_preserves_the_full_locator_and_requires_matching_implementation_bytes() {
+    let mut selected=entry("context"); selected.kind="source-file".into();
+    selected.source_path="packages/runtime/src/ContextCapsule.tsx".into(); selected.source_digest="b".repeat(64);
+    let profile=json!({"kind":"registered-specimen","sourcePath":selected.source_path,"publicExport":"ContextCapsule",
+        "sourceDigest":selected.source_digest,"implementationDigest":selected.source_digest,
+        "componentId":"fixture.context","componentVersion":"1","profileRef":"fixture-profile","targetProfileRef":"web-fixture",
+        "resourceId":"fixture-context-ar","fixture":"cityos-shared-leaf","actualWebPreview":true,"editable":false,
+        "provenance":{"canonicalResource":false,"temporary":true,"locale":"ar","sourceCommit":"a".repeat(40)}});
+    let mut summary=json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[profile]});
+    let actions=support::actions(&selected,None,Some(&summary),"committed");
+    assert!(actions.actual_preview); assert!(!actions.editable);
+    assert_eq!(actions.inline_pin,Some(profile.clone()));
+    assert!(support::actions(&selected,None,Some(&summary),"local").inline_pin.is_none());
+    summary["workspaceProfiles"][0]["implementationDigest"]=json!("c".repeat(64));
+    assert!(!support::actions(&selected,None,Some(&summary),"committed").actual_preview);
+    summary["workspaceProfiles"][0]=profile;
+    selected.source_digest="c".repeat(64);
+    assert!(support::actions(&selected,None,Some(&summary),"committed").inline_pin.is_none());
+}
+
+#[test]
 fn registered_selection_actions_exist_before_materialization_without_loading_an_unrelated_frame() {
     let summary = profile_summary();
     let mut selected = entry("frame");
