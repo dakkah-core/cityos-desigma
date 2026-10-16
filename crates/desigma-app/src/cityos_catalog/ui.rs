@@ -169,10 +169,12 @@ impl Browser {
             ui.add_space(theme::CATALOG_GAP);
             ui.label(RichText::new("CityOS").size(theme::CATALOG_TITLE).strong());
             ui.label(RichText::new("Design library").size(theme::CATALOG_TITLE).color(theme::TEXT_SECONDARY));
+            if ui.button(if self.has_bound_draft {"Resume canvas draft"} else {"Design CityOS web frame"}).clicked() {self.workspace_request=Some(false);}
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
                 }
+                if ui.button("Embedded host diagnostic").clicked() {self.host_diagnostic_request=true;}
                 if self.busy {
                     if ui.button("Cancel").clicked() {
                         self.cancelled.store(true, Ordering::Release);
@@ -403,6 +405,13 @@ impl Browser {
         ui.add_space(theme::CATALOG_GAP);
         ui.label(RichText::new(preview::display_name(&entry)).size(theme::CATALOG_TITLE).strong());
         ui.label(RichText::new(&entry.label).small().color(theme::TEXT_SECONDARY));
+        if entry.source_path == "config/experience/living-canvas-frame/cityos-web.input.json" {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Actual web preview").clicked() {self.workspace_request=Some(true);}
+                if ui.button(if self.mode=="local" {"Open canonical draft"}else{"Open on canvas"}).clicked() {self.workspace_request=Some(false);}
+            });
+            ui.small("Opens the canonical GitLab frame. Local overlay changes stay in this preview.");
+        }
         ui.add_space(theme::CATALOG_GAP);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.detail_tab, DetailTab::Preview, "Preview");

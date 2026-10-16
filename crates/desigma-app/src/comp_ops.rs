@@ -15,6 +15,7 @@ fn is_noop(c: &Command) -> bool {
 
 fn ids_of(doc: &Document, cmd: &Command, out: &mut Vec<NodeId>) {
     match cmd {
+        Command::CityosInstall { .. } => {},
         Command::Insert { parent, nodes, .. } => {
             out.push(*parent);
             out.extend(nodes.iter().map(|n| n.id));

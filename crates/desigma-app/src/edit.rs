@@ -31,6 +31,7 @@ impl Edit {
 
     /// Mutable access to a node, recording its original state.
     pub fn node<'a>(&mut self, doc: &'a mut Document, id: NodeId) -> Option<&'a mut Node> {
+        if doc.cityos.is_some() { return None; }
         self.touch(doc, id);
         doc.get_mut(id)
     }

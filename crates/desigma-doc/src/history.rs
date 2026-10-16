@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
+    /// Whole validated semantic state and its native projection share one undo boundary.
+    CityosInstall { document: Box<Document> },
     /// Insert subtree nodes (root first) under `parent` at `index`.
     Insert {
         parent: NodeId,
@@ -70,7 +72,20 @@ pub enum Command {
 impl Command {
     /// Applies the command and returns the command that undoes it.
     pub fn apply(self, doc: &mut Document) -> Result<Command, DocError> {
+        if doc.cityos.is_some() && !matches!(self, Command::CityosInstall { .. }) { return Err(DocError::CityosProtected); }
         Ok(match self {
+            Command::CityosInstall { mut document } => {
+                let current=doc.cityos.as_ref().ok_or(DocError::CityosProtected)?;
+                let next=document.cityos.as_mut().ok_or(DocError::CityosProtected)?;
+                if current.validate().is_err() || next.validate().is_err() || current.draft_id!=next.draft_id || current.base!=next.base || current.semantic_base!=next.semantic_base {
+                    return Err(DocError::CityosProtected);
+                }
+                // Undo/redo also creates a new local revision; no stale preview identity is reused.
+                let revision=current.exchange_v2.as_ref().and_then(|d| d["draftRevision"].as_u64()).ok_or(DocError::CityosProtected)?;
+                next.exchange_v2.as_mut().ok_or(DocError::CityosProtected)?["draftRevision"] = serde_json::json!(revision.checked_add(1).ok_or(DocError::CityosProtected)?);
+                let old=std::mem::replace(doc,*document);
+                Command::CityosInstall { document: Box::new(old) }
+            }
             Command::Insert { parent, index, nodes } => {
                 let root = nodes.first().map(|n| n.id).ok_or(DocError::NotFound(parent))?;
                 let p = doc.get_mut(parent).ok_or(DocError::NotFound(parent))?;

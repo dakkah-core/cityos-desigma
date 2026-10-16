@@ -1,0 +1,171 @@
+//! Separate exchange process; catalog v1 remains read-only.
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
+
+const PROTOCOL: &str = "cityos.design-workspace.ipc.v1";
+const MAX_FRAME: usize = 4 * 1024 * 1024;
+#[derive(Clone)]
+pub struct Config {
+    pub node: PathBuf,
+    pub bridge: PathBuf,
+    pub repository: PathBuf,
+    pub cache: PathBuf,
+}
+pub struct Bridge {
+    pub jobs: Sender<Value>,
+    pub replies: Receiver<Result<Value, String>>,
+}
+struct Client {
+    child: Child,
+    input: ChildStdin,
+    output: Receiver<Result<Value, String>>,
+    session: String,
+    sequence: u64,
+}
+impl Drop for Client {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+fn frame(reader: &mut impl BufRead) -> Result<Value, String> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().map_err(|e| e.to_string())?;
+        if chunk.is_empty() {
+            return Err("Exchange helper stopped".into());
+        }
+        let end = chunk.iter().position(|b| *b == b'\n');
+        let count = end.map_or(chunk.len(), |n| n + 1);
+        if bytes.len() + count > MAX_FRAME {
+            return Err("Exchange frame exceeds 4 MiB".into());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        reader.consume(count);
+        if end.is_some() {
+            break;
+        }
+    }
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for b in &bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if *b == b'\\' {
+                escaped = true;
+            } else if *b == b'"' {
+                quoted = false;
+            }
+        } else if *b == b'"' {
+            quoted = true;
+        } else if *b == b'{' || *b == b'[' {
+            depth += 1;
+            if depth > 64 {
+                return Err("Exchange JSON depth exceeds 64".into());
+            }
+        } else if *b == b'}' || *b == b']' {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    serde_json::from_slice(&bytes).map_err(|e| format!("Malformed exchange response: {e}"))
+}
+impl Client {
+    fn connect(config: &Config) -> Result<Self, String> {
+        if !config.bridge.is_absolute() || !config.bridge.is_file() {
+            return Err("Packaged workspace.mjs is unavailable; repackage the CityOS reader".into());
+        }
+        let mut cmd = Command::new(&config.node);
+        cmd.arg(&config.bridge).arg("--stdio").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("Cannot start exchange helper: {e}"))?;
+        let input = child.stdin.take().ok_or("Missing exchange stdin")?;
+        let stdout = child.stdout.take().ok_or("Missing exchange stdout")?;
+        let (tx, output) = mpsc::sync_channel(4);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let result = frame(&mut reader);
+                let failed = result.is_err();
+                if tx.send(result).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        let mut client = Self { child, input, output, session: uuid::Uuid::new_v4().to_string(), sequence: 0 };
+        client.request(json!({"op":"Hello"}))?;
+        Ok(client)
+    }
+    fn request(&mut self, mut request: Value) -> Result<Value, String> {
+        self.sequence += 1;
+        let id = format!("workspace-{}", self.sequence);
+        request["protocolVersion"] = json!(PROTOCOL);
+        request["sessionId"] = json!(self.session);
+        request["requestId"] = json!(id);
+        let bytes = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        if bytes.len() > MAX_FRAME {
+            return Err("Exchange request exceeds 4 MiB".into());
+        }
+        self.input.write_all(&bytes).and_then(|_| self.input.write_all(b"\n")).and_then(|_| self.input.flush()).map_err(|e| e.to_string())?;
+        let response = self.output.recv_timeout(Duration::from_secs(30)).map_err(|_| "Exchange timed out; draft retained".to_string())??;
+        if response["protocolVersion"] != PROTOCOL || response["sessionId"] != self.session || response["requestId"] != id {
+            return Err("Obsolete or incompatible exchange reply".into());
+        }
+        if let Some(error) = response["error"].as_str() {
+            return Err(error.into());
+        }
+        Ok(response["result"].clone())
+    }
+}
+impl Bridge {
+    pub fn spawn(config: Config) -> Self {
+        let (jobs, rx) = mpsc::channel::<Value>();
+        let (tx, replies) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut client: Option<Client> = None;
+            while let Ok(mut request) = rx.recv() {
+                {
+                    request["repository"] = json!(config.repository);
+                    request["cacheRoot"] = json!(config.cache);
+                }
+                let result = (|| {
+                    if client.is_none() {
+                        client = Some(Client::connect(&config)?);
+                    }
+                    client.as_mut().unwrap().request(request)
+                })();
+                if result.is_err() {
+                    client = None;
+                }
+                if tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { jobs, replies }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bounded_frames_reject_oversize_depth_and_partial_response() {
+        assert!(frame(&mut &b"{}\n"[..]).is_ok());
+        assert!(frame(&mut &b"{\n"[..]).is_err());
+        assert!(frame(&mut &b"{}"[..]).is_err());
+        let deep = format!("{}0{}\n", "[".repeat(65), "]".repeat(65));
+        assert!(frame(&mut deep.as_bytes()).is_err());
+        let huge = vec![b' '; MAX_FRAME + 1];
+        assert!(frame(&mut huge.as_slice()).is_err());
+    }
+}

@@ -34,6 +34,9 @@ enum Reply {
 }
 pub struct Browser {
     pub open: bool,
+    pub workspace_request: Option<bool>,
+    pub has_bound_draft: bool,
+    pub host_diagnostic_request: bool,
     repository: String,
     reader: String,
     node: String,
@@ -71,6 +74,10 @@ pub struct Browser {
 }
 
 impl Browser {
+    pub fn workspace_config(&self) -> crate::design_workspace::Config {
+        crate::design_workspace::Config {node: PathBuf::from(&self.node), bridge:PathBuf::from(&self.reader).with_file_name("workspace.mjs"),
+            repository:PathBuf::from(&self.repository), cache:self.cache.clone().unwrap_or_else(||std::env::temp_dir().join("desigma-cityos-cache"))}
+    }
     pub fn new(repository: Option<PathBuf>, reader: Option<PathBuf>, node: Option<PathBuf>, cache: Option<PathBuf>, canonical_ref: Option<String>) -> Self {
         let (jobs, requests) = mpsc::channel();
         let (responses, replies) = mpsc::channel();
@@ -133,6 +140,9 @@ impl Browser {
         let reader = reader.or_else(|| std::env::current_exe().ok().map(|p| p.with_file_name("cityos-reader").join("reader.mjs")));
         let mut browser = Self {
             open,
+            workspace_request: None,
+            has_bound_draft: false,
+            host_diagnostic_request: false,
             repository: repository.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             reader: reader.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             node: node.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "node".into()),

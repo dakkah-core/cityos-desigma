@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Options {
+    pub cityos_frame: bool,
+    pub cityos_host_diagnostic: bool,
+    pub cityos_verify_workspace: Option<PathBuf>,
     pub cityos_repository: Option<PathBuf>,
     pub cityos_reader: Option<PathBuf>,
     pub cityos_node: Option<PathBuf>,
@@ -125,6 +128,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--cityos-frame" => o.cityos_frame=true,
+            "--cityos-host-diagnostic" => o.cityos_host_diagnostic=true,
+            "--cityos-verify-workspace" => o.cityos_verify_workspace=Some(it.next().ok_or("--cityos-verify-workspace needs a fixture/evidence directory")?.into()),
             "--cityos-repository" => o.cityos_repository = Some(it.next().ok_or("--cityos-repository needs a path")?.into()),
             "--cityos-reader" => o.cityos_reader = Some(it.next().ok_or("--cityos-reader needs the packaged reader path")?.into()),
             "--cityos-node" => o.cityos_node = Some(it.next().ok_or("--cityos-node needs a Node executable")?.into()),
@@ -211,6 +217,8 @@ pub const USAGE: &str = "usage: desigma [FILE] [--screenshot OUT.png] [--size Wx
   --scale    with --screenshot: device pixel ratio (2 writes a PNG twice --size, rendered crisp rather than upscaled)
   --home     show the home screen (also in --screenshot mode)
   --cityos-repository PATH  open the read-only CityOS L0–L9 catalog
+  --cityos-frame            open the canonical bound web-frame workspace
+  --cityos-host-diagnostic  open the inert embedded WebView2 diagnostic
   --cityos-reader PATH      absolute packaged reader.mjs path
   --cityos-node PATH        Node executable (default: node)
   --cityos-cache PATH       application-owned repository cache

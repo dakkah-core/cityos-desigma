@@ -3,6 +3,7 @@ mod board;
 mod canvas;
 mod cli;
 mod cityos_catalog;
+mod design_workspace;
 mod clipboard;
 mod comments;
 mod comp_ops;
@@ -62,6 +63,11 @@ fn main() {
     };
     if opts.help {
         println!("{}", cli::USAGE);
+        return;
+    }
+    if let Some(directory)=&opts.cityos_verify_workspace {
+        let browser=cityos_catalog::Browser::new(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone(),opts.cityos_canonical_ref.clone());
+        match design_workspace::verify_roundtrip(browser.workspace_config(),directory){Ok(report)=>println!("{report}"),Err(error)=>{eprintln!("Native workspace verification failed: {error}");std::process::exit(1);}}
         return;
     }
     if let Some(dir) = &opts.seed_library {

@@ -31,6 +31,7 @@ pub struct Shell {
     shot: Option<Shot>,
     title: String,
     cityos: crate::cityos_catalog::Browser,
+    workspace: crate::design_workspace::Workspace,
 }
 
 impl Shell {
@@ -56,7 +57,10 @@ impl Shell {
     }
 
     pub fn build(ctx: &Context, opts: Options) -> Self {
-        let cityos=crate::cityos_catalog::Browser::new(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone(),opts.cityos_canonical_ref.clone());
+        let mut cityos=crate::cityos_catalog::Browser::new(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone(),opts.cityos_canonical_ref.clone());
+        let mut workspace=crate::design_workspace::Workspace::default();
+        if opts.cityos_host_diagnostic {workspace.begin_harness(cityos.workspace_config());cityos.open=false;}
+        else if opts.cityos_frame {workspace.begin(cityos.workspace_config(),false);cityos.open=false;}
         theme::install_fonts(ctx);
         theme::apply(ctx);
         let mut app = App::new(match opts.fixture.as_deref() {
@@ -219,7 +223,7 @@ impl Shell {
             frames: 0,
             requested: false,
         });
-        Self { app, shot, title: String::new(), cityos }
+        Self { app, shot, title: String::new(), cityos, workspace }
     }
 
     fn drive_screenshot(&mut self, ctx: &Context) {
@@ -506,7 +510,7 @@ impl eframe::App for Shell {
     /// Tab belongs to the text session (it nests list items): take it out of the input before egui
     /// uses it to move keyboard focus between widgets.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        if self.cityos.open {return;}
+        if self.cityos.open || self.workspace.open {return;}
         if self.app.plugins.open {
             return;
         }
@@ -530,7 +534,25 @@ impl eframe::App for Shell {
         if self.app.fonts.is_loading() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
-        self.draw(ui);
+        if !self.workspace.open && !self.cityos.open && self.app.home.is_none() && self.app.doc.cityos.as_ref().is_some_and(|b|b.exchange_v2.is_some()) {
+            self.workspace.resume(self.cityos.workspace_config(),&self.app);
+        }
+        if self.workspace.open {
+            self.app.now=ui.ctx().input(|i|i.time);
+            self.workspace.show(&mut self.app,ui,_frame);
+            if !self.workspace.open {self.cityos.open=true;}
+        } else {
+            self.workspace.hide();
+            self.cityos.has_bound_draft=self.app.doc.cityos.as_ref().is_some_and(|b|b.exchange_v2.is_some());
+            self.draw(ui);
+            if self.cityos.host_diagnostic_request {self.cityos.host_diagnostic_request=false;self.cityos.open=false;self.workspace.begin_harness(self.cityos.workspace_config());}
+            else if let Some(preview_only)=self.cityos.workspace_request.take(){
+                self.cityos.open=false;
+                if !preview_only && self.cityos.has_bound_draft {self.workspace.resume(self.cityos.workspace_config(),&self.app);}
+                else {self.workspace.begin(self.cityos.workspace_config(),preview_only);}
+            }
+            else if self.app.doc.cityos.as_ref().is_some_and(|b|b.exchange_v2.is_some()) && self.app.home.is_none() && !self.cityos.open {self.workspace.resume(self.cityos.workspace_config(),&self.app);}
+        }
     }
 }
 

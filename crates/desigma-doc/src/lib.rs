@@ -61,6 +61,8 @@ pub enum DocError {
     Cycle(NodeId),
     #[error("node {0:?} cannot have children")]
     NotAContainer(NodeId),
+    #[error("CityOS objects require a validated semantic command")]
+    CityosProtected,
 }
 
 /// A whole file: pages at the root, each page a tree of nodes.
@@ -254,7 +256,8 @@ impl Document {
 
     pub fn to_json(&self) -> serde_json::Result<String> {
         if self.cityos.is_some(){
-            return serde_json::to_string_pretty(&serde_json::json!({"schemaVersion":"desigma.document.v2","document":self}));
+            let version = if self.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {"desigma.document.v3"} else {"desigma.document.v2"};
+            return serde_json::to_string_pretty(&serde_json::json!({"schemaVersion":version,"document":self}));
         }
         let mut value=serde_json::to_value(self)?;
         value["schemaVersion"]=serde_json::Value::String("desigma.document.v1".into());
@@ -266,7 +269,11 @@ impl Document {
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
         let mut value: serde_json::Value=serde_json::from_str(s)?;
         if let Some(version)=value.get("schemaVersion") {
-            if version=="desigma.document.v2" {value=value.get("document").cloned().ok_or_else(||<serde_json::Error as serde::de::Error>::custom("Bound document payload missing"))?;}
+            if version=="desigma.document.v2" || version=="desigma.document.v3" {
+                let v3=version=="desigma.document.v3";
+                value=value.get("document").cloned().ok_or_else(||<serde_json::Error as serde::de::Error>::custom("Bound document payload missing"))?;
+                if !v3 && value["cityos"]["exchange_v2"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Expanded bindings require container v3")); }
+            }
             else if version!="desigma.document.v1" {return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));}
         }
         let mut doc: Self = serde_json::from_value(value)?;
