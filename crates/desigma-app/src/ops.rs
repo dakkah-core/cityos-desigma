@@ -756,6 +756,7 @@ impl App {
         if self.doc.pages.contains(&id) {
             crate::decks::ui::flush_notes(self);
             self.page = id;
+            self.sync_variable_collection();
             self.selection.clear();
             self.canvas.reset_interaction();
             self.changed();
@@ -807,6 +808,7 @@ impl App {
     // ------------------------------------------------------------ files
     pub fn replace_document(&mut self, doc: Document, path: Option<PathBuf>) -> bool {
         crate::decks::ui::flush_notes(self);
+        self.finish_variable_editors();
         // Pending edits of the library file being left are saved first (from the live state, not an old version).
         self.exit_version_view();
         if !self.flush_autosave(){return false;}
@@ -817,6 +819,7 @@ impl App {
         io::ensure_page(&mut doc);
         self.page = doc.pages[0];
         self.doc = doc;
+        self.vars.reset_document_selection();
         self.decks = Default::default();
         self.hist = History::default();
         self.history.reset();

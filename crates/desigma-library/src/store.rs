@@ -424,6 +424,17 @@ impl Library {
                         return Err(error.into());
                     }
                 }
+                Err(error @ LibraryError::Invalid(_)) => {
+                    // A verified portable copy can repair a corrupt CAS object.
+                    // Retain its bytes in the intent before touching the object,
+                    // just as for a missing dependency; ordinary saves still fail.
+                    if let Some(bytes) = supplied.remove(&hash) {
+                        payloads.insert(hash.clone(), bytes);
+                        required_pins.push(hash);
+                    } else {
+                        return Err(error);
+                    }
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -437,7 +448,8 @@ impl Library {
 
     /// Saves the complete native document, undo/redo, inactive baseline histories,
     /// dependency closure and project manifest under one replayable durable intent.
-    /// Existing verified CAS objects are references; only missing objects carry bytes.
+    /// Existing verified CAS objects are references; missing or corrupt objects
+    /// carry verified replacement bytes when supplied by a portable import.
     /// On an I/O error after intent creation, reopen/reload to reconcile before
     /// deciding whether the old or new candidate is current. No owner action occurs.
     pub fn save_checkpoint(&self, id: &str, checkpoint: &DocumentCheckpoint) -> Result<()> {
@@ -1102,6 +1114,104 @@ mod tests {
                     "replay must not rewrite an imported object already materialized before the interruption");
             }
             assert!(!journal.exists());
+        }
+    }
+
+    #[test]
+    fn cas_portable_repair_journals_verified_bytes_and_preserves_unresolved_submissions() {
+        let (_source_dir, source) = Tmp::new();
+        let source_project = source.create_project("Source").unwrap();
+        let bytes = b"verified portable replacement";
+        let hash = source.retain_cityos_payload(bytes).unwrap();
+        let checkpoint = cas_checkpoint(vec![hash.clone()]);
+        let source_file = source.create_file_checkpoint(&source_project.id, None, "F", &checkpoint).unwrap();
+        let portable = source.export_checkpoint(&source_file.id).unwrap();
+
+        for phase in ["before-journal", "journal", "payloads"] {
+            let (temp, library) = Tmp::new();
+            let project = library.create_project("Target").unwrap();
+            let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
+            library.put_cityos_payload(&hash, bytes).unwrap();
+            let submission_only = library.retain_cityos_payload(b"unresolved submission only").unwrap();
+            let command = crate::SubmissionCommand {
+                intent_id: "repair-intent".into(), operation_id: "repair-operation".into(), predecessor: None,
+                owner: "experience".into(), resource: "frame".into(),
+                scope: BTreeMap::from([("tenantId".into(), "t".into()), ("actorId".into(), "a".into())]),
+                base: desigma_doc::CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
+                expected_revision: "a".repeat(40), semantic_base: serde_json::json!({"elevation":"flat"}),
+                submitted_snapshot: serde_json::json!({"elevation":"resting"}),
+                dependency_pins: vec![hash.clone(), submission_only.clone()],
+            };
+            let original = library.prepare_submission(command.clone()).unwrap();
+            let submission_path = library.submission_path(&command.operation_id).unwrap();
+            let original_record = std::fs::read(&submission_path).unwrap();
+            let document_path = library.file_path(&project.id, &file.id);
+            let original_document = std::fs::read(&document_path).unwrap();
+            let manifest_path = library.project_dir(&project.id).join(MANIFEST);
+            let original_manifest = std::fs::read(&manifest_path).unwrap();
+            let journal = library.project_dir(&project.id).join(".save.pending.json");
+            let payload_path = library.path("cityos/payloads").join(&hash);
+            std::fs::write(&payload_path, b"corrupt local object").unwrap();
+            std::fs::remove_file(library.path("cityos/payloads").join(&submission_only)).unwrap();
+
+            // An incomplete/unverified package cannot repair or erase anything.
+            for fault in ["missing", "corrupt"] {
+                let mut invalid: serde_json::Value = serde_json::from_str(&portable).unwrap();
+                if fault == "missing" { invalid["payloads"].as_object_mut().unwrap().remove(&hash); }
+                else { invalid["payloads"][&hash] = serde_json::json!([0]); }
+                assert!(library.import_checkpoint(&file.id, &invalid.to_string()).is_err(), "{phase}/{fault}");
+                assert_eq!(std::fs::read(&payload_path).unwrap(), b"corrupt local object");
+                assert_eq!(std::fs::read(&document_path).unwrap(), original_document);
+                assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
+                assert_eq!(std::fs::read(&submission_path).unwrap(), original_record);
+                assert!(!journal.exists());
+                assert!(!library.checkpoint_path(&file.id).unwrap().exists());
+            }
+            assert!(library.save_checkpoint(&file.id, &checkpoint).is_err(), "ordinary saves still require verified CAS bytes");
+            let mut dispatches = 0;
+            assert!(library.dispatch_prepared(command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
+            assert_eq!(dispatches, 0);
+            assert_eq!(library.prepare_submission(command.clone()).unwrap(), original);
+            let expected_roots = BTreeSet::from([hash.clone(), submission_only.clone()]);
+            assert_eq!(library.cityos_retention_roots().unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
+
+            SAVE_FAULT.with(|fault| fault.set(Some(phase)));
+            assert!(library.import_checkpoint(&file.id, &portable).is_err(), "{phase}");
+            assert_eq!(SAVE_FAULT.with(|fault| fault.get()), None, "must reach the {phase} boundary");
+            assert_eq!(std::fs::read(&document_path).unwrap(), original_document);
+            assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
+            assert_eq!(std::fs::read(&submission_path).unwrap(), original_record);
+            assert!(!library.checkpoint_path(&file.id).unwrap().exists());
+            if phase == "before-journal" {
+                assert!(!journal.exists());
+            } else {
+                let pending: PendingSave = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+                assert_eq!(pending.payloads, BTreeMap::from([(hash.clone(), bytes.to_vec())]));
+                assert_eq!(pending.required_pins, Some(vec![hash.clone()]));
+            }
+            let expected_bytes: &[u8] = if phase == "payloads" { bytes } else { b"corrupt local object" };
+            assert_eq!(std::fs::read(&payload_path).unwrap(), expected_bytes);
+            let repaired_mtime = (phase == "payloads").then(|| backdate_cas(&library, &hash));
+            drop(library);
+
+            let reopened = Library::open(&temp.0).unwrap();
+            if phase == "before-journal" {
+                assert_eq!(std::fs::read(&document_path).unwrap(), original_document);
+                reopened.import_checkpoint(&file.id, &portable).unwrap();
+            }
+            assert_eq!(reopened.load_checkpoint(&file.id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
+            assert_eq!(reopened.load_cityos_payload(&hash).unwrap(), bytes);
+            if let Some(modified) = repaired_mtime {
+                assert_eq!(std::fs::metadata(&payload_path).unwrap().modified().unwrap(), modified);
+            }
+            assert!(!journal.exists());
+            assert_eq!(std::fs::read(&submission_path).unwrap(), original_record);
+            assert_eq!(reopened.load_submission(&command.operation_id).unwrap(), original);
+            assert!(original.frozen());
+            assert_eq!(reopened.cityos_retention_roots().unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
+            assert!(reopened.load_cityos_payload(&submission_only).is_err());
+            assert!(reopened.dispatch_prepared(command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
+            assert_eq!(dispatches, 0, "repair must not bypass the still-missing submission dependency");
         }
     }
 

@@ -227,14 +227,11 @@ pub fn show(app: &mut App, ui: &mut Ui, content: Rect) {
         crate::panels::var_bind::bind_picker(app, &ctx);
         return;
     }
+    app.sync_variable_collection();
     let screen = ctx.content_rect();
     let floating = !app.vars.full;
     let g = Geom { panel: if floating { floating_rect(app, screen) } else { content }, floating, sidebar: !app.vars.sidebar_hidden };
     let view = VariableStore::from_doc(&app.doc);
-    if !app.vars.collection.as_ref().is_some_and(|c| view.collections.contains_key(c)) {
-        app.vars.collection = view.collections.keys().next().cloned();
-        app.vars.group = None;
-    }
     if let (Some(gp), Some(c)) = (app.vars.group.clone(), app.vars.collection.as_ref().and_then(|c| view.collections.get(c))) {
         if !group_paths(&view, c).iter().any(|(p, _)| *p == gp) {
             app.vars.group = None;

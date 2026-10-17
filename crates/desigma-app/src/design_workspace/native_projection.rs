@@ -60,8 +60,10 @@ struct Text {
 }
 struct Occurrence { definition: String, source: String, parent: Option<String> }
 fn identity(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
-        && !value.contains(['/', '\\']) && !value.contains("..")
+    // ExperienceComposition identifiers permit slash, colon and dot. These
+    // references are data keys and never enter filesystem path resolution.
+    value.len() <= 512 && value.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'/' | b'-'))
 }
 fn literal(value: &Value, key: &str) -> Result<String, String> {
     value[key].as_str().filter(|v| identity(v)).map(str::to_owned).ok_or_else(|| format!("Invalid scene {key}"))
@@ -76,7 +78,8 @@ fn color(value: [f32; 4]) -> Result<Color, String> {
 pub(super) fn document(projection: &Value, name: &str) -> Result<(Document, BTreeMap<String, CityosOccurrence>), String> {
     let scene: Scene = serde_json::from_value(projection["scene"].clone()).map_err(|e| format!("Invalid native scene: {e}"))?;
     let material_scene = scene.adapter == "cityos.living-canvas-frame-material.native-scene.v1";
-    if scene.schema_version != "cityos.desigma-native-scene.v1" || !(material_scene || scene.adapter == "cityos.accordion.visual.v1")
+    let lower_level_scene = scene.adapter == "cityos.living-canvas-lower-level.native-scene.v1";
+    if scene.schema_version != "cityos.desigma-native-scene.v1" || !(material_scene || lower_level_scene || scene.adapter == "cityos.accordion.visual.v1")
         || !matches!((scene.locale.as_str(), scene.direction.as_str()), ("ar", "rtl") | ("en", "ltr"))
         || !matches!(scene.theme.as_str(), "light" | "dark")
         || !finite(scene.viewport.width, 1., 8192.) || !finite(scene.viewport.height, 1., 8192.)
@@ -91,6 +94,16 @@ pub(super) fn document(projection: &Value, name: &str) -> Result<(Document, BTre
             parent: match &row["parent"] { Value::Null => None, Value::String(parent) if semantic.contains_key(parent) => Some(parent.clone()),
                 _ => return Err("Semantic scene parent must precede its child".into()) } };
         if row["protected"] != true || semantic.insert(id, occurrence).is_some() { return Err("Duplicate or unprotected semantic scene occurrence".into()); }
+    }
+    // Standalone L1/L7 definitions retain their authored root. They cannot gain
+    // a synthetic surface parent, additional owner interiors or another shape.
+    if lower_level_scene {
+        let root = semantic.values().next().ok_or("Missing standalone native scene owner")?;
+        if semantic.len() != 1 || root.parent.is_some()
+            || !matches!(root.definition.as_str(), "cityos.l1.living-material.v1" | "cityos.l7.living-horizon-region.v1")
+            || scene.nodes.len() != 1 || scene.nodes[0].parent.is_some() || scene.nodes[0].kind != "frame" {
+            return Err("Standalone native scene requires its one registered authored root".into());
+        }
     }
     let mut doc = Document::new(name);
     let page = doc.add_page("Bound canvas");
@@ -110,7 +123,7 @@ pub(super) fn document(projection: &Value, name: &str) -> Result<(Document, BTre
         }
         let owner = semantic.get(&row.occurrence_id).ok_or("Unknown native scene semantic occurrence")?;
         if let Some(effects) = &row.effects {
-            if !material_scene || row.kind != "frame" || owner.definition != "cityos.l1.living-material.v1" || effects.len() > 4 {
+            if !(material_scene || lower_level_scene) || row.kind != "frame" || owner.definition != "cityos.l1.living-material.v1" || effects.len() > 4 {
                 return Err("Unsupported native scene effects or material owner".into());
             }
         }
@@ -291,6 +304,79 @@ mod tests {
         let mut flat = p; flat["scene"]["nodes"][1]["effects"] = json!([]);
         let (doc, _) = super::super::projection_document(&flat, "Flat").unwrap();
         assert!(doc.nodes.values().all(|n|n.effects.is_empty()));
+    }
+    fn lower_level_projection(horizon: bool) -> Value {
+        let p = material_projection();
+        let mut semantic = p["nodes"][if horizon { 2 } else { 1 }].clone();
+        semantic["parent"] = Value::Null;
+        if horizon { semantic["definitionId"] = json!("cityos.l7.living-horizon-region.v1"); }
+        let mut primitive = p["scene"]["nodes"][if horizon { 2 } else { 1 }].clone();
+        primitive["parent"] = Value::Null;
+        let mut result = json!({"nodes":[semantic],"scene":p["scene"]});
+        result["scene"]["adapter"] = json!("cityos.living-canvas-lower-level.native-scene.v1");
+        result["scene"]["nodes"] = json!([primitive]);
+        result
+    }
+    #[test]
+    fn standalone_material_and_horizon_keep_their_authored_root_and_view_identity_on_reopen() {
+        for horizon in [false, true] {
+            let p = lower_level_projection(horizon);
+            let (doc, bindings) = super::super::projection_document(&p, "Standalone").unwrap();
+            let source = if horizon { "horizon" } else { "material" };
+            let root = doc.nodes.values().find(|node| node.source_id.as_deref() == Some(source)).unwrap();
+            assert_eq!(root.parent, Some(doc.pages[0]));
+            assert!(root.locked);
+            assert_eq!(bindings.len(), 1);
+            let binding = &bindings[&root.id.0.to_string()];
+            assert_eq!(binding.source_node_id, source);
+            assert_eq!(binding.definition_id, if horizon { "cityos.l7.living-horizon-region.v1" } else { "cityos.l1.living-material.v1" });
+            assert_eq!(binding.occurrence_id, p["nodes"][0]["id"].as_str().unwrap());
+            assert_eq!(binding.view_id, format!("native-canvas/{}", p["scene"]["nodes"][0]["id"].as_str().unwrap()));
+            assert_eq!(root.effects.len(), if horizon { 0 } else { 2 });
+            let reopened = Document::from_json(&doc.to_json().unwrap()).unwrap();
+            assert_eq!(reopened.get(root.id).unwrap().effects, root.effects);
+            assert_eq!(reopened.nodes.len(), doc.nodes.len());
+        }
+    }
+    #[test]
+    fn canonical_source_identifiers_with_slashes_and_dots_survive_the_native_importer() {
+        let mut p = lower_level_projection(false);
+        p["nodes"][0]["id"] = json!("draft:authored/root:material.v1");
+        p["nodes"][0]["sourceNodeId"] = json!("authored/root:material.v1");
+        p["scene"]["nodes"][0]["occurrenceId"] = p["nodes"][0]["id"].clone();
+        p["scene"]["nodes"][0]["id"] = json!("draft:scene:authored/root:material.v1");
+        let (doc, bindings) = super::super::projection_document(&p, "Authored identity").unwrap();
+        let occurrence = bindings.values().next().unwrap();
+        assert_eq!(occurrence.source_node_id, "authored/root:material.v1");
+        assert_eq!(occurrence.occurrence_id, "draft:authored/root:material.v1");
+        assert_eq!(occurrence.view_id, "native-canvas/draft:scene:authored/root:material.v1");
+        assert!(doc.nodes.values().any(|node| node.source_id.as_deref() == Some("authored/root:material.v1")));
+        // Identifiers are bounded data, never filesystem paths. Retain the
+        // canonical alphabet while rejecting controls, backslashes and spaces.
+        for invalid in ["root\0child", "root\\child", "root child", "root\nchild"] {
+            let mut invalid_projection = p.clone();
+            invalid_projection["nodes"][0]["sourceNodeId"] = json!(invalid);
+            assert!(super::super::projection_document(&invalid_projection, "Invalid identity").is_err());
+        }
+    }
+    #[test]
+    fn standalone_scenes_reject_synthetic_parents_foreign_owners_interiors_and_horizon_effects() {
+        for case in ["surface", "foreign", "unregistered-horizon-alias", "semantic-parent", "extra-occurrence", "extra-view", "view-parent", "primitive", "unknown-adapter", "horizon-effects"] {
+            let mut p = lower_level_projection(case == "horizon-effects");
+            match case {
+                "surface" => p["nodes"][0]["definitionId"] = json!("cityos.l9.living-canvas-frame.v1"),
+                "foreign" => p["nodes"][0]["definitionId"] = json!("owner.foreign"),
+                "unregistered-horizon-alias" => p["nodes"][0]["definitionId"] = json!("cityos.l7.living-horizon.v1"),
+                "semantic-parent" => p["nodes"][0]["parent"] = json!("invented-surface"),
+                "extra-occurrence" => { let mut row = p["nodes"][0].clone(); row["id"] = json!("other"); p["nodes"].as_array_mut().unwrap().push(row); },
+                "extra-view" => { let mut row = p["scene"]["nodes"][0].clone(); row["id"] = json!("interior"); p["scene"]["nodes"].as_array_mut().unwrap().push(row); },
+                "view-parent" => p["scene"]["nodes"][0]["parent"] = json!("invented-surface"),
+                "primitive" => p["scene"]["nodes"][0]["kind"] = json!("path"),
+                "unknown-adapter" => p["scene"]["adapter"] = json!("cityos.living-canvas-lower-level.native-scene.future"),
+                _ => p["scene"]["nodes"][0]["effects"] = json!([]),
+            }
+            assert!(super::super::projection_document(&p, "Rejected standalone").is_err(), "{case}");
+        }
     }
     #[test]
     fn material_effects_reject_unknown_owners_adapters_shapes_and_unbounded_payloads() {

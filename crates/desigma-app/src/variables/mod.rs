@@ -5,6 +5,7 @@
 pub mod popover;
 pub mod view;
 pub mod widgets;
+mod collection;
 
 use crate::app::App;
 use crate::edit::Tx;
@@ -84,6 +85,8 @@ pub struct VarsState {
     pub sidebar_hidden: bool,
     /// Selected collection id.
     pub collection: Option<String>,
+    /// Page on which collection browsing was last reconciled; never persisted.
+    collection_page: Option<NodeId>,
     /// Selected group path (`None` = "All").
     pub group: Option<String>,
     /// Selected variable rows (ids) and the range anchor.
@@ -116,6 +119,7 @@ impl Default for VarsState {
             float_pos: None,
             sidebar_hidden: false,
             collection: None,
+            collection_page: None,
             group: None,
             selected: vec![],
             anchor: None,
@@ -137,6 +141,33 @@ impl Default for VarsState {
     }
 }
 
+impl VarsState {
+    fn clear_collection_rows(&mut self) {
+        self.group = None;
+        self.selected.clear();
+        self.anchor = None;
+        self.scroll = 0.0;
+        self.scroll_x = 0.0;
+        self.menu = None;
+        self.alias_picker = None;
+        self.bind_picker = None;
+        self.edit = None;
+        self.drag = None;
+        self.focus_name = None;
+        self.renaming = None;
+    }
+
+    /// Keep panel preferences while discarding another document's identities.
+    pub(crate) fn reset_document_selection(&mut self) {
+        self.collection = None;
+        self.collection_page = None;
+        self.clear_collection_rows();
+        self.cell_picker = None;
+        self.search.clear();
+        self.folded.clear();
+    }
+}
+
 impl App {
     /// The document with variable bindings applied, for exporters that read raw
     /// node properties (borrowed when nothing is bound).
@@ -150,12 +181,31 @@ impl App {
 
     pub fn open_variables(&mut self) {
         self.vars.open = true;
-        let known = self.vars.collection.as_ref().is_some_and(|c| self.doc.variable_collections.contains_key(c));
-        if !known {
-            self.vars.collection = self.doc.get(self.page).and_then(|page|page.variables.modes.keys().find(|id|self.doc.variable_collections.contains_key(*id))).cloned()
-                .or_else(||self.doc.variable_collections.keys().next().cloned());
-        }
+        self.sync_variable_collection();
         self.ui.menu = None;
+    }
+
+    /// Reconcile presentation selection without changing variables or history.
+    /// Same-page manual choices survive; a theme page change follows its mode.
+    pub(crate) fn sync_variable_collection(&mut self) {
+        let current = self.vars.collection.as_deref().filter(|id| self.doc.variable_collections.contains_key(*id));
+        let page_collection = self.doc.get(self.page).and_then(|page| page.variables.modes.keys()
+            .find(|id| self.doc.variable_collections.contains_key(*id))).map(String::as_str);
+        let next = collection::select_collection(current, self.vars.collection_page != Some(self.page), page_collection,
+            self.doc.variable_collections.keys().next().map(String::as_str)).map(String::from);
+        if next != self.vars.collection {
+            self.finish_variable_editors();
+            self.vars.clear_collection_rows();
+            self.vars.collection = next;
+        }
+        self.vars.collection_page = Some(self.page);
+    }
+
+    /// Finish live colour values on their original document before switching.
+    pub(crate) fn finish_variable_editors(&mut self) {
+        if let Some(picker) = self.vars.cell_picker.take() {
+            self.finish_cell_picker(picker);
+        }
     }
 
     /// Rail "Variables" item: opens the view in its last form, or closes it.

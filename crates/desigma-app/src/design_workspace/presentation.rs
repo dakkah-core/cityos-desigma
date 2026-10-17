@@ -47,6 +47,8 @@ pub(super) fn scene_matches(projection: &Value, sent: Option<&Value>) -> bool {
 
 pub(super) fn scene_resource(resource: &Value) -> bool {
     matches!(resource["fixture"].as_str(), Some("cityos-accordion" | "cityos-web-frame"))
+        || resource["fixture"] == "cityos-lower-level"
+            && resource["nativeSceneAdapter"] == "cityos.living-canvas-lower-level.native-scene.v1"
 }
 
 pub(super) fn install(app: &mut App, projection: Document) -> Result<(), String> {
@@ -114,6 +116,19 @@ mod tests {
     use super::*;
     use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Command, Node, Rect};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn standalone_native_scenes_require_the_explicit_adapter_without_upgrading_saved_protected_profiles() {
+        let mut resource = json!({"fixture":"cityos-lower-level","actualWebPreview":true});
+        assert!(!scene_resource(&resource));
+        resource["nativeSceneAdapter"] = json!("cityos.living-canvas-lower-level.native-scene.v1");
+        assert!(scene_resource(&resource));
+        resource["nativeSceneAdapter"] = json!("unqualified");
+        assert!(!scene_resource(&resource));
+        resource["fixture"] = json!("foreign");
+        resource["nativeSceneAdapter"] = json!("cityos.living-canvas-lower-level.native-scene.v1");
+        assert!(!scene_resource(&resource));
+    }
 
     fn document() -> Document {
         let mut doc = Document::new("Saved Accordion");
