@@ -2,6 +2,14 @@
 //! Only these fixed routes leave Desigma; catalog data and credentials do not.
 use crate::theme;
 use egui::{RichText, Ui};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}};
+use std::time::{Duration, Instant};
+
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDOFF_POLL: Duration = Duration::from_millis(25);
+const UI_POLL: Duration = Duration::from_millis(50);
+static HANDOFF_WORKER: AtomicBool = AtomicBool::new(false);
+const SESSION_ID: &str = "cityos-atlas-tools-session";
 
 const ATLAS_SITE: &str = "https://cityos-atlas.qahtani1979.chatgpt.site/atlas-v4.1/";
 const PRIVATE_ACCESS: &str = "Private Site · sign in with your approved account in your browser.";
@@ -62,18 +70,116 @@ fn atlas_url_allowed(url: &str) -> bool {
     DESTINATIONS.iter().any(|destination| destination.url() == url)
 }
 
-fn open_atlas_url(url: &str) -> Result<(), String> {
+fn validate_atlas_url(url: &str) -> Result<(), String> {
     if !atlas_url_allowed(url) {
         return Err("Blocked Atlas link. Use one of the registered Atlas tools.".into());
     }
     #[cfg(feature = "open-url")]
     {
-        crate::home::open_link(url)
+        Ok(())
     }
     #[cfg(not(feature = "open-url"))]
     {
         Err(BROWSER_DISABLED.into())
     }
+}
+
+// Only the worker calls the OS launcher. All commands come from the existing
+// pinned `open` dependency for an exact allowlisted URL, never catalog content.
+fn open_atlas_url(url: &str, cancelled: &AtomicBool, deadline: Instant) -> Result<(), String> {
+    validate_atlas_url(url)?;
+    #[cfg(feature = "open-url")]
+    {
+        let mut spawn_error = "No system browser launcher is available.".to_string();
+        for mut command in open::commands(url) {
+            handoff_active(cancelled, deadline)?;
+            command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            match command.spawn() {
+                Ok(mut child) => return wait_for_helper(&mut child, cancelled, deadline),
+                Err(error) => spawn_error = format!("Could not start the system browser launcher ({:?}).", error.kind()),
+            }
+        }
+        Err(spawn_error)
+    }
+    #[cfg(not(feature = "open-url"))]
+    { let _ = (cancelled, deadline); Err(BROWSER_DISABLED.into()) }
+}
+
+fn handoff_active(cancelled: &AtomicBool, deadline: Instant) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("Browser handoff canceled. Your browser may already have opened.".into())
+    } else if Instant::now() >= deadline {
+        Err("Browser handoff timed out. Check your browser before retrying.".into())
+    } else { Ok(()) }
+}
+
+#[cfg(any(feature = "open-url", test))]
+fn wait_for_helper(child: &mut std::process::Child, cancelled: &AtomicBool, deadline: Instant) -> Result<(), String> {
+    struct Helper<'a> { child: &'a mut std::process::Child, reaped: bool }
+    impl Drop for Helper<'_> {
+        fn drop(&mut self) {
+            if !self.reaped {
+                // Own only the launcher child. Never search for/kill a browser,
+                // its descendants, or another application's PID. Off the UI.
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+    let mut helper = Helper { child, reaped: false };
+    loop {
+        handoff_active(cancelled, deadline)?;
+        match helper.child.try_wait() {
+            Ok(Some(status)) => {
+                helper.reaped = true;
+                return if status.success() { Ok(()) } else {
+                    Err(format!("The browser launcher failed (exit {}).", status.code().map_or("unknown".into(), |code| code.to_string())))
+                };
+            }
+            Ok(None) => std::thread::park_timeout(HANDOFF_POLL),
+            Err(error) => return Err(format!("Could not observe the browser launcher ({:?}).", error.kind())),
+        }
+    }
+}
+
+struct WorkerPermit;
+impl Drop for WorkerPermit {
+    fn drop(&mut self) { HANDOFF_WORKER.store(false, Ordering::Release); }
+}
+
+struct PendingLaunch {
+    destination: Destination,
+    cancelled: Arc<AtomicBool>,
+    result: Receiver<Result<(), String>>,
+    worker: std::thread::Thread,
+}
+impl PendingLaunch {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.worker.unpark();
+    }
+}
+impl Drop for PendingLaunch {
+    fn drop(&mut self) { self.cancel(); } // No join or OS wait on the UI thread.
+}
+
+fn spawn_handoff(destination: Destination, work: impl FnOnce(&AtomicBool, Instant) -> Result<(), String> + Send + 'static) -> Result<PendingLaunch, String> {
+    HANDOFF_WORKER.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "A previous browser handoff is still finishing. Check your browser or try again shortly.".to_string())?;
+    let permit = WorkerPermit;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal = cancelled.clone();
+    let (send, result) = mpsc::sync_channel(1);
+    let deadline = Instant::now() + HANDOFF_TIMEOUT;
+    let worker = std::thread::Builder::new().name("atlas-browser-handoff".into()).spawn(move || {
+        let outcome = handoff_active(&signal, deadline).and_then(|()| work(&signal, deadline));
+        // A new launch is permitted only after the owned helper has been reaped.
+        drop(permit);
+        let _ = send.send(outcome);
+    }).map_err(|_| "Could not start browser handoff. Copy the link and open it manually.".to_string())?;
+    let handle = worker.thread().clone();
+    drop(worker); // Worker owns cleanup; disposal only signals cancellation.
+    Ok(PendingLaunch { destination, cancelled, result, worker: handle })
 }
 
 struct LaunchFailure {
@@ -82,20 +188,67 @@ struct LaunchFailure {
 }
 
 #[derive(Default)]
-pub(super) struct AtlasTools {
+struct AtlasSession {
     failure: Option<LaunchFailure>,
-    menu_open: bool,
+    pending: Option<PendingLaunch>,
+    dispatched: Option<Destination>,
+}
+impl AtlasSession {
+    fn open(&mut self, destination: Destination) {
+        if self.pending.is_some() { return; }
+        self.failure = None;
+        self.dispatched = None;
+        let launch = validate_atlas_url(&destination.url()).and_then(|()|
+            spawn_handoff(destination, move |cancelled, deadline| open_atlas_url(&destination.url(), cancelled, deadline)));
+        match launch {
+            Ok(pending) => self.pending = Some(pending),
+            Err(message) => self.failure = Some(LaunchFailure { destination, message }),
+        }
+    }
+    fn poll(&mut self, ctx: &egui::Context) {
+        let outcome = self.pending.as_ref().map(|pending| (pending.destination, pending.result.try_recv()));
+        match outcome {
+            Some((_, Err(TryRecvError::Empty))) => ctx.request_repaint_after(UI_POLL),
+            Some((destination, result)) => {
+                self.pending = None;
+                match result.unwrap_or_else(|_| Err("Browser handoff stopped. Check your browser before retrying.".into())) {
+                    Ok(()) => self.dispatched = Some(destination),
+                    Err(message) => self.failure = Some(LaunchFailure { destination, message }),
+                }
+                ctx.request_repaint();
+            }
+            None => {}
+        }
+    }
+}
+
+// One context-owned session survives catalog/canvas navigation. Workers capture
+// no Context/session Arc: closing the context drops PendingLaunch and cancels it.
+fn session(ctx: &egui::Context) -> Arc<Mutex<AtlasSession>> {
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Arc<Mutex<AtlasSession>>>(egui::Id::new(SESSION_ID)).clone())
+}
+
+#[derive(Default)]
+pub(super) struct AtlasTools { menu_open: bool }
+
+// Expose only UI entry points on the already-visible Browser type; the existing
+// catalog module and its shared ownership/visibility need no changes.
+impl super::Browser {
+    pub(crate) fn atlas_workspace_menu(ui: &mut Ui) { AtlasTools::default().menu(ui); }
+    pub(crate) fn atlas_workspace_feedback(ui: &mut Ui) { AtlasTools::default().feedback(ui); }
 }
 
 impl AtlasTools {
-    fn open(&mut self, destination: Destination) {
-        self.failure = open_atlas_url(&destination.url()).err().map(|message| LaunchFailure { destination, message });
-        // A successful OS handoff says nothing about remote authentication,
-        // availability or analysis qualification. The browser owns those checks.
-    }
 
     pub(super) fn menu(&mut self, ui: &mut Ui) {
-        let menu = ui.menu_button("Atlas ↗", |ui| {
+        let state = session(ui.ctx());
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.poll(ui.ctx());
+        let menu_response = ui.button("Atlas ↗");
+        // Expanding the guide and copying links must leave the menu readable.
+        // Destinations close explicitly after starting their browser handoff.
+        let menu = egui::Popup::menu(&menu_response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_max_width(320.0);
             ui.strong("CityOS Atlas");
             ui.add(egui::Label::new(RichText::new("Investigate architecture · prepare fixes").small().color(theme::TEXT_SECONDARY)).wrap());
@@ -106,10 +259,12 @@ impl AtlasTools {
             for destination in DESTINATIONS {
                 ui.push_id(destination.page(), |ui| {
                     ui.horizontal(|ui| {
-                        let response = ui.add_enabled(cfg!(feature = "open-url"), egui::Button::new(format!("{} ↗", destination.label())));
+                        let disabled = if cfg!(feature = "open-url") { "A browser handoff is in progress. Check its status below." } else { BROWSER_DISABLED };
+                        let response = ui.add_enabled(cfg!(feature = "open-url") && state.pending.is_none(), egui::Button::new(format!("{} ↗", destination.label())));
                         crate::widgets::record(ui, &format!("catalog-atlas-{}", destination.page()), response.rect);
-                        if response.on_hover_text(destination.hint()).on_disabled_hover_text(BROWSER_DISABLED).clicked() {
-                            self.open(destination);
+                        if response.on_hover_text(destination.hint()).on_disabled_hover_text(disabled).clicked() {
+                            state.open(destination);
+                            ui.ctx().request_repaint();
                             ui.close();
                         }
                         if !cfg!(feature = "open-url") {
@@ -124,16 +279,17 @@ impl AtlasTools {
             }
             ui.separator();
             ui.add(egui::Label::new(RichText::new(PRIVATE_ACCESS).small().color(theme::TEXT_SECONDARY)).wrap());
-            ui.collapsing("Prepare fixes for Codex", |ui| {
+            let guide = ui.collapsing("Prepare fixes for Codex", |ui| {
                 ui.add(egui::Label::new("In Atlas Reports, use a completed report's Download Codex batches action. The ZIP contains README.md, numbered batches of up to 25 tasks, and the original full report.").wrap());
                 ui.add(egui::Label::new("Open Codex in C:/Dakkah-CityOS/dakkah-cityos-cms. Load README.md plus one downloaded .codex.md batch at a time. Run batches serially by default.").wrap());
                 ui.add(egui::Label::new("Before changing code, match the report's exact source pin to the CMS checkout. These links follow the latest accepted analysis; choose and pin the intended run in Atlas.").wrap());
                 ui.add(egui::Label::new("Optional CLI fallback: scripts/atlas-codex-pack.mjs in the Atlas repository.").wrap());
             });
+            crate::widgets::record(ui, "catalog-atlas-guide", guide.header_response.rect);
         });
-        self.menu_open = menu.inner.is_some();
-        crate::widgets::record(ui, "catalog-atlas-menu", menu.response.rect);
-        menu.response.on_hover_text("Open private Atlas tools in your default browser");
+        self.menu_open = menu.is_some();
+        crate::widgets::record(ui, "catalog-atlas-menu", menu_response.rect);
+        menu_response.on_hover_text("Open private Atlas tools in your default browser");
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -141,24 +297,37 @@ impl AtlasTools {
     }
 
     pub(super) fn feedback(&mut self, ui: &mut Ui) {
-        let Some(failure) = &self.failure else { return; };
-        let destination = failure.destination;
-        let message = failure.message.clone();
+        let state = session(ui.ctx());
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        state.poll(ui.ctx());
+        let pending = state.pending.is_some();
+        let (destination, message, failed) = if let Some(job) = &state.pending {
+            (job.destination, if job.cancelled.load(Ordering::Acquire) { "Canceling browser handoff… Your browser may already have opened." } else { "Sending to your browser…" }.to_string(), false)
+        } else if let Some(failure) = &state.failure {
+            (failure.destination, format!("Atlas could not open: {}", failure.message), true)
+        } else if let Some(destination) = state.dispatched {
+            (destination, "Browser handoff finished. Check your browser and sign in with your approved account. Atlas access has not been verified.".into(), false)
+        } else { return; };
         let mut retry = false;
         let mut dismiss = false;
         egui::Frame::new().inner_margin(egui::Margin::symmetric(theme::CATALOG_PAD, 6)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.add(egui::Label::new(RichText::new(format!("Atlas could not open: {message}")).color(theme::DANGER)).wrap());
-                retry = ui.add_enabled(cfg!(feature = "open-url"), egui::Button::new("Retry"))
-                    .on_disabled_hover_text(BROWSER_DISABLED).clicked();
+                if pending { ui.spinner(); }
+                ui.add(egui::Label::new(RichText::new(message).color(if failed { theme::DANGER } else { theme::TEXT_SECONDARY })).wrap());
+                if pending {
+                    if ui.button("Cancel handoff").clicked() { if let Some(job) = &state.pending { job.cancel(); } }
+                } else if failed {
+                    retry = ui.add_enabled(cfg!(feature = "open-url"), egui::Button::new("Retry"))
+                        .on_disabled_hover_text(BROWSER_DISABLED).clicked();
+                }
                 let copy = ui.button("Copy Atlas link");
                 crate::widgets::record(ui, "catalog-atlas-copy-failure", copy.rect);
                 if copy.clicked() { ui.ctx().copy_text(destination.url()); }
-                dismiss = ui.button("Dismiss").clicked();
+                if !pending { dismiss = ui.button("Dismiss").clicked(); }
             });
         });
-        if dismiss { self.failure = None; }
-        else if retry { self.open(destination); }
+        if dismiss { state.failure = None; state.dispatched = None; }
+        else if retry { state.open(destination); ui.ctx().request_repaint(); }
     }
 }
 
@@ -209,7 +378,7 @@ mod tests {
         ];
         for url in invalid {
             assert!(!atlas_url_allowed(&url), "Unexpected allowlisted URL: {url}");
-            assert!(open_atlas_url(&url).unwrap_err().starts_with("Blocked Atlas link."));
+            assert!(validate_atlas_url(&url).unwrap_err().starts_with("Blocked Atlas link."));
         }
     }
 
@@ -296,7 +465,8 @@ mod tests {
     #[test]
     fn browser_failure_offers_the_exact_destination_for_manual_recovery() {
         let ctx = egui::Context::default();
-        let mut tools = AtlasTools { failure: Some(LaunchFailure { destination: Destination::Reports, message: "No default browser is configured".into() }), ..Default::default() };
+        let mut tools = AtlasTools::default();
+        session(&ctx).lock().unwrap().failure = Some(LaunchFailure { destination: Destination::Reports, message: "No default browser is configured".into() });
         frame(&mut tools, &ctx, 390.0, vec![]);
         let output = frame(&mut tools, &ctx, 390.0, vec![]);
         let mut text = String::new();
@@ -315,7 +485,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.all_styles_mut(|style| style.animation_time = 0.0);
         let mut tools = AtlasTools::default();
-        assert_eq!(open_atlas_url(&Destination::Reports.url()), Err(BROWSER_DISABLED.into()));
+        assert_eq!(validate_atlas_url(&Destination::Reports.url()), Err(BROWSER_DISABLED.into()));
         frame(&mut tools, &ctx, 390.0, vec![]);
         frame(&mut tools, &ctx, 390.0, vec![]);
         click(&mut tools, &ctx, 390.0, "catalog-atlas-menu");
@@ -327,6 +497,10 @@ mod tests {
         let copied = click(&mut tools, &ctx, 390.0, "catalog-atlas-copy-reports");
         assert!(copied.platform_output.commands.iter().any(|command| matches!(command,
             egui::OutputCommand::CopyText(text) if text == &Destination::Reports.url())));
-        assert!(tools.failure.is_none());
+        assert!(session(&ctx).lock().unwrap().failure.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "tools/launch_tests.rs"]
+mod launch_tests;

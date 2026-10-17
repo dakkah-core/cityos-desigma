@@ -7,6 +7,8 @@ mod submission_recovery;
 mod repaint;
 mod native_projection;
 mod presentation;
+#[cfg(test)]
+mod atlas_tests;
 use crate::app::App;
 pub use bridge::Config;
 #[cfg(test)]
@@ -1387,6 +1389,7 @@ impl Workspace {
                     if let Some(draft)=self.active_draft(app){self.send(json!({"op":"Export","draft":draft}));}
                 }
                 ui.strong(if self.preview_only { "Design preview" } else { "CityOS workspace" });
+                crate::cityos_catalog::Browser::atlas_workspace_menu(ui);
                 if ui.add_enabled(self.busy.is_none()&&!self.recovery_pending, egui::Button::new("Choose design file…")).clicked() {
                     self.choose_design_file();
                 }
@@ -1482,6 +1485,7 @@ impl Workspace {
                 }
                 if !self.preview_only { ui.toggle_value(&mut self.layout.inspector, "Properties"); }
             });
+            crate::cityos_catalog::Browser::atlas_workspace_feedback(ui);
         });
         let active_id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
         if active_id.is_some()||!self.tabs.is_empty(){
