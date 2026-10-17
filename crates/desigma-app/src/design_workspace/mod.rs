@@ -7,6 +7,7 @@ mod submission_recovery;
 mod repaint;
 mod native_projection;
 mod presentation;
+mod history_commands;
 #[cfg(test)]
 mod atlas_tests;
 use crate::app::App;
@@ -208,6 +209,7 @@ pub struct Workspace {
     canvas_presentation: Option<Value>,
     resume_presentation: Option<Value>,
     native_fit: Option<presentation::AutoFit>,
+    history_command: Option<history_commands::PendingHistory>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -272,6 +274,7 @@ impl Default for Workspace {
             canvas_presentation: None,
             resume_presentation: None,
             native_fit: None,
+            history_command: None,
         }
     }
 }
@@ -433,7 +436,7 @@ impl Workspace {
         self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
-        self.sent_presentation=None; self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
+        self.sent_presentation=None; self.history_command=None; self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
         self.property_text.clear();
         self.interactive=false;
         self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
@@ -504,7 +507,7 @@ impl Workspace {
         self.dependency_draft = None;
         self.reconciliation_bundle = None;
         self.resume_document = None;
-        self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
+        self.history_command=None; self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
         self.changes_mode=false;self.incoming=None;
         self.host.reset();
         self.preview_only = true;
@@ -720,7 +723,7 @@ impl Workspace {
         self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
-        self.sent_presentation=None; self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
+        self.sent_presentation=None; self.history_command=None; self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
         self.property_text.clear();
         self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
         self.leave_to_library = true;
@@ -1024,10 +1027,12 @@ impl Workspace {
         "renderMode":if self.interactive && self.resource.as_ref().is_none_or(|r|r["fixture"]!="cityos-lower-level"){"interactive-fixture"}else{"studio-passive"},"motion":"reduce"})
     }
     fn poll(&mut self, app: &mut App) {
+        self.dispatch_history_request(app);
         let result = self.bridge.as_ref().and_then(|b| b.replies.try_recv().ok());
         if let Some(result) = result {
             let op = self.busy.take().unwrap_or_default();
             let presentation = self.sent_presentation.take();
+            let history_command = if op == "Command" { self.history_command.take() } else { None };
             match result {
                 Err(error) => {
                     if op == "FixturePreview" { self.specimen_request = None; }
@@ -1098,9 +1103,13 @@ impl Workspace {
                                         self.error = Some("Obsolete draft command response discarded".into());
                                         return;
                                     }
-                                    match app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(document) }) {
-                                        Ok(()) => app.changed(),
-                                        Err(e) => { self.error = Some(e.to_string()); return; },
+                                    if let Some(history_command) = history_command {
+                                        if let Err(error)=history_command.install(app,document) {self.error=Some(error);return;}
+                                    } else {
+                                        match app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(document) }) {
+                                            Ok(()) => app.changed(),
+                                            Err(e) => { self.error = Some(e.to_string()); return; },
+                                        }
                                     }
                                 } else {
                                     if !self.install_resumed_projection(app, document) { self.resume_presentation=projected_key; return; }
@@ -1225,6 +1234,7 @@ impl Workspace {
                 _ => {}
             }
         }
+        self.dispatch_history_request(app);
         self.expire_render_acknowledgement(Instant::now());
         let identity = if self.preview_only { self.staged.as_ref().and_then(revision) } else { revision(&app.doc) };
         if identity != self.observed {
@@ -1341,15 +1351,22 @@ impl Workspace {
         let old_layout = self.layout.clone();
         // Input and WebView IPC wake the window independently. A current draft
         // does not need an idle heartbeat that redraws the entire canvas.
-        if let Some(delay) = self.progress_repaint_delay() { ctx.request_repaint_after(delay); }
-        if let Some(toast) = &app.toast {
-            if app.now < toast.until {
-                ctx.request_repaint_after(Duration::from_secs_f64(toast.until - app.now));
-                egui::Panel::bottom("cityos-workspace-save-status").show(ui, |ui| {
-                    ui.colored_label(if toast.error { ui.visuals().error_fg_color } else { ui.visuals().text_color() }, &toast.text);
-                });
-            }
-        }
+        // A transient notice must not resize the WebView or invalidate a
+        // projection. Reserve one bounded status row in every workspace state.
+        egui::Panel::bottom("cityos-workspace-save-status").exact_size(24.).show(ui, |ui| {
+            let toast=app.toast.as_ref().filter(|toast|app.now<toast.until);
+            if let Some(toast)=toast {ctx.request_repaint_after(Duration::from_secs_f64(toast.until-app.now));}
+            let message=toast.map(|toast|toast.text.as_str()).unwrap_or_else(|| {
+                if self.preview_only {"Temporary preview"}
+                else if app.cityos_submission_frozen() {"Submitted draft · frozen"}
+                else if app.autosave.failures>0 {"Save needs attention · local changes retained"}
+                else if app.autosave.changed_at.is_some() {"Unsaved local changes"}
+                else if app.lib_file.is_some() || app.file_path.is_some() {"Saved draft"}
+                else {"Local draft · not saved yet"}
+            });
+            let color=if toast.is_some_and(|toast|toast.error) {ui.visuals().error_fg_color} else {ui.visuals().text_color()};
+            ui.add(egui::Label::new(egui::RichText::new(message).color(color)).truncate());
+        });
         // `app` remains the user's persistent document while a temporary preview
         // lives in `staged`/`temporary_canvas`. Leaving must still save that draft.
         if !self.recovery_pending { app.autosave_tick(&ctx); }
@@ -1579,7 +1596,9 @@ impl Workspace {
                     let resolutions:Vec<_>=self.resolutions.iter().filter(|(_,value)|!value.is_empty()).map(|(pointer,value)|json!({"sourcePointer":pointer,"resolution":value})).collect();
                     self.send(json!({"op":"Reconcile","expectedRevision":draft["draftRevision"],"draft":draft,"incoming":{"reconciliationId":incoming["reconciliationId"],"pin":incoming["pin"]},"resolutions":resolutions}));
                 }}
-            });return;
+            });
+            if let Some(delay)=self.progress_repaint_delay() {ctx.request_repaint_after(delay);}
+            return;
         }
         if let Some(error) = self.error.clone() {
             egui::Panel::top("cityos-workspace-error").show(ui, |ui| {
@@ -1896,6 +1915,13 @@ impl Workspace {
         }
         if let Some(width) = resized_preview { self.layout.preview_width = width; }
         if old_layout != self.layout { self.save_layout(); }
+        if app.ui.cityos_history_request.is_some() {
+            self.dispatch_history_request(app);
+            ctx.request_repaint();
+        }
+        // Scenario, viewport and command changes can be discovered while laying
+        // out this frame. Schedule their bounded work after those observations.
+        if let Some(delay)=self.progress_repaint_delay() {ctx.request_repaint_after(delay);}
     }
 }
 
@@ -2705,6 +2731,7 @@ mod tests {
             workspace.preview=Some(json!({"draftRevision":0,"observedViewport":{"width":540,"height":608},"scenario":{"fixture":"cityos-accordion"}}));
             let mut sizes=Vec::new();
             for iteration in 0..20 {
+                app.toast=if iteration%4==3 {Some(crate::app::Toast {text:"Save failed: the current draft remains local and can be retried without discarding changes.".into(),error:true,until:100.})} else {None};
                 workspace.current=iteration%4==0;workspace.busy=if iteration%4==1 {Some("Preview".into())}else{None};
                 workspace.render_started=if iteration%4==2 {Some(Instant::now())}else{None};workspace.pending=None;
                 let _=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(width,1019.))),..Default::default()},|ui|workspace.show(&mut app,ui,&frame));

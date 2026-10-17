@@ -199,7 +199,70 @@ pub struct History {
     baseline_id: Option<String>,
 }
 
+/// An in-memory history intent. It grants no semantic validation or write authority.
+/// Its fence survives presentation changes, but not a changed draft, stack or baseline.
+#[derive(Clone, Debug)]
+pub struct CityosHistoryStep {
+    redo: bool,
+    baseline_id: Option<String>,
+    undo_len: usize,
+    redo_len: usize,
+    source: serde_json::Value,
+    command: Command,
+}
+impl CityosHistoryStep {
+    pub fn source(&self) -> &serde_json::Value { &self.source }
+    pub fn target(&self) -> &serde_json::Value {
+        match &self.command {
+            Command::CityosInstall { document } => document.cityos.as_ref().unwrap().exchange().unwrap(),
+            _ => unreachable!("only bound installation commands can prepare history"),
+        }
+    }
+}
+
 impl History {
+    /// Inspect a bound history entry without applying its historical payload.
+    pub fn prepare_cityos(&self, doc: &Document, redo: bool) -> Result<Option<CityosHistoryStep>, DocError> {
+        let Some(command) = (if redo { &self.redo } else { &self.undo }).last() else { return Ok(None); };
+        let Command::CityosInstall { document } = command else { return Err(DocError::CityosProtected); };
+        let source = doc.cityos.as_ref().ok_or(DocError::CityosProtected)?;
+        let target = document.cityos.as_ref().ok_or(DocError::CityosProtected)?;
+        if source.validate().is_err() || target.validate().is_err() || source.base != target.base
+            || source.semantic_base != target.semantic_base || source.draft_id != target.draft_id
+            || source.document_id != target.document_id {
+            return Err(DocError::CityosProtected);
+        }
+        Ok(Some(CityosHistoryStep { redo, baseline_id:self.baseline_id.clone(), undo_len:self.undo.len(), redo_len:self.redo.len(),
+            source:source.exchange().ok_or(DocError::CityosProtected)?.clone(), command:command.clone() }))
+    }
+
+    pub fn cityos_step_current(&self, doc: &Document, step: &CityosHistoryStep) -> bool {
+        let top = (if step.redo { &self.redo } else { &self.undo }).last();
+        self.baseline_id == step.baseline_id && self.undo.len() == step.undo_len && self.redo.len() == step.redo_len
+            && doc.cityos.as_ref().and_then(CityosBinding::exchange) == Some(&step.source)
+            && top.is_some_and(|command| match (serde_json::to_value(command),serde_json::to_value(&step.command)) {
+                (Ok(current),Ok(expected)) => current==expected,
+                _ => false,
+            })
+    }
+
+    /// Install a separately validated command result and move the exact prepared
+    /// stack entry together. Never replay a historical receipt list or clear redo.
+    pub fn commit_cityos(&mut self, doc: &mut Document, step: CityosHistoryStep, validated: Document) -> Result<(), DocError> {
+        if !self.cityos_step_current(doc, &step) { return Err(DocError::CityosProtected); }
+        let next = validated.cityos.as_ref().and_then(CityosBinding::exchange).ok_or(DocError::CityosProtected)?;
+        let revision = step.source["draftRevision"].as_u64().and_then(|r|r.checked_add(1)).ok_or(DocError::CityosProtected)?;
+        if next["draftRevision"].as_u64() != Some(revision) || next["semanticDraft"] != step.target()["semanticDraft"] {
+            return Err(DocError::CityosProtected);
+        }
+        let mut staged = doc.clone();
+        let inverse = (Command::CityosInstall { document:Box::new(validated) }).apply(&mut staged)?;
+        *doc = staged;
+        if step.redo { self.redo.pop(); self.undo.push(inverse); }
+        else { self.undo.pop(); self.redo.push(inverse); }
+        Ok(())
+    }
+
     /// Detaches the active undo/redo stacks at a baseline boundary. Keep the
     /// returned history with its old document; it is not an active undo source.
     pub fn seal(&mut self) -> Self {

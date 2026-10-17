@@ -214,6 +214,7 @@ impl App {
 
     pub fn undo(&mut self) {
         if self.cityos_submission_frozen() { self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true); return; }
+        if self.doc.cityos.is_some() { self.request_cityos_history(false); return; }
         if self.try_undo_restore() {
             return;
         }
@@ -229,6 +230,7 @@ impl App {
 
     pub fn redo(&mut self) {
         if self.cityos_submission_frozen() { self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true); return; }
+        if self.doc.cityos.is_some() { self.request_cityos_history(true); return; }
         if self.try_redo_restore() {
             return;
         }
@@ -239,6 +241,14 @@ impl App {
             }
             Ok(false) => {}
             Err(e) => self.show_toast(format!("Redo failed: {e}"), true),
+        }
+    }
+
+    fn request_cityos_history(&mut self, redo: bool) {
+        if self.ui.cityos_history_request.is_some() { return; }
+        match self.hist.prepare_cityos(&self.doc, redo) {
+            Ok(step) => self.ui.cityos_history_request = step,
+            Err(error) => self.show_toast(format!("Bound history is unavailable: {error}"), true),
         }
     }
 
