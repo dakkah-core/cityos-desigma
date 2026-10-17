@@ -320,6 +320,38 @@ fn theme_actions_explain_unloaded_unselectable_stale_and_local_sources() {
 }
 
 #[test]
+fn theme_detail_prioritizes_its_workflows_instead_of_unrelated_component_binding_errors() {
+    let (selected, specimen, snapshot) = editable_fixture();
+    let (mut browser, _, _) = fixture();
+    browser.selected = Some(selected.clone());
+    browser.specimen = Some(specimen.clone());
+    browser.summary = Some(json!({"snapshot":snapshot}));
+    let ctx = egui::Context::default();
+    let mut output = None;
+    for _ in 0..2 {
+        output = Some(ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.,1000.))), ..Default::default() }, |ui| browser.show(ui, &ctx)));
+    }
+    let mut rendered = String::new();
+    for shape in output.unwrap().shapes { shape_text(&shape.shape, &mut rendered); }
+    for label in ["Token sheet", "Inspection canvas", "Local library", "Owner-bound draft", "Web-frame theme preview", "Create local theme library", "Preview token sheet"] {
+        assert!(rendered.contains(label), "Missing theme workflow {label}: {rendered}");
+    }
+    for unrelated in ["Open actual preview", "Open on canvas", "No exact captured workspace binding", "No editable workspace adapter"] {
+        assert!(!rendered.contains(unrelated), "Theme must not display an unrelated component action/error: {unrelated}");
+    }
+    let actions = support::actions(&selected, Some(&specimen), browser.summary.as_ref(), "committed");
+    let rows = actions.capability_rows();
+    assert_eq!(rows[0].1, "Available");
+    assert_eq!(rows[1].1, "Available");
+    assert_eq!(rows[2].1, "Available");
+    assert_eq!(rows[3].1, "Unavailable", "A local theme library grants no owner binding");
+    assert_eq!(rows[4].1, "Available");
+    let stale = support::actions(&selected, None, browser.summary.as_ref(), "committed");
+    assert_eq!(stale.capability_rows()[0].1, "Unavailable");
+    assert_eq!(stale.capability_rows()[4].1, "Unavailable");
+}
+
+#[test]
 fn nonvisual_dependencies_never_offer_a_visual_fixture_even_when_profile_metadata_conflicts() {
     let mut selected = entry("provider");
     selected.kind = "nonvisual-dependency".into();

@@ -3,6 +3,9 @@ use desigma_cityos_catalog::Entry;
 use serde_json::{json, Value};
 
 pub(super) struct Actions {
+    pub foundation: bool,
+    pub theme: bool,
+    pub inspection_available: bool,
     pub source: Option<String>,
     pub actual_preview: bool,
     pub editable: bool,
@@ -20,9 +23,23 @@ pub(super) const LEVEL_OVERVIEW_TITLE: &str = "Source accounting by level";
 pub(super) const LEVEL_EDITING_TOTALS: &str = "Per-level canvas and editing totals: Not aggregated";
 
 impl Actions {
-    pub(super) fn capability_rows(&self) -> [(&'static str, &'static str, &str); 6] {
+    pub(super) fn capability_rows(&self) -> Vec<(&'static str, &'static str, &str)> {
         let available = |value| if value { "Available" } else { "Unavailable" };
-        [
+        if self.foundation {
+            let mut rows = vec![
+                ("Token sheet", available(self.inspection_available), "Captured values and swatches; a data-only representation."),
+                ("Inspection canvas", available(self.inspection_available), "Temporary native inspection objects; no persistent document is created."),
+                ("Local library", available(self.copy_reason.is_none()), self.copy_reason.as_deref().unwrap_or("Editable native variables and samples in an ordinary local document.")),
+                ("Owner-bound draft", "Unavailable", "Owner theme editing requires a separately qualified Native owner. Local libraries can be edited and saved without that binding."),
+            ];
+            if self.theme {
+                rows.push(("Web-frame theme preview", available(self.theme_reason.is_none()), self.theme_reason.as_deref().unwrap_or("Apply the captured canonical theme to the registered web-frame fixture as a preview scenario.")));
+            }
+            rows.push(("Renderer qualification", "Not established here", "A token sheet or local library does not establish target renderer qualification."));
+            rows.push(("Owner writes", "Separate workflow", "Catalog observations grant no owner-write permission."));
+            return rows;
+        }
+        vec![
             ("Actual preview", if self.preview_choices.is_empty() { available(self.actual_preview) } else { "Choose definition" }, &self.preview_reason),
             ("Structure canvas", available(self.source.is_some() && self.workspace_reason.is_none()), self.workspace_reason.as_deref().unwrap_or("A native inspection projection is separate from actual rendering and editing.")),
             ("Local copy", available(self.copy_reason.is_none()), self.copy_reason.as_deref().unwrap_or("Ordinary local design; no CityOS submission binding.")),
@@ -180,7 +197,8 @@ pub(super) fn actions(entry: &Entry, specimen: Option<&Value>, summary: Option<&
     // registered default remains a temporary view until an explicit local copy.
     let preview_here = actual_preview && profile.is_some_and(|p| p["kind"] == "registered-specimen");
     let workspace_reason = preview_here.then(|| "Registered defaults are temporary. Open in Design to inspect them or create an editable local copy. A bound source draft requires canonical authoring input.".into());
-    Actions { source, actual_preview, editable, preview_reason, edit_reason, copy_reason, theme_reason, inline_pin, preview_choices, preview_here, workspace_reason }
+    Actions { foundation: matches!(entry.kind.as_str(), "theme" | "token" | "design-token"), theme: entry.kind == "theme",
+        inspection_available: specimen.is_some(), source, actual_preview, editable, preview_reason, edit_reason, copy_reason, theme_reason, inline_pin, preview_choices, preview_here, workspace_reason }
 }
 
 pub(super) struct Level {

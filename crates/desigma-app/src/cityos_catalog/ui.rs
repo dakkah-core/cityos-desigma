@@ -522,6 +522,7 @@ impl Browser {
                 ui.small(format!("{label} · {status}")).on_hover_text(reason);
             }
         });
+        if !actions.foundation {
         ui.horizontal_wrapped(|ui| {
             let unavailable = if actions.preview_here {
                 actions.inline_pin.is_none().then_some("Switch to GitLab main and refresh the matching captured implementation before previewing this registered definition.")
@@ -570,6 +571,7 @@ impl Browser {
         });
         ui.label(RichText::new(&actions.preview_reason).small().color(theme::TEXT_SECONDARY));
         if !actions.editable { ui.small(&actions.edit_reason); }
+        }
         for diagnostic in entry.diagnostics.iter().take(3) {
             if let Some(message) = diagnostic["message"].as_str() { ui.small(message); }
         }
@@ -577,7 +579,12 @@ impl Browser {
             ui.small("Workspace actions open canonical source. The local overlay remains a data preview.");
         }
         if matches!(entry.kind.as_str(), "theme" | "design-token" | "token") {
-            if action_button(ui, "catalog-local-copy-action", if entry.kind == "theme" { "Create editable theme library" } else { "Create editable token" }, actions.copy_reason.as_deref()) {
+            ui.horizontal_wrapped(|ui| {
+            if action_button(ui, "catalog-token-sheet-action", "Preview token sheet", (!actions.inspection_available).then_some("Load the selected values before previewing the token sheet.")) {
+                self.specimen_canvas = None;
+                self.detail_tab = DetailTab::Preview;
+            }
+            if action_button(ui, "catalog-local-copy-action", if entry.kind == "theme" { "Create local theme library" } else { "Create editable token" }, actions.copy_reason.as_deref()) {
                 if let (Some(summary), Some(specimen)) = (&self.summary, &self.specimen) {
                     self.local_design_error = None;
                     match super::local_library::create(&entry, specimen, &summary["snapshot"], &self.theme_mode) {
@@ -586,6 +593,7 @@ impl Browser {
                     }
                 }
             }
+            });
             ui.small(actions.copy_reason.as_deref().unwrap_or("Creates an ordinary local design with editable variables. Save it normally; source submission is not enabled."));
         }
         if entry.kind == "theme" {
@@ -622,7 +630,7 @@ impl Browser {
         }
         ui.add_space(theme::CATALOG_GAP);
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.detail_tab, DetailTab::Preview, "Specimen");
+            ui.selectable_value(&mut self.detail_tab, DetailTab::Preview, if actions.foundation { if self.specimen_canvas.is_some() { "Inspection canvas" } else { "Token sheet" } } else { "Specimen" });
             ui.selectable_value(&mut self.detail_tab, DetailTab::Inspector, "Source & support");
             ui.selectable_value(&mut self.detail_tab, DetailTab::Source, "Raw data");
         });

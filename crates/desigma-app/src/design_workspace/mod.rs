@@ -5,6 +5,7 @@ mod layout;
 mod dependencies;
 mod submission_recovery;
 mod repaint;
+mod native_projection;
 use crate::app::App;
 pub use bridge::Config;
 #[cfg(test)]
@@ -263,6 +264,7 @@ impl Default for Workspace {
 }
 
 fn projection_document(projection: &Value, name: &str) -> Result<(Document,BTreeMap<String,CityosOccurrence>),String> {
+    if projection.get("scene").is_some() { return native_projection::document(projection, name); }
     let string = |v: &Value, key: &str| v[key].as_str().map(str::to_owned).ok_or_else(|| format!("Missing {key}"));
     let mut doc = Document::new(name);
     let page = doc.add_page("Bound canvas");
@@ -301,6 +303,12 @@ fn projection_document(projection: &Value, name: &str) -> Result<(Document,BTree
             row["label"].as_str().unwrap_or("Source node"),
             TextStyle { font_size: 16., ..Default::default() },
         );
+        if let desigma_doc::NodeKind::Text(text) = &mut caption.kind {
+            // Inspection labels are derived captions, not unconstrained authored
+            // text. Keep long bilingual summaries inside their native object.
+            text.auto_resize = desigma_doc::TextAutoResize::Truncate;
+            text.max_lines = Some(2);
+        }
         caption.locked = true;
         doc.insert(id, caption).map_err(|e| e.to_string())?;
         occurrences.insert(
@@ -2323,9 +2331,16 @@ mod tests {
                 workspace.settle_specimen_preview(receipt.clone());
                 assert!(workspace.preview.is_some(), "{} / {locale}: {:?}", selected["resourceId"], workspace.error);
                 assert!(workspace.pending.is_none());
+                workspace.local_specimen_request = workspace.captured_specimen_request();
+                bridge.jobs.send(json!({"op":"Fixtures","fixture":workspace.local_specimen_request.as_ref().unwrap().locator,"locale":locale})).unwrap();
+                let projected = bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+                let copy = workspace.local_specimen_document(projected).unwrap_or_else(|error|
+                    panic!("{} / {locale}: {error}", selected["resourceId"]));
+                assert!(copy.cityos.is_none(), "Explicit copies never gain submission authority");
+                assert!(copy.nodes.values().all(|node| !node.locked && node.source_id.is_none()));
                 receipts.push(json!({"resourceId":receipt["resource"]["resourceId"],"locale":locale,
                     "scenario":receipt["scenario"],"artifactDigest":receipt["artifactDigest"],
-                    "provenance":receipt["provenance"],"nativeIdentityAccepted":true,"embeddedRendererObserved":false}));
+                    "provenance":receipt["provenance"],"nativeIdentityAccepted":true,"localCopyIdentityAccepted":true,"embeddedRendererObserved":false}));
             }
         }
         std::fs::write(directory.join("native-specimen-receipts.json"), serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
@@ -2478,6 +2493,25 @@ mod tests {
             "semanticDigest":receipt["semanticDigest"],"nodes":[{"id":"fixture-occurrence","sourceNodeId":"specimen-root","definitionId":"fixture.component",
                 "parent":null,"slot":null,"x":0,"y":0,"width":360,"height":180,"label":"Declared registered default","fill":"#ffffff","protected":true}]});
         receipt
+    }
+    #[test]
+    fn long_projection_captions_remain_inside_native_object_bounds() {
+        let workspace = specimen_workspace();
+        let mut receipt = specimen_projection(&workspace);
+        let label = "كبسولة السياق · Context capsule · state: unavailable · ".repeat(20);
+        receipt["projection"]["nodes"][0]["label"] = json!(label);
+        let (document, _) = projection_document(&receipt["projection"], "Inspection").unwrap();
+        let caption = document.nodes.values().find(|node| matches!(node.kind, desigma_doc::NodeKind::Text(_))).unwrap();
+        let desigma_doc::NodeKind::Text(text) = &caption.kind else { unreachable!() };
+        assert_eq!(text.content, label, "Caption fitting cannot change source content");
+        let outlines = desigma_render::text_outlines(text, caption.size);
+        assert!(!outlines.is_empty());
+        for outline in outlines {
+            let ink = outline.path.bounds();
+            assert!(ink.left() >= -1. && ink.right() <= caption.size.x + 1., "Caption overflow: {ink:?}");
+            assert!(ink.top() >= -1. && ink.bottom() <= caption.size.y + 1.);
+        }
+        assert_eq!(crate::layout::fit_text(text, caption.size), caption.size, "Editing must retain the bounded box");
     }
     #[test]
     fn explicit_registered_local_copy_has_native_objects_and_no_canonical_or_submission_binding() {
