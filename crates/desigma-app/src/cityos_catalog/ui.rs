@@ -6,6 +6,10 @@ use serde_json::Value;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+#[cfg(test)]
+#[path = "preview_menu_tests.rs"]
+mod preview_menu_tests;
+
 const COLLECTIONS: [(&str, &str); 8] = [
     ("design", "Design library"),
     ("themes", "Themes"),
@@ -119,6 +123,47 @@ fn action_button(ui: &mut Ui, id: &str, label: &str, reason: Option<&str>) -> bo
     let clicked = response.clicked();
     if let Some(reason) = reason { response.on_disabled_hover_text(reason); }
     clicked
+}
+
+fn preview_choices_menu(ui: &mut Ui, choices: &[Value]) -> Option<super::WorkspaceRequest> {
+    // Bound the whole popup, including its frame, to the panel and viewport.
+    // Use the panel width rather than the space left in the wrapped action row.
+    let margin = Frame::popup(ui.style()).total_margin().sum();
+    let width = (ui.max_rect().width().min(ui.clip_rect().width()).min(ui.ctx().content_rect().width()).min(560.0) - margin.x).max(1.0);
+    let mut selected = None;
+    let (button, popup) = egui::menu::MenuButton::new("Choose preview…").ui(ui, |ui| {
+        ui.set_width(width);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        ui.small("Choose the definition, version, profile and target for this source.");
+        // Wrapping changes each choice's height. Fixed-height virtual rows would
+        // overlap long labels and skip choices during keyboard navigation.
+        let height = ui.available_height().min(320.0).max(1.0);
+        let scroll = egui::ScrollArea::vertical().id_salt("catalog-preview-choices")
+            .max_height(height).min_scrolled_height(1.0).auto_shrink([false, true]).show(ui, |ui| {
+                for (index, pin) in choices.iter().enumerate() {
+                    let label = format!("{} · {}\n{} · {}\n{}", pin["publicExport"].as_str().unwrap_or("Registered definition"),
+                        pin["componentVersion"].as_str().unwrap_or(""), pin["profileRef"].as_str().unwrap_or(""),
+                        pin["targetProfileRef"].as_str().unwrap_or(""), pin["sourcePath"].as_str().unwrap_or(""));
+                    let choice = ui.push_id(("catalog-preview-choice", index), |ui| {
+                        ui.add(egui::Button::new(label).wrap().min_size(egui::vec2(ui.available_width(), 0.0)))
+                    }).inner;
+                    crate::widgets::record(ui, &format!("catalog-preview-choice-{index}"), choice.rect);
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new(("catalog-preview-choice-id", index)), choice.id));
+                    if choice.gained_focus() { choice.scroll_to_me(Some(Align::Center)); }
+                    if choice.clicked() {
+                        selected = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                        ui.close();
+                    }
+                }
+            });
+        crate::widgets::record(ui, "catalog-preview-scroll", scroll.inner_rect);
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("catalog-preview-content-size"), scroll.content_size));
+    });
+    crate::widgets::record(ui, "catalog-choose-preview", button.rect);
+    if let Some(popup) = popup { crate::widgets::record(ui, "catalog-preview-popup", popup.response.rect); }
+    selected
 }
 
 impl Browser {
@@ -551,23 +596,7 @@ impl Browser {
                 }
             }
             if !actions.preview_choices.is_empty() {
-                ui.menu_button("Choose preview…", |ui| {
-                    ui.set_max_width(560.);
-                    ui.small("Choose the definition, version, profile and target for this source.");
-                    egui::ScrollArea::vertical().max_height(320.).show_rows(ui, 76., actions.preview_choices.len(), |ui, range| {
-                        for index in range {
-                            let pin = &actions.preview_choices[index];
-                            let label = format!("{} · {}\n{} · {}", pin["publicExport"].as_str().unwrap_or("Registered definition"),
-                                pin["componentVersion"].as_str().unwrap_or(""), pin["profileRef"].as_str().unwrap_or(""),
-                                pin["targetProfileRef"].as_str().unwrap_or(""));
-                            let choice = ui.add_sized([540., 72.], egui::Button::new(label).wrap());
-                            if choice.clicked() {
-                                self.workspace_request = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
-                                ui.close();
-                            }
-                        }
-                    });
-                });
+                if let Some(request) = preview_choices_menu(ui, &actions.preview_choices) { self.workspace_request = Some(request); }
             }
             let unavailable = actions.workspace_reason.as_deref().or_else(|| (!actions.editable).then_some(actions.edit_reason.as_str()));
             if action_button(ui, "catalog-edit-action", if self.mode == "local" { "Open canonical draft" } else { "Open on canvas" }, unavailable) {
