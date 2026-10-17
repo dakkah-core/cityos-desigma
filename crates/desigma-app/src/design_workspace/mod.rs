@@ -8,6 +8,7 @@ mod repaint;
 mod native_projection;
 mod presentation;
 mod history_commands;
+mod session;
 #[cfg(test)]
 mod atlas_tests;
 #[cfg(test)]
@@ -15,17 +16,17 @@ mod material_tests;
 #[cfg(test)]
 mod horizon_tests;
 use crate::app::App;
+use session::EditorSession;
 pub use bridge::Config;
 #[cfg(test)]
 use repaint::RENDER_ACK_TIMEOUT;
-use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Color, Command, Document, Node, Paint, Rect, TextStyle};
+use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Command, Document};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 struct DraftTab {
-    document:Document,history:desigma_doc::History,path:Option<std::path::PathBuf>,file:Option<crate::home::LibFile>,
-    autosave:crate::home::Autosave,page:desigma_doc::NodeId,resource:Option<Value>,locale:String,theme:String,theme_id:String,interactive:bool,selected:String,
+    session:Option<EditorSession>,resource:Option<Value>,locale:String,theme:String,theme_id:String,interactive:bool,selected:String,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum DependencyAction { Open, Resume, Reconcile, Accepted }
@@ -284,104 +285,9 @@ impl Default for Workspace {
 }
 
 fn projection_document(projection: &Value, name: &str) -> Result<(Document,BTreeMap<String,CityosOccurrence>),String> {
-    if projection.get("scene").is_some() { return native_projection::document(projection, name); }
-    let string = |v: &Value, key: &str| v[key].as_str().map(str::to_owned).ok_or_else(|| format!("Missing {key}"));
-    let mut doc = Document::new(name);
-    let page = doc.add_page("Bound canvas");
-    let mut occurrences = BTreeMap::new();
-    let mut ids = BTreeMap::new();
-    for row in projection["nodes"].as_array().ok_or("Missing canvas projection")? {
-        let id = doc.alloc_id();
-        let key = string(row, "id")?;
-        if key.is_empty() || ids.contains_key(&key) { return Err("Duplicate or empty native occurrence identity".into()); }
-        ids.insert(key.clone(), id);
-        let number =
-            |name: &str| row[name].as_f64().filter(|n| n.is_finite() && n.abs() < 10000.).map(|n| n as f32).ok_or_else(|| format!("Invalid projection {name}"));
-        let parent = match row.get("parent") {
-            None | Some(Value::Null) => page,
-            Some(Value::String(parent)) => *ids.get(parent).filter(|parent| **parent != id).ok_or("Native projection parent must precede its child")?,
-            _ => return Err("Invalid native projection parent".into()),
-        };
-        if number("width")?<=0. || number("height")?<=0. { return Err("Invalid native projection extent".into()); }
-        let mut node = Node::frame(id, Rect::new(number("x")?, number("y")?, number("width")?, number("height")?));
-        // Adapter coordinates are page-space. Native nodes retain the named-slot parent relation.
-        if parent != page {
-            let transform = doc.world_transform(parent);
-            node.transform.tx -= transform.tx;
-            node.transform.ty -= transform.ty;
-        }
-        node.name = string(row, "label")?;
-        node.source_id = Some(string(row, "sourceNodeId")?);
-        node.locked = true;
-        node.fills = vec![Paint::solid(row["fill"].as_str().and_then(Color::from_hex).ok_or("Unsupported canonical projection paint")?)];
-        node.corner_radii = [12.; 4];
-        doc.insert(parent, node).map_err(|e| e.to_string())?;
-        let text_id = doc.alloc_id();
-        let mut caption = Node::text(
-            text_id,
-            Rect::new(12., 12., (number("width")? - 24.).max(20.), 44.),
-            row["label"].as_str().unwrap_or("Source node"),
-            TextStyle { font_size: 16., ..Default::default() },
-        );
-        if let desigma_doc::NodeKind::Text(text) = &mut caption.kind {
-            // Inspection labels are derived captions, not unconstrained authored
-            // text. Keep long bilingual summaries inside their native object.
-            text.auto_resize = desigma_doc::TextAutoResize::Truncate;
-            text.max_lines = Some(2);
-        }
-        caption.locked = true;
-        doc.insert(id, caption).map_err(|e| e.to_string())?;
-        occurrences.insert(
-            id.0.to_string(),
-            CityosOccurrence {
-                definition_id: string(row, "definitionId")?,
-                source_node_id: string(row, "sourceNodeId")?,
-                instance_id: None,
-                occurrence_id: key,
-                view_id: "native-canvas".into(),
-            },
-        );
-    }
-    Ok((doc,occurrences))
+    native_projection::projection_document(projection, name)
 }
-fn binding(draft: Value, projection: &Value) -> Result<Document, String> {
-    if !matches!(draft["schemaVersion"].as_str(),Some("cityos.design-exchange.v2" | "cityos.design-exchange.v3"))
-        || !matches!(projection["schemaVersion"].as_str(), Some("cityos.desigma-canvas.v1" | "cityos.desigma-structure.v1"))
-        || projection["draftId"] != draft["draftId"] || projection["draftRevision"] != draft["draftRevision"] || projection["semanticDigest"] != draft["semanticDigest"] {
-        return Err("Projection/draft identity mismatch".into());
-    }
-    let string = |v: &Value, key: &str| v[key].as_str().map(str::to_owned).ok_or_else(|| format!("Missing {key}"));
-    let (mut doc,occurrences)=projection_document(projection,draft["semanticDraft"]["id"].as_str().unwrap_or("CityOS design"))?;
-    let pins = draft["dependencyPins"].as_array().ok_or("Missing dependency pins")?.iter().map(|p| string(p, "digest")).collect::<Result<Vec<_>, _>>()?;
-    doc.cityos = Some(CityosBinding {
-        schema_version: string(&draft,"schemaVersion")?,
-        document_id: string(&draft, "documentId")?,
-        draft_id: string(&draft, "draftId")?,
-        base: CityosBase::CanonicalGit { repository_id: string(&draft["base"], "repositoryId")?, commit: string(&draft["base"], "commit")? },
-        semantic_base: draft["semanticBase"].clone(),
-        dependency_pins: pins,
-        occurrences,
-        exchange_v2: if draft["schemaVersion"]=="cityos.design-exchange.v2" {Some(draft.clone())} else {None},
-        exchange_v3: if draft["schemaVersion"]=="cityos.design-exchange.v3" {Some(draft)} else {None},
-    });
-    doc.cityos.as_ref().unwrap().validate()?;
-    Ok(doc)
-}
-fn draft(doc: &Document) -> Option<&Value> {
-    doc.cityos.as_ref()?.exchange()
-}
-fn revision(doc: &Document) -> Option<(String, u64)> {
-    let d = draft(doc)?;
-    Some((d["draftId"].as_str()?.into(), d["draftRevision"].as_u64()?))
-}
-
-fn local_copy(document: &Document) -> Document {
-    let mut copy = document.clone();
-    copy.cityos = None;
-    copy.name = format!("{} · local copy", copy.name);
-    for node in copy.nodes.values_mut() { node.locked = false; node.source_id = None; }
-    copy
-}
+use desigma_cityos::draft::{binding, draft, revision, local_copy};
 
 /// Headless delivery check through the same native document and trusted bridge paths.
 pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<Value, String> {
@@ -614,18 +520,35 @@ impl Workspace {
         app.autosave=crate::home::Autosave{seen_rev:app.canvas.tiles.rev(),saved_hash:crate::home::doc_hash(&app.doc),..Default::default()};
         Ok(())
     }
-    fn suspend_current(&mut self,app:&mut App)->Result<(),String>{
+    fn prepare_switch(&self,app:&mut App,replacing_tab:bool)->Result<(),String>{
+        if self.recovery_pending || self.busy.is_some() || app.ui.cityos_history_request.is_some() {
+            return Err("Finish the pending CityOS operation before switching drafts.".into());
+        }
         let id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
-        if id.is_some()&&self.tabs.len()>=3{return Err("Four drafts are already loaded. Save and close an inactive tab before opening another.".into());}
-        Self::save_before_switch(app)?;
-        if let Some(id)=id{self.tabs.insert(id,DraftTab{document:app.doc.clone(),history:std::mem::take(&mut app.hist),path:app.file_path.clone(),file:app.lib_file.clone(),
-            autosave:std::mem::take(&mut app.autosave),page:app.page,resource:self.resource.clone(),locale:self.locale.clone(),theme:self.theme.clone(),theme_id:self.theme_id.clone(),interactive:self.interactive,selected:self.selected.clone()});}
+        if id.is_some()&&self.tabs.len().saturating_sub(usize::from(replacing_tab))>=3{return Err("Four drafts are already loaded. Save and close an inactive tab before opening another.".into());}
+        Self::save_before_switch(app)
+    }
+    fn retained_tab(&self,session:EditorSession)->DraftTab{
+        DraftTab{session:Some(session),resource:self.resource.clone(),locale:self.locale.clone(),theme:self.theme.clone(),theme_id:self.theme_id.clone(),interactive:self.interactive,selected:self.selected.clone()}
+    }
+    fn replace_active(&mut self,app:&mut App,document:Document,path:Option<std::path::PathBuf>)->Result<(),String>{
+        self.prepare_switch(app,false)?;
+        let id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
+        let previous=EditorSession::replace(app,document,path).ok_or("Current draft could not be saved; open cancelled")?;
+        if let Some(id)=id{self.tabs.insert(id,self.retained_tab(previous));}
         Ok(())
     }
     fn activate_tab(&mut self,app:&mut App,id:&str){
-        let Some(tab)=self.tabs.remove(id) else{return;};
-        if let Err(error)=self.suspend_current(app){self.tabs.insert(id.into(),tab);self.error=Some(error);return;}
-        if !app.replace_document(tab.document,tab.path){self.error=Some("Current draft could not be saved; tab switch cancelled".into());return;}app.hist=tab.history;app.lib_file=tab.file;app.autosave=tab.autosave;app.page=tab.page;app.home=None;
+        if !self.tabs.contains_key(id){return;}
+        if let Err(error)=self.prepare_switch(app,true){self.error=Some(error);return;}
+        self.activate_prepared_tab(app,id);
+    }
+    fn activate_prepared_tab(&mut self,app:&mut App,id:&str){
+        let previous_id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
+        let previous=EditorSession::swap(app,&mut self.tabs.get_mut(id).unwrap().session);
+        let Some(previous)=previous else {self.error=Some("Current draft could not be saved; tab switch cancelled".into());return;};
+        let tab=self.tabs.remove(id).expect("Incoming tab is removed only after its successful transfer");
+        if let Some(previous_id)=previous_id{self.tabs.insert(previous_id,self.retained_tab(previous));}
         self.resource=tab.resource;self.locale=tab.locale;self.theme=tab.theme;self.theme_id=tab.theme_id;
         self.interactive=tab.interactive;
         let selected=document_selection(&app.doc,&tab.selected); self.select(app,&selected);
@@ -645,9 +568,8 @@ impl Workspace {
         if !self.require_dependencies(app, &candidate, DependencyAction::Open) { return; }
         // Previewing another file never replaces the editor document. An explicit
         // open must preserve the current document, including failed saves.
-        if let Err(error)=self.suspend_current(app){self.error=Some(error);return;}
         let doc = self.staged.as_ref().unwrap().clone();
-        if !app.replace_document(doc, None){self.error=Some("Current draft could not be saved; open cancelled".into());return;}
+        if let Err(error)=self.replace_active(app,doc,None){self.error=Some(error);return;}
         self.staged=None;
         let selected=document_selection(&app.doc,""); self.select(app,&selected);
         app.home = None;
@@ -671,8 +593,7 @@ impl Workspace {
         self.open_local_document(app,document);
     }
     fn open_local_document(&mut self, app: &mut App, document: Document) {
-        if let Err(error) = self.suspend_current(app) { self.error = Some(error); return; }
-        if !app.replace_document(document, None) { self.error = Some("Save failed; local copy was not opened".into()); return; }
+        if let Err(error) = self.replace_active(app,document,None) { self.error = Some(error); return; }
         app.home = None;
         self.host.reset();
         self.bridge = None;
@@ -1147,7 +1068,7 @@ impl Workspace {
                                         self.install_staged(app);
                                     }
                                 } else if op == "Open" {
-                                    if !app.replace_document(document, None){self.error=Some("Current draft could not be saved; open cancelled".into());return;}
+                                    if let Err(error)=self.replace_active(app,document,None){self.error=Some(error);return;}
                                     app.home = None;
                                 } else if op == "Command" {
                                     let previous = revision(&app.doc);
@@ -1519,7 +1440,7 @@ impl Workspace {
         });
         let active_id=draft(&app.doc).and_then(|d|d["draftId"].as_str()).map(str::to_owned);
         if active_id.is_some()||!self.tabs.is_empty(){
-            let tabs:Vec<_>=self.tabs.iter().map(|(id,t)|(id.clone(),t.document.name.clone())).collect();
+            let tabs:Vec<_>=self.tabs.iter().filter_map(|(id,t)|t.session.as_ref().map(|session|(id.clone(),session.name().to_owned()))).collect();
             let mut activate=None;let mut close=None;
             egui::Panel::top("cityos-draft-tabs").show(ui,|ui|{ui.horizontal_wrapped(|ui|{
                 if active_id.is_some()&&ui.add_enabled(!self.recovery_pending,egui::Button::new(format!("{} · {}",app.doc.name,if app.autosave.pending(){"unsaved"}else{"local draft"})).selected(!self.preview_only)).clicked(){
@@ -2701,11 +2622,12 @@ mod tests {
         let mut app=App::new(tab_document("first"));app.lib=Some(desigma_library::Library::open(&root).unwrap());app.home=None;
         app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
         let mut next=app.doc.clone();next.name="First edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
-        let mut workspace=Workspace::default();workspace.selected="material".into();workspace.suspend_current(&mut app).unwrap();let first_file=app.lib_file.clone().unwrap().id;
-        app.replace_document(tab_document_node("second","accordion"),None);app.home=None;workspace.selected="accordion".into();
+        let mut workspace=Workspace::default();workspace.selected="material".into();workspace.replace_active(&mut app,tab_document_node("second","accordion"),None).unwrap();
+        let first_file=workspace.tabs["first"].session.as_ref().unwrap().file_id().unwrap().to_owned();
+        app.home=None;workspace.selected="accordion".into();
         workspace.activate_tab(&mut app,"first");assert_eq!(draft(&app.doc).unwrap()["draftId"],"first");assert_eq!(app.lib_file.as_ref().unwrap().id,first_file);assert!(app.hist.can_undo());
         assert_eq!(workspace.selected,"material");assert_eq!(workspace.tabs["second"].selected,"accordion");
-        assert_ne!(workspace.tabs["second"].file.as_ref().unwrap().id,first_file);app.hist.undo(&mut app.doc).unwrap();
+        assert_ne!(workspace.tabs["second"].session.as_ref().unwrap().file_id().unwrap(),first_file);app.hist.undo(&mut app.doc).unwrap();
         assert_eq!(app.lib.as_ref().unwrap().load_file(&first_file).unwrap().name,"First edited");
         workspace.activate_tab(&mut app,"second");assert_eq!(workspace.selected,"accordion");
         crate::home::thumb::finish_library_jobs(&root);
@@ -2757,8 +2679,33 @@ mod tests {
     fn failed_tab_save_preserves_the_current_document_and_history(){
         let mut app=App::new(tab_document("first"));app.home=None;app.lib=None;
         let mut next=app.doc.clone();next.name="Edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
-        let before=app.doc.to_json().unwrap();let mut workspace=Workspace::default();assert!(workspace.suspend_current(&mut app).is_err());
+        let before=app.doc.to_json().unwrap();let workspace=Workspace::default();assert!(workspace.prepare_switch(&mut app,false).is_err());
         assert_eq!(app.doc.to_json().unwrap(),before);assert!(app.hist.can_undo());assert!(workspace.tabs.is_empty());
+    }
+    #[test]
+    fn failure_after_switch_preparation_keeps_the_incoming_tab_and_active_history(){
+        let root=std::env::temp_dir().join(format!("desigma-final-switch-{}",uuid::Uuid::new_v4()));
+        let mut app=App::new(tab_document("first"));app.home=None;
+        app.lib=Some(desigma_library::Library::open(&root).unwrap());
+        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
+        let mut workspace=Workspace::default();
+        workspace.replace_active(&mut app,tab_document("second"),None).unwrap();
+        workspace.prepare_switch(&mut app,true).unwrap();
+        crate::home::thumb::finish_library_jobs(&root);
+        let manifest=root.join("projects").join(&app.lib_file.as_ref().unwrap().project_id).join("project.json");
+        let manifest_bytes=std::fs::read(&manifest).unwrap();
+        let mut edited=app.doc.clone();edited.name="Second remains unsaved".into();
+        app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(edited)}).unwrap();app.changed();
+        std::fs::write(&manifest,b"{invalid manifest").unwrap();
+        let before=app.doc.to_json().unwrap();let history=serde_json::to_value(&app.hist).unwrap();
+        let target=workspace.tabs["first"].session.as_ref().unwrap().name().to_owned();
+        workspace.activate_prepared_tab(&mut app,"first");
+        assert!(workspace.error.is_some());assert_eq!(app.doc.to_json().unwrap(),before);
+        assert_eq!(serde_json::to_value(&app.hist).unwrap(),history);assert!(app.hist.can_undo());
+        assert_eq!(workspace.tabs["first"].session.as_ref().unwrap().name(),target);
+        assert!(!workspace.tabs.contains_key("second"));assert!(app.autosave.pending());
+        std::fs::write(manifest,manifest_bytes).unwrap();
+        crate::home::thumb::finish_library_jobs(&root);std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     #[ignore="requires the packaged canonical Accordion bundle; exercised by the Windows delivery check"]

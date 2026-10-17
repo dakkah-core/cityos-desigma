@@ -1080,6 +1080,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "cosmic-text",
+ "desigma-cityos",
  "desigma-cityos-catalog",
  "desigma-doc",
  "desigma-export",
@@ -1104,6 +1105,22 @@ dependencies = [
  "url",
  "uuid",
  "winresource",
+]
+
+[[package]]
+name = "desigma-cityos"
+version = "0.1.0"
+dependencies = [
+ "desigma-cityos-catalog",
+ "desigma-doc",
+ "desigma-library",
+ "eframe",
+ "egui",
+ "open",
+ "serde",
+ "serde_json",
+ "url",
+ "uuid",
  "wry",
 ]
 

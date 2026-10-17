@@ -1,82 +1,22 @@
-//! Lazy native specimen projection. This private App never enters the editor/library/save path.
+//! Thin private App/tile host for the package's detached inspection document.
 use crate::app::App;
-use desigma_cityos_catalog::Entry;
-use desigma_doc::{Color, Document, Node, Paint, Rect, TextStyle};
-use serde_json::Value;
+use desigma_cityos::catalog::SpecimenRenderer;
+use desigma_doc::Document;
 
-pub(super) struct SpecimenCanvas {
-    app: App,
-}
-fn label(doc: &mut Document, parent: desigma_doc::NodeId, text: &str, x: f32, y: f32, width: f32, size: f32) {
-    let id = doc.alloc_id();
-    let mut node = Node::text(id, Rect::new(x, y, width, 48.), text, TextStyle { font_size: size, ..Default::default() });
-    node.locked = true;
-    doc.insert(parent, node).expect("valid specimen parent");
-}
-fn rows(value: &Value, prefix: &str, out: &mut Vec<(String, String)>, depth: usize) {
-    if out.len() >= 240 || depth > 8 {
-        return;
-    }
-    match value {
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                rows(value, &if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") }, out, depth + 1);
-            }
-        }
-        Value::Array(items) => {
-            for (i, value) in items.iter().take(48).enumerate() {
-                rows(value, &format!("{prefix}[{i}]"), out, depth + 1);
-            }
-        }
-        _ => out.push((prefix.into(), value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))),
-    }
-}
+pub(super) struct SpecimenCanvas { app: App }
+
 impl SpecimenCanvas {
-    pub(super) fn new(entry: &Entry, specimen: &Value, mode: &str) -> Self {
-        let mut doc = Document::new("Temporary CityOS specimen");
-        let page = doc.add_page("Inspection canvas");
-        label(&mut doc, page, &entry.label, 0., 0., 1080., 28.);
-        label(&mut doc, page, "Temporary native objects · inspection only · no document or owner edits", 0., 54., 1080., 16.);
-        let tokens = specimen["presentation"]["modes"][mode].as_array();
-        if let Some(tokens) = tokens {
-            for (i, row) in tokens.iter().enumerate() {
-                let x = (i % 4) as f32 * 280.;
-                let y = 124. + (i / 4) as f32 * 150.;
-                if let Some(value) = row["resolvedValue"].as_str().and_then(Color::from_hex) {
-                    let id = doc.alloc_id();
-                    let mut swatch = Node::rectangle(id, Rect::new(x, y, 250., 64.));
-                    swatch.name = row["name"].as_str().unwrap_or("Token").into();
-                    swatch.locked = true;
-                    swatch.fills = vec![Paint::solid(value)];
-                    doc.insert(page, swatch).expect("valid swatch parent");
-                }
-                label(&mut doc, page, row["name"].as_str().unwrap_or("Token"), x, y + 72., 260., 13.);
-                let text = row["resolvedValue"].as_str().unwrap_or("Unresolved / structured value");
-                label(&mut doc, page, text, x, y + 100., 260., 15.);
-            }
-        } else {
-            let mut fields = vec![];
-            rows(&specimen["data"], "", &mut fields, 0);
-            if fields.is_empty() {
-                fields.push(("Source".into(), entry.source_path.clone()));
-            }
-            for (i, (key, value)) in fields.iter().enumerate() {
-                let y = 120. + i as f32 * 56.;
-                label(&mut doc, page, key, 0., y, 480., 14.);
-                let display = value.chars().take(160).collect::<String>();
-                label(&mut doc, page, &display, 500., y, 600., 14.);
-            }
-            if fields.len() >= 240 {
-                label(&mut doc, page, "Canvas shows the first 240 fields. The complete payload remains in Raw data.", 0., 120. + 240. * 56., 1100., 16.);
-            }
-        }
-        let mut app = App::new(doc);
+    pub(super) fn new(document: Document) -> Self {
+        let mut app = App::new(document);
         app.first_fit_done = true;
         app.view.zoom = 0.85;
         app.view.offset = desigma_doc::Vec2::new(-20., -20.);
         Self { app }
     }
-    pub(super) fn show(&mut self, ui: &mut egui::Ui) {
+}
+
+impl SpecimenRenderer for SpecimenCanvas {
+    fn show(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.strong("Inspection canvas");
             if ui.button("Fit").clicked() {
@@ -117,8 +57,33 @@ impl SpecimenCanvas {
         }
         ui.allocate_rect(rect, egui::Sense::hover());
     }
-    #[cfg(test)]
-    pub(super) fn document(&self) -> &Document {
-        &self.app.doc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detached_renderer_keeps_save_delete_and_history_keys_out_of_editor_state() {
+        let mut document = Document::new("Detached specimen");
+        let page = document.add_page("Inspection");
+        let id = document.alloc_id();
+        let mut node = desigma_doc::Node::rectangle(id, desigma_doc::Rect::new(0., 0., 100., 80.));
+        node.locked = true;
+        document.insert(page, node).unwrap();
+        let original = document.to_json().unwrap();
+        let mut surface = SpecimenCanvas::new(document);
+        let ctx = egui::Context::default();
+        for key in [egui::Key::S, egui::Key::Z, egui::Key::D, egui::Key::Delete] {
+            let modifiers = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+            let _ = ctx.run_ui(egui::RawInput { modifiers, events: vec![egui::Event::Key {
+                key, physical_key: None, pressed: true, repeat: false, modifiers,
+            }], ..Default::default() }, |ui| surface.show(ui));
+        }
+        assert_eq!(surface.app.doc.to_json().unwrap(), original);
+        assert!(surface.app.doc.cityos.is_none());
+        assert!(surface.app.lib.is_none() && surface.app.lib_file.is_none() && surface.app.file_path.is_none());
+        assert!(!surface.app.hist.can_undo() && !surface.app.hist.can_redo());
+        assert!(surface.app.autosave.changed_at.is_none());
     }
 }

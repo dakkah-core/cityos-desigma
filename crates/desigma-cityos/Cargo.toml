@@ -1,0 +1,25 @@
+[package]
+name = "desigma-cityos"
+description = "CityOS catalog and native workspace extension for Desigma"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+open-url = ["dep:open"]
+
+[dependencies]
+desigma-doc.workspace = true
+desigma-library.workspace = true
+desigma-cityos-catalog.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = "0.35.0"
+egui = "0.35"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+open = { version = "5", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+wry = { version = "=0.54.4", default-features = false, features = ["os-webview"] }

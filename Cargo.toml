@@ -13,6 +13,7 @@ members = [
     "crates/desigma-gpu",
     "crates/desigma-mcp",
     "crates/desigma-cityos-catalog",
+    "crates/desigma-cityos",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ desigma-export = { path = "crates/desigma-export" }
 desigma-svg = { path = "crates/desigma-svg" }
 desigma-gpu = { path = "crates/desigma-gpu" }
 desigma-cityos-catalog = { path = "crates/desigma-cityos-catalog" }
+desigma-cityos = { path = "crates/desigma-cityos" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

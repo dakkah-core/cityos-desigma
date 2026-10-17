@@ -1,5 +1,6 @@
 use super::super::WorkspaceRequest;
 use super::preview_choices_menu;
+use super::super::test_support::services;
 use egui::{Context, Event, FullOutput, Id, Key, Modifiers, PointerButton, Rect, Vec2};
 use serde_json::{json, Value};
 
@@ -33,7 +34,7 @@ impl Menu {
         ctx.all_styles_mut(|style| {
             style.animation_time = 0.0;
             style.scroll_animation = egui::style::ScrollAnimation::none();
-            style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(crate::theme::CATALOG_BODY));
+            style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(services().theme().catalog_body));
         });
         Self { ctx, size: egui::vec2(width, 700.0), panel_width, choices: (1..=count).map(pin).collect(), request: None }
     }
@@ -47,9 +48,9 @@ impl Menu {
                     Rect::from_min_max(egui::pos2(ui.max_rect().right() - self.panel_width.min(ui.available_width()), ui.max_rect().top()), ui.max_rect().max);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(panel), |ui| {
                     ui.set_clip_rect(panel);
-                    crate::widgets::record(ui, "catalog-preview-panel", panel);
+                    services().record(ui, "catalog-preview-panel", panel);
                     ui.horizontal_wrapped(|ui| {
-                        if let Some(request) = preview_choices_menu(ui, &self.choices) {
+                        if let Some(request) = preview_choices_menu(ui, services(), &self.choices) {
                             self.request = Some(request);
                         }
                     });

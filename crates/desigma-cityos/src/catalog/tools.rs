@@ -1,6 +1,6 @@
 //! Private Atlas tools open through the existing native browser launcher.
 //! Only these fixed routes leave Desigma; catalog data and credentials do not.
-use crate::theme;
+use super::CatalogUiServices;
 use egui::{RichText, Ui};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}};
 use std::time::{Duration, Instant};
@@ -231,16 +231,16 @@ fn session(ctx: &egui::Context) -> Arc<Mutex<AtlasSession>> {
 #[derive(Default)]
 pub(super) struct AtlasTools { menu_open: bool }
 
-// Expose only UI entry points on the already-visible Browser type; the existing
-// catalog module and its shared ownership/visibility need no changes.
+// Workspace entry points share the same context-owned Atlas session as Browser.
 impl super::Browser {
-    pub(crate) fn atlas_workspace_menu(ui: &mut Ui) { AtlasTools::default().menu(ui); }
-    pub(crate) fn atlas_workspace_feedback(ui: &mut Ui) { AtlasTools::default().feedback(ui); }
+    pub fn atlas_workspace_menu(ui: &mut Ui, services: CatalogUiServices) { AtlasTools::default().menu(ui, services); }
+    pub fn atlas_workspace_feedback(ui: &mut Ui, services: CatalogUiServices) { AtlasTools::default().feedback(ui, services); }
 }
 
 impl AtlasTools {
 
-    pub(super) fn menu(&mut self, ui: &mut Ui) {
+    pub(super) fn menu(&mut self, ui: &mut Ui, services: CatalogUiServices) {
+        let theme = services.theme();
         let state = session(ui.ctx());
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         state.poll(ui.ctx());
@@ -251,17 +251,17 @@ impl AtlasTools {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_max_width(320.0);
             ui.strong("CityOS Atlas");
-            ui.add(egui::Label::new(RichText::new("Investigate architecture · prepare fixes").small().color(theme::TEXT_SECONDARY)).wrap());
+            ui.add(egui::Label::new(RichText::new("Investigate architecture · prepare fixes").small().color(theme.text_secondary)).wrap());
             ui.separator();
             if !cfg!(feature = "open-url") {
-                ui.add(egui::Label::new(RichText::new(BROWSER_DISABLED).small().color(theme::TEXT_SECONDARY)).wrap());
+                ui.add(egui::Label::new(RichText::new(BROWSER_DISABLED).small().color(theme.text_secondary)).wrap());
             }
             for destination in DESTINATIONS {
                 ui.push_id(destination.page(), |ui| {
                     ui.horizontal(|ui| {
                         let disabled = if cfg!(feature = "open-url") { "A browser handoff is in progress. Check its status below." } else { BROWSER_DISABLED };
                         let response = ui.add_enabled(cfg!(feature = "open-url") && state.pending.is_none(), egui::Button::new(format!("{} ↗", destination.label())));
-                        crate::widgets::record(ui, &format!("catalog-atlas-{}", destination.page()), response.rect);
+                        services.record(ui, &format!("catalog-atlas-{}", destination.page()), response.rect);
                         if response.on_hover_text(destination.hint()).on_disabled_hover_text(disabled).clicked() {
                             state.open(destination);
                             ui.ctx().request_repaint();
@@ -269,7 +269,7 @@ impl AtlasTools {
                         }
                         if !cfg!(feature = "open-url") {
                             let copy = ui.small_button("Copy link");
-                            crate::widgets::record(ui, &format!("catalog-atlas-copy-{}", destination.page()), copy.rect);
+                            services.record(ui, &format!("catalog-atlas-copy-{}", destination.page()), copy.rect);
                             if copy.clicked() {
                                 ui.ctx().copy_text(destination.url());
                             }
@@ -278,17 +278,17 @@ impl AtlasTools {
                 });
             }
             ui.separator();
-            ui.add(egui::Label::new(RichText::new(PRIVATE_ACCESS).small().color(theme::TEXT_SECONDARY)).wrap());
+            ui.add(egui::Label::new(RichText::new(PRIVATE_ACCESS).small().color(theme.text_secondary)).wrap());
             let guide = ui.collapsing("Prepare fixes for Codex", |ui| {
                 ui.add(egui::Label::new("In Atlas Reports, use a completed report's Download Codex batches action. The ZIP contains README.md, numbered batches of up to 25 tasks, and the original full report.").wrap());
                 ui.add(egui::Label::new("Open Codex in C:/Dakkah-CityOS/dakkah-cityos-cms. Load README.md plus one downloaded .codex.md batch at a time. Run batches serially by default.").wrap());
                 ui.add(egui::Label::new("Before changing code, match the report's exact source pin to the CMS checkout. These links follow the latest accepted analysis; choose and pin the intended run in Atlas.").wrap());
                 ui.add(egui::Label::new("Optional CLI fallback: scripts/atlas-codex-pack.mjs in the Atlas repository.").wrap());
             });
-            crate::widgets::record(ui, "catalog-atlas-guide", guide.header_response.rect);
+            services.record(ui, "catalog-atlas-guide", guide.header_response.rect);
         });
         self.menu_open = menu.is_some();
-        crate::widgets::record(ui, "catalog-atlas-menu", menu_response.rect);
+        services.record(ui, "catalog-atlas-menu", menu_response.rect);
         menu_response.on_hover_text("Open private Atlas tools in your default browser");
     }
 
@@ -296,7 +296,8 @@ impl AtlasTools {
         self.menu_open
     }
 
-    pub(super) fn feedback(&mut self, ui: &mut Ui) {
+    pub(super) fn feedback(&mut self, ui: &mut Ui, services: CatalogUiServices) {
+        let theme = services.theme();
         let state = session(ui.ctx());
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         state.poll(ui.ctx());
@@ -310,10 +311,10 @@ impl AtlasTools {
         } else { return; };
         let mut retry = false;
         let mut dismiss = false;
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(theme::CATALOG_PAD, 6)).show(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(theme.catalog_pad, 6)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if pending { ui.spinner(); }
-                ui.add(egui::Label::new(RichText::new(message).color(if failed { theme::DANGER } else { theme::TEXT_SECONDARY })).wrap());
+                ui.add(egui::Label::new(RichText::new(message).color(if failed { theme.danger } else { theme.text_secondary })).wrap());
                 if pending {
                     if ui.button("Cancel handoff").clicked() { if let Some(job) = &state.pending { job.cancel(); } }
                 } else if failed {
@@ -321,7 +322,7 @@ impl AtlasTools {
                         .on_disabled_hover_text(BROWSER_DISABLED).clicked();
                 }
                 let copy = ui.button("Copy Atlas link");
-                crate::widgets::record(ui, "catalog-atlas-copy-failure", copy.rect);
+                services.record(ui, "catalog-atlas-copy-failure", copy.rect);
                 if copy.clicked() { ui.ctx().copy_text(destination.url()); }
                 if !pending { dismiss = ui.button("Dismiss").clicked(); }
             });
@@ -394,7 +395,7 @@ mod tests {
         ctx.run_ui(egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 720.0))),
             events, ..Default::default()
-        }, |ui| { tools.menu(ui); tools.feedback(ui); })
+        }, |ui| { tools.menu(ui, super::super::test_support::services()); tools.feedback(ui, super::super::test_support::services()); })
     }
 
     fn click(tools: &mut AtlasTools, ctx: &egui::Context, width: f32, id: &str) -> egui::FullOutput {
@@ -445,7 +446,7 @@ mod tests {
     fn atlas_access_is_available_without_a_catalog_capture() {
         for width in [390.0, 1200.0] {
             let ctx = egui::Context::default();
-            let mut browser = super::super::Browser::new(None, None, None, None, None);
+            let mut browser = super::super::Browser::new(None, None, None, None, None, super::super::test_support::services());
             browser.open = true;
             browser.settings_open = false;
             browser.auto_refresh = false;

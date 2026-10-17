@@ -279,7 +279,9 @@ impl History {
     }
 
     /// Documents retained by whole-document undo/redo commands, including batches.
-    pub(crate) fn retained_documents(&self) -> Vec<&Document> {
+    /// Persistence clients use these immutable snapshots to validate export policy
+    /// and recovery dependencies; this never exposes mutable history entries.
+    pub fn retained_documents(&self) -> Vec<&Document> {
         fn collect<'a>(command: &'a Command, out: &mut Vec<&'a Document>) {
             match command {
                 Command::CityosInstall { document } => out.push(document),

@@ -807,12 +807,22 @@ impl App {
 
     // ------------------------------------------------------------ files
     pub fn replace_document(&mut self, doc: Document, path: Option<PathBuf>) -> bool {
+        self.replace_document_transaction(move |_| (doc, path, ())).is_some()
+    }
+
+    /// Run the ownership transfer only after every fallible outgoing save.
+    /// An uncalled closure retains the incoming session and active history.
+    pub(crate) fn replace_document_transaction<T>(
+        &mut self,
+        transfer: impl FnOnce(&mut Self) -> (Document, Option<PathBuf>, T),
+    ) -> Option<T> {
         crate::decks::ui::flush_notes(self);
         self.finish_variable_editors();
         // Pending edits of the library file being left are saved first (from the live state, not an old version).
         self.exit_version_view();
-        if !self.flush_autosave(){return false;}
+        if !self.flush_autosave(){return None;}
         self.stop_plugin();
+        let (doc, path, result) = transfer(self);
         self.lib_file = None;
         self.renaming_file = false;
         let mut doc = doc;
@@ -843,7 +853,7 @@ impl App {
         self.fonts.load_for(&self.doc);
         self.changed();
         self.fit_all();
-        true
+        Some(result)
     }
 
     pub fn open_dialog(&mut self) {
@@ -853,6 +863,20 @@ impl App {
     }
 
     pub fn open_path(&mut self, p: PathBuf) {
+        // Recognition and complete validation must precede even flushing the
+        // current editors. Portable checkpoints are new local library files;
+        // their document, histories and payloads travel in one create journal.
+        match desigma_library::VerifiedPortableCheckpoint::read(&p) {
+            Ok(Some(portable)) => {
+                self.open_portable_checkpoint(portable);
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.show_toast(format!("Cannot open checkpoint: {e}"), true);
+                return;
+            }
+        }
         // A variables-only JSON opened alongside a design merges into it.
         if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
             if let Ok(text) = std::fs::read_to_string(&p) {
@@ -876,6 +900,72 @@ impl App {
                 self.show_toast(format!("Opened {name}"), false);
             }
             Err(e) => self.show_toast(e, true),
+        }
+    }
+
+    fn open_portable_checkpoint(&mut self, portable: desigma_library::VerifiedPortableCheckpoint) {
+        let Some(lib) = self.lib.clone() else {
+            self.show_toast("The projects library is unavailable", true);
+            return;
+        };
+        crate::decks::ui::flush_notes(self);
+        self.finish_variable_editors();
+        self.exit_version_view();
+        // Ordinary external documents are not covered by flush_autosave.
+        // Never replace an unsaved design, or silently overwrite an import
+        // source such as SVG/JSON, just to open a portable checkpoint.
+        let has_editor_document = self.home.is_none() || self.file_path.is_some()
+            || self.hist.can_undo() || self.hist.can_redo();
+        if self.lib_file.is_none() && has_editor_document {
+            let native = self.file_path.as_ref()
+                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(io::NATIVE_EXT)));
+            let changed = crate::home::doc_hash(&self.doc) != self.autosave.saved_hash;
+            if self.file_path.is_none() || changed && native.is_none() {
+                self.show_toast("Save the current document before opening a checkpoint", true);
+                return;
+            }
+            if changed && self.doc.cityos.is_none() {
+                if let Some(path) = native {
+                    if let Err(e) = io::save_path(&self.doc, path) {
+                        self.show_toast(e, true);
+                        return;
+                    }
+                    self.autosave.saved_hash = crate::home::doc_hash(&self.doc);
+                    self.autosave.changed_at = None;
+                    self.autosave.failures = 0;
+                    self.autosave.retry_at = None;
+                }
+            }
+        }
+        if !self.flush_autosave() { return; }
+        let result = (|| {
+            let target = match self.home_target() {
+                Some(target) => Some(target),
+                None => match self.lib_file.as_ref() {
+                    Some(file) => {
+                        let entry = lib.file(&file.id)?;
+                        Some((entry.project, entry.folder))
+                    }
+                    None => None,
+                },
+            };
+            let (project, folder) = match target {
+                Some(target) => target,
+                None => match lib.list_projects().first() {
+                    Some(project) => (project.id.clone(), None),
+                    None => (lib.create_project("My project")?.id, None),
+                },
+            };
+            lib.import_checkpoint_as_new(&project, folder.as_deref(), portable)
+        })();
+        match result {
+            Ok(entry) => {
+                self.open_library_file(&entry.id);
+                if self.lib_file.as_ref().is_some_and(|file| file.id == entry.id) {
+                    self.show_toast(format!("Opened {}", entry.name), false);
+                }
+            }
+            Err(e) => self.show_toast(format!("Cannot import checkpoint: {e}"), true),
         }
     }
 
@@ -935,6 +1025,10 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "portable_import_tests.rs"]
+mod portable_import_tests;
 
 #[cfg(test)]
 mod tests {

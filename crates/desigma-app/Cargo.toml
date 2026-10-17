@@ -12,7 +12,7 @@ path = "src/main.rs"
 [features]
 default = ["open-url"]
 # Opens Present links in the system browser (after a confirmation).
-open-url = ["dep:open"]
+open-url = ["dep:open", "desigma-cityos/open-url"]
 # Plays H.264 video fills in Present through Cisco's OpenH264 (C++ sources compiled by the
 # `openh264` crate, so it needs a C++ compiler). Off by default: the default build stays pure Rust
 # and still plays Motion JPEG; other codecs show their poster with an "Unsupported codec" badge.
@@ -23,6 +23,7 @@ open = { version = "5", optional = true }
 openh264 = { version = "0.9", optional = true }
 desigma-doc.workspace = true
 desigma-cityos-catalog.workspace = true
+desigma-cityos.workspace = true
 desigma-render.workspace = true
 desigma-fig.workspace = true
 desigma-library.workspace = true
@@ -48,5 +49,5 @@ resvg = { version = "0.45", default-features = false }
 [build-dependencies]
 winresource = "0.1"
 
-[target.'cfg(windows)'.dependencies]
-wry = { version = "=0.54.4", default-features = false, features = ["os-webview"] }
+[dev-dependencies]
+desigma-cityos = { workspace = true, features = ["test-support"] }

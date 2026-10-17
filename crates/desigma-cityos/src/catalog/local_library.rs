@@ -4,7 +4,7 @@ use desigma_doc::{Color, Document, Node, Paint, Rect, Style, StyleMeta, TextStyl
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-pub(super) fn parse_color(value: &str) -> Option<Color> {
+pub fn parse_color(value: &str) -> Option<Color> {
     if let Some(hex) = value.strip_prefix('#') {
         let expanded = if hex.len() == 4 { hex.chars().flat_map(|c| [c, c]).collect::<String>() } else { hex.into() };
         return Color::from_hex(&expanded);
@@ -59,7 +59,7 @@ fn literal(row: &Value) -> Result<(VariableKind, VariableValue), String> {
     }
 }
 
-pub(super) fn unavailable_reason(entry: &Entry, specimen: Option<&Value>, snapshot: &Value) -> Option<String> {
+pub fn unavailable_reason(entry: &Entry, specimen: Option<&Value>, snapshot: &Value) -> Option<String> {
     if !matches!(entry.kind.as_str(), "theme" | "token" | "design-token") {
         return Some("This source has no native token-library adapter.".into());
     }
@@ -91,7 +91,7 @@ pub(super) fn unavailable_reason(entry: &Entry, specimen: Option<&Value>, snapsh
     None
 }
 
-pub(super) fn create(entry: &Entry, specimen: &Value, snapshot: &Value, preferred_mode: &str) -> Result<Document, String> {
+pub fn create(entry: &Entry, specimen: &Value, snapshot: &Value, preferred_mode: &str) -> Result<Document, String> {
     if let Some(reason) = unavailable_reason(entry, Some(specimen), snapshot) {
         return Err(reason);
     }

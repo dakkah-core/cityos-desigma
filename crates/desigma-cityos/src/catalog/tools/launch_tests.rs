@@ -3,7 +3,7 @@ use super::*;
 use std::process::{Child, Command, Stdio};
 
 static SERIAL: Mutex<()> = Mutex::new(());
-const CHILD_TEST: &str = "cityos_catalog::tools::launch_tests::launcher_child_fixture";
+const CHILD_TEST: &str = "catalog::tools::launch_tests::launcher_child_fixture";
 
 // Test-binary fixture, absent from production. The native child is owned/reaped
 // through the same helper wait/cancellation path; no external browser is used.
@@ -31,10 +31,10 @@ fn frame(ctx: &egui::Context, workspace: bool, events: Vec<egui::Event>) -> egui
         events, ..Default::default()
     }, |ui| {
         if workspace {
-            super::super::Browser::atlas_workspace_menu(ui);
-            super::super::Browser::atlas_workspace_feedback(ui);
+            super::super::Browser::atlas_workspace_menu(ui, super::super::test_support::services());
+            super::super::Browser::atlas_workspace_feedback(ui, super::super::test_support::services());
         } else {
-            let mut tools = AtlasTools::default(); tools.menu(ui); tools.feedback(ui);
+            let mut tools = AtlasTools::default(); tools.menu(ui, super::super::test_support::services()); tools.feedback(ui, super::super::test_support::services());
         }
     })
 }

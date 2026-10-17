@@ -353,6 +353,39 @@ impl Library {
         records.sort_by(|a, b| a.command.operation_id.cmp(&b.command.operation_id));
         Ok(records)
     }
+
+    /// Caller holds SUBMISSION_LOCK before acquiring the document writer lock,
+    /// matching prepare's order. A portable copy cannot shed an original
+    /// unresolved effect merely by selecting another file ID for the same draft.
+    pub(crate) fn ensure_portable_submission_safe_locked(&self, file_id: Option<&str>, checkpoint: &DocumentCheckpoint) -> Result<()> {
+        if let Some(id) = file_id { crate::validate_id(id)?; }
+        let states = std::iter::once((&checkpoint.document, &checkpoint.history))
+            .chain(checkpoint.retained.iter().map(|state| (&state.document, &state.history)));
+        let documents: Vec<_> = states.flat_map(|(document, history)| std::iter::once(document).chain(history.retained_documents())).collect();
+        let entries = match std::fs::read_dir(self.path("cityos/submissions")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if !path.extension().is_some_and(|extension| extension == "json") { continue; }
+            let id = path.file_stem().and_then(|id| id.to_str()).ok_or_else(|| LibraryError::Invalid("Invalid submission path".into()))?;
+            let stored = self.load_stored_submission(id)?;
+            if !stored.record.frozen() { continue; }
+            let same_file = stored.local_file.as_ref().is_some_and(|binding| file_id == Some(binding.file_id.as_str()));
+            let same_draft = documents.iter().filter_map(|document| document.cityos.as_ref()).any(|cityos| {
+                stored.local_file.as_ref().is_some_and(|binding| binding.document_id.as_deref() == Some(cityos.document_id.as_str())
+                    && binding.draft_id.as_deref() == Some(cityos.draft_id.as_str()))
+                    || stored.local_file.is_none() && cityos.base == stored.record.command.base && cityos.semantic_base == stored.record.command.semantic_base
+                        && cityos.exchange().is_some_and(|exchange| exchange["semanticDraft"] == stored.record.command.submitted_snapshot)
+            });
+            if same_file || same_draft {
+                return Err(LibraryError::Invalid("Unresolved submission requires original-journal inquiry before portable export or import".into()));
+            }
+        }
+        Ok(())
+    }
     /// On failure this API returns before the caller may send any mutation.
     pub fn prepare_submission(&self, command: SubmissionCommand) -> Result<SubmissionRecord> {
         self.prepare_submission_bound(None, command)
@@ -644,6 +677,26 @@ mod tests {
     }
     impl Drop for BoundFixture {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); }
+    }
+
+    #[test]
+    fn frozen_submissions_cannot_leave_their_recovery_journal_through_portable_export_or_aliases() {
+        let f = BoundFixture::new();
+        let checkpoint = f.library.load_checkpoint(&f.file).unwrap();
+        let project = f.library.file(&f.file).unwrap().project;
+        let alias = f.library.create_file_checkpoint(&project, None, "Same draft alias", &checkpoint).unwrap();
+        let portable = f.library.export_checkpoint(&f.file).unwrap();
+        let original = f.library.prepare_submission_for_file(&f.file, f.command.clone()).unwrap();
+        for file in [&f.file, &alias.id] {
+            assert!(f.library.export_checkpoint(file).is_err(), "A portable draft must not drop its frozen submission identity");
+            assert!(f.library.import_checkpoint(file, &portable).is_err(), "An earlier export cannot bypass the original frozen journal");
+        }
+        let before = f.library.files_in(&project, None).unwrap().len();
+        let verified = crate::VerifiedPortableCheckpoint::parse(&portable).unwrap();
+        assert!(f.library.import_checkpoint_as_new(&project, None, verified).is_err());
+        assert_eq!(f.library.files_in(&project, None).unwrap().len(), before);
+        assert_eq!(f.library.load_submission(&original.command.operation_id).unwrap(), original);
+        assert!(f.library.load_checkpoint(&f.file).is_ok());
     }
 
     #[test]

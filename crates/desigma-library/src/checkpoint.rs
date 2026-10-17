@@ -2,18 +2,8 @@
 //! owner operation or confers acceptance/qualification on embedded semantic data.
 use crate::{payload_digest, Library, LibraryError, Result};
 use desigma_doc::{Document, DocumentCheckpoint, History};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PortableCheckpoint {
-    #[serde(rename = "schemaVersion")]
-    schema_version: String,
-    checkpoint: String,
-    payloads: BTreeMap<String, Vec<u8>>,
-}
 
 /// A verified local disk outcome, not owner acceptance or qualification.
 #[derive(Clone, Debug)]
@@ -192,15 +182,16 @@ impl Library {
     /// added. Shared-library copies already live inside the document; remote
     /// library update services and owner eligibility remain external capabilities.
     pub fn export_checkpoint(&self, id: &str) -> Result<String> {
+        // Match prepare's lock order. The checkpoint and original submission
+        // journal must be observed together; a later prepare cannot race export.
+        let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = crate::store::write_lock();
         let checkpoint = self.load_checkpoint_locked(id)?;
+        self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
+        crate::portable::check_policy(&checkpoint)?;
         let payloads = checkpoint.dependency_pins().into_iter()
             .map(|hash| self.load_cityos_payload(&hash).map(|bytes| (hash, bytes))).collect::<Result<_>>()?;
-        Ok(serde_json::to_string(&PortableCheckpoint {
-            schema_version: "desigma.portable-checkpoint.v1".into(),
-            checkpoint: checkpoint.to_json()?,
-            payloads,
-        })?)
+        crate::portable::encode(&checkpoint, payloads)
     }
 
     /// Imports into an existing library file. Validate everything before the
@@ -208,18 +199,21 @@ impl Library {
     /// The parent owns whether an incoming baseline should be archived/reconciled
     /// before import, and must not treat this local import as owner acceptance.
     pub fn import_checkpoint(&self, id: &str, text: &str) -> Result<()> {
-        let portable: PortableCheckpoint = serde_json::from_str(text)?;
-        if portable.schema_version != "desigma.portable-checkpoint.v1" {
-            return Err(LibraryError::Invalid("Unsupported portable checkpoint version".into()));
-        }
-        let checkpoint = DocumentCheckpoint::from_json(&portable.checkpoint)?;
-        let roots: BTreeSet<_> = checkpoint.dependency_pins().into_iter().collect();
-        if roots != portable.payloads.keys().cloned().collect()
-            || portable.payloads.iter().any(|(hash, bytes)| payload_digest(bytes) != *hash)
-        {
-            return Err(LibraryError::Invalid("Portable dependency closure mismatch".into()));
-        }
-        self.save_checkpoint_payloads(id, &checkpoint, portable.payloads)
+        let (checkpoint, payloads) = crate::VerifiedPortableCheckpoint::parse(text)?.into_parts();
+        let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
+        self.save_checkpoint_payloads(id, &checkpoint, payloads)
+    }
+
+    /// Explicit local restore into a fresh file identity. There is no empty
+    /// placeholder: document, active/inactive history, payloads and manifest
+    /// share the existing replayable save journal. Opening grants no owner right.
+    pub fn import_checkpoint_as_new(&self, project: &str, folder: Option<&str>, portable: crate::VerifiedPortableCheckpoint) -> Result<crate::FileEntry> {
+        let (checkpoint, payloads) = portable.into_parts();
+        let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        self.ensure_portable_submission_safe_locked(None, &checkpoint)?;
+        let name = if checkpoint.document.name.trim().is_empty() { "Imported draft" } else { checkpoint.document.name.as_str() };
+        self.create_file_state(project, folder, name, &checkpoint.document, Some((checkpoint.to_json()?, payloads)))
     }
 }
 
@@ -272,6 +266,82 @@ mod tests {
         assert_eq!(restored.retained[0].document.images["image"], [2, 4, 6]);
         assert_eq!(restored.dependency_pins(), [hash.clone()]);
         assert_eq!(reopened.load_cityos_payload(&hash).unwrap(), b"retained baseline dependency");
+    }
+
+    #[test]
+    fn portable_file_import_creates_one_complete_generation_with_bindings_history_and_payloads() {
+        let (_source, source, source_id) = Temp::new();
+        let hash = source.retain_cityos_payload(b"portable file dependency").unwrap();
+        let mut checkpoint = DocumentCheckpoint::new(bound(hash.clone()), History::default());
+        let mut next = bound(hash.clone()); next.name = "Portable restored draft".into();
+        let binding = next.cityos.as_mut().unwrap();
+        binding.schema_version = "cityos.design-exchange.v2".into();
+        binding.exchange_v2 = Some(serde_json::json!({"schemaVersion":binding.schema_version,
+            "documentId":binding.document_id,"draftId":binding.draft_id,"draftRevision":0,
+            "base":{"kind":"canonical-git","repositoryId":"repo","commit":"a".repeat(40)},
+            "semanticBase":binding.semantic_base,"semanticDraft":binding.semantic_base}));
+        binding.validate().unwrap();
+        checkpoint.install_baseline(next);
+        let mut edited = checkpoint.document.clone(); edited.name.push_str(" edited");
+        checkpoint.history.exec(&mut checkpoint.document, desigma_doc::Command::CityosInstall { document: Box::new(edited) }).unwrap();
+        source.save_checkpoint(&source_id, &checkpoint).unwrap();
+        let (target_dir, target, _) = Temp::new();
+        let project = target.list_projects()[0].id.clone();
+        let before = target.files_in(&project, None).unwrap().len();
+        let file = target_dir.0.join("restore.portable.json");
+        std::fs::write(&file, source.export_checkpoint(&source_id).unwrap()).unwrap();
+        let imported = target.import_file(&file, &project, None).expect("Portable export must reopen through the normal file import path");
+        drop(target);
+        let reopened = Library::open(&target_dir.0).unwrap();
+        assert_eq!(reopened.files_in(&project, None).unwrap().len(), before + 1);
+        let restored = reopened.load_checkpoint(&imported.id).unwrap();
+        assert_eq!(restored.to_json().unwrap(), checkpoint.to_json().unwrap());
+        assert!(restored.history.can_undo());
+        assert_eq!(restored.retained.len(), 1);
+        assert_eq!(reopened.load_cityos_payload(&hash).unwrap(), b"portable file dependency");
+        assert!(!reopened.path("projects").join(&project).join(".save.pending.json").exists());
+    }
+
+    #[test]
+    fn portable_export_does_not_claim_native_retention_policy_for_active_or_retained_owner_data() {
+        for retained in [false, true] {
+            let (_dir, library, id) = Temp::new();
+            let hash = library.retain_cityos_payload(b"Native fixture data without export qualification").unwrap();
+            let mut document = bound(hash);
+            document.cityos.as_mut().unwrap().base = CityosBase::NativeOwner { owner: "theme-owner".into(), resource: "theme".into(), revision: "1".into() };
+            let mut checkpoint = DocumentCheckpoint::new(document, History::default());
+            if retained { checkpoint.install_baseline(Document::new("Current repository design")); }
+            library.save_checkpoint(&id, &checkpoint).unwrap();
+            assert!(library.export_checkpoint(&id).is_err(), "Unqualified Native payloads cannot enter portable files through history");
+        }
+    }
+
+    #[test]
+    fn portable_new_file_replays_one_complete_generation_after_every_save_boundary() {
+        let (_source_dir, source, source_id) = Temp::new();
+        let hash = source.retain_cityos_payload(b"portable recovery dependency").unwrap();
+        let checkpoint = DocumentCheckpoint::new(bound(hash.clone()), History::default());
+        source.save_checkpoint(&source_id, &checkpoint).unwrap();
+        let portable = source.export_checkpoint(&source_id).unwrap();
+        for phase in ["before-journal", "journal", "payloads", "document", "checkpoint", "manifest", "complete"] {
+            let (directory, target, _) = Temp::new();
+            let project = target.list_projects()[0].id.clone();
+            let before: BTreeSet<_> = target.files_in(&project, None).unwrap().into_iter().map(|file| file.id).collect();
+            crate::store::inject_save_fault(phase, 0);
+            let verified = crate::VerifiedPortableCheckpoint::parse(&portable).unwrap();
+            assert!(target.import_checkpoint_as_new(&project, None, verified).is_err(), "{phase}");
+            drop(target);
+            let reopened = Library::open(&directory.0).unwrap();
+            let imported: Vec<_> = reopened.files_in(&project, None).unwrap().into_iter().filter(|file| !before.contains(&file.id)).collect();
+            if phase == "before-journal" {
+                assert!(imported.is_empty());
+            } else {
+                assert_eq!(imported.len(), 1, "{phase}");
+                assert_eq!(reopened.load_checkpoint(&imported[0].id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap(), "{phase}");
+                assert_eq!(reopened.load_cityos_payload(&hash).unwrap(), b"portable recovery dependency", "{phase}");
+            }
+            assert!(!reopened.path("projects").join(&project).join(".save.pending.json").exists(), "{phase}");
+        }
     }
 
     #[test]

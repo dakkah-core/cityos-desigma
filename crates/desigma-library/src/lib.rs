@@ -22,6 +22,7 @@ mod versions;
 mod submissions;
 mod submission_sync;
 mod checkpoint;
+mod portable;
 
 pub use publish::*;
 pub use store::*;
@@ -29,6 +30,7 @@ pub use versions::*;
 pub use submissions::*;
 pub use submission_sync::*;
 pub use checkpoint::CheckpointSaveReceipt;
+pub use portable::{VerifiedPortableCheckpoint, MAX_PORTABLE_CHECKPOINT_BYTES};
 
 use std::path::{Path, PathBuf};
 

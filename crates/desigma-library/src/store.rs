@@ -643,7 +643,7 @@ impl Library {
         self.create_file_state(project, folder, name, &checkpoint.document, Some((text, BTreeMap::new())))
     }
 
-    fn create_file_state(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>) -> Result<FileEntry> {
+    pub(crate) fn create_file_state(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>) -> Result<FileEntry> {
         let _guard = write_lock();
         let name = clean_name(name, "file")?;
         let mut m = self.load_manifest(project)?;
@@ -842,6 +842,9 @@ impl Library {
 
     /// Copies a `.desigma` file, or converts a `.fig` / `.json` / `.svg`, into a project.
     pub fn import_file(&self, path: &Path, project: &str, folder: Option<&str>) -> Result<FileEntry> {
+        if let Some(portable) = crate::VerifiedPortableCheckpoint::read(path)? {
+            return self.import_checkpoint_as_new(project, folder, portable);
+        }
         let doc = load_external(path)?;
         let stem = path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty());
         let name = if !doc.name.is_empty() { doc.name.clone() } else { stem.unwrap_or("Imported").to_string() };

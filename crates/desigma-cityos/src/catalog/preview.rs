@@ -1,6 +1,6 @@
 //! Data presentations only. No repository code, target renderer or editor document is used.
 use super::ui::chip;
-use crate::theme;
+use super::CatalogUiServices;
 use desigma_cityos_catalog::Entry;
 use egui::{Color32, Frame, RichText, Ui};
 use serde_json::Value;
@@ -84,12 +84,13 @@ fn compact(value: &Value) -> String {
         _ => value.to_string(),
     }
 }
-fn property(ui: &mut Ui, key: &str, value: &Value) {
-    ui.label(RichText::new(humanize(key)).color(theme::TEXT_SECONDARY));
+fn property(ui: &mut Ui, services: CatalogUiServices, key: &str, value: &Value) {
+    let theme = services.theme();
+    ui.label(RichText::new(humanize(key)).color(theme.text_secondary));
     ui.label(compact(value));
     ui.end_row();
 }
-fn structured(ui: &mut Ui, value: &Value, path: &str, depth: usize) {
+fn structured(ui: &mut Ui, services: CatalogUiServices, value: &Value, path: &str, depth: usize) {
     if depth > 8 {
         ui.small("More detail is available in Raw data.");
         return;
@@ -100,7 +101,7 @@ fn structured(ui: &mut Ui, value: &Value, path: &str, depth: usize) {
                 for (key, value) in fields {
                     if !value.is_object() && (!value.is_array() || value.as_array().is_some_and(|items| items.iter().all(|v| !v.is_object() && !v.is_array())))
                     {
-                        property(ui, key, value);
+                        property(ui, services, key, value);
                     }
                 }
             });
@@ -108,7 +109,7 @@ fn structured(ui: &mut Ui, value: &Value, path: &str, depth: usize) {
                 if value.is_object() || value.as_array().is_some_and(|items| items.iter().any(|v| v.is_object() || v.is_array())) {
                     egui::CollapsingHeader::new(format!("{} · {}", humanize(key), compact(value)))
                         .id_salt((path, key))
-                        .show(ui, |ui| structured(ui, value, &format!("{path}/{key}"), depth + 1));
+                        .show(ui, |ui| structured(ui, services, value, &format!("{path}/{key}"), depth + 1));
                 }
             }
         }
@@ -118,7 +119,7 @@ fn structured(ui: &mut Ui, value: &Value, path: &str, depth: usize) {
                     item["name"].as_str().or_else(|| item["id"].as_str()).map(String::from).unwrap_or_else(|| format!("Item {}", index + 1)),
                 )
                 .id_salt((path, index))
-                .show(ui, |ui| structured(ui, item, &format!("{path}/{index}"), depth + 1));
+                .show(ui, |ui| structured(ui, services, item, &format!("{path}/{index}"), depth + 1));
             }
             if items.len() > 100 {
                 ui.small(format!("{} more items in Raw data", items.len() - 100));
@@ -129,25 +130,26 @@ fn structured(ui: &mut Ui, value: &Value, path: &str, depth: usize) {
         }
     }
 }
-fn composition_node(ui: &mut Ui, node: &Value, path: &str, depth: usize, budget: &mut usize) {
+fn composition_node(ui: &mut Ui, services: CatalogUiServices, node: &Value, path: &str, depth: usize, budget: &mut usize) {
+    let theme = services.theme();
     if depth > 16 || *budget == 0 {
         ui.small("Additional structure is available in Raw data.");
         return;
     }
     *budget -= 1;
     let id = node["id"].as_str().unwrap_or("Unnamed node");
-    Frame::new().fill(theme::BG).corner_radius(theme::CATALOG_RADIUS).inner_margin(12).show(ui, |ui| {
+    Frame::new().fill(theme.bg).corner_radius(theme.catalog_radius).inner_margin(12).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.strong(humanize(id));
             if let Some(component) = node["component"]["id"].as_str() {
-                chip(ui, component);
+                chip(ui, services, component);
             }
         });
         if let Some(props) = node["props"].as_object() {
             if !props.is_empty() {
                 egui::Grid::new((path, "props")).num_columns(2).show(ui, |ui| {
                     for (key, value) in props {
-                        property(ui, key, value);
+                        property(ui, services, key, value);
                     }
                 });
             }
@@ -155,11 +157,11 @@ fn composition_node(ui: &mut Ui, node: &Value, path: &str, depth: usize, budget:
         if let Some(slots) = node["slots"].as_object() {
             for (slot, children) in slots {
                 ui.add_space(8.0);
-                ui.label(RichText::new(format!("Slot · {}", humanize(slot))).small().color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(format!("Slot · {}", humanize(slot))).small().color(theme.text_secondary));
                 ui.indent((path, slot), |ui| {
                     if let Some(children) = children.as_array() {
                         for (index, child) in children.iter().enumerate() {
-                            composition_node(ui, child, &format!("{path}/{slot}/{index}"), depth + 1, budget);
+                            composition_node(ui, services, child, &format!("{path}/{slot}/{index}"), depth + 1, budget);
                         }
                     }
                 });
@@ -167,20 +169,21 @@ fn composition_node(ui: &mut Ui, node: &Value, path: &str, depth: usize, budget:
         }
     });
 }
-pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
+pub(super) fn show(ui: &mut Ui, services: CatalogUiServices, entry: &Entry, data: &Value) {
+    let theme = services.theme();
     let token_value = data.get("$value").or_else(|| data.get("value"));
     if let Some(value) = token_value {
         let token_type = data["$type"].as_str().or_else(|| data["type"].as_str()).unwrap_or("Token");
-        ui.label(RichText::new(humanize(token_type)).small().color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(humanize(token_type)).small().color(theme.text_secondary));
         ui.add_space(12.0);
         if let Some(color) = color(value) {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(600.0), 160.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, theme::CATALOG_RADIUS, theme::BG);
-            ui.painter().rect_filled(rect, theme::CATALOG_RADIUS, color);
+            ui.painter().rect_filled(rect, theme.catalog_radius, theme.bg);
+            ui.painter().rect_filled(rect, theme.catalog_radius, color);
             ui.add_space(12.0);
         }
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(compact(value)).size(theme::CATALOG_TITLE).monospace());
+            ui.label(RichText::new(compact(value)).size(theme.catalog_title).monospace());
             if ui.button("Copy value").clicked() {
                 ui.ctx().copy_text(compact(value));
             }
@@ -201,7 +204,7 @@ pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
             } else {
                 "Authored structure. The structure workspace preserves these nodes. The selected workspace checks registered renderer and editing support for this source."
             })
-            .color(theme::TEXT_SECONDARY),
+            .color(theme.text_secondary),
         );
         ui.add_space(12.0);
         let root = if data["composition"]["root"].is_object() {
@@ -211,18 +214,18 @@ pub(super) fn show(ui: &mut Ui, entry: &Entry, data: &Value) {
         } else {
             data
         };
-        composition_node(ui, root, &entry.id, 0, &mut 120);
+        composition_node(ui, services, root, &entry.id, 0, &mut 120);
     } else if data.is_object() || data.is_array() {
         ui.strong("Contract overview");
         ui.label(RichText::new(if nonvisual(data) {"This is a code dependency, such as a context provider or utility. It has no standalone visual appearance; preview the component or page that consumes it."}
-            else {"Source declaration only. This item still needs a renderer fixture and a native editing adapter."}).color(theme::TEXT_SECONDARY));
+            else {"Source declaration only. This item still needs a renderer fixture and a native editing adapter."}).color(theme.text_secondary));
         ui.add_space(16.0);
-        structured(ui, data, &entry.id, 0);
+        structured(ui, services, data, &entry.id, 0);
     } else {
         ui.strong("Source available");
         ui.label("This item has no visual data preview yet. Open Raw data to read its captured source.");
         ui.add_space(16.0);
-        inspector(ui, entry);
+        inspector(ui, services, entry);
     }
 }
 fn nonvisual(data: &Value) -> bool {
@@ -270,7 +273,8 @@ pub(super) fn theme_sheet(ui: &mut Ui, presentation: &Value, mode: &mut String) 
     }
     true
 }
-pub(super) fn inspector(ui: &mut Ui, entry: &Entry) {
+pub(super) fn inspector(ui: &mut Ui, services: CatalogUiServices, entry: &Entry) {
+    let theme = services.theme();
     ui.strong("Source");
     ui.label(&entry.source_path);
     if !entry.source_pointer.is_empty() {
@@ -291,13 +295,13 @@ pub(super) fn inspector(ui: &mut Ui, entry: &Entry) {
     ];
     if ui.available_width() < 540.0 {
         for (key, value) in rows {
-            ui.label(RichText::new(key).small().color(theme::TEXT_SECONDARY));
+            ui.label(RichText::new(key).small().color(theme.text_secondary));
             ui.label(value);
         }
     } else {
         egui::Grid::new(("catalog-support", &entry.id)).num_columns(2).spacing(egui::vec2(20.0, 10.0)).show(ui, |ui| {
             for (key, value) in rows {
-                ui.label(RichText::new(key).color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(key).color(theme.text_secondary));
                 ui.label(value);
                 ui.end_row();
             }
@@ -308,7 +312,7 @@ pub(super) fn inspector(ui: &mut Ui, entry: &Entry) {
         ui.strong("Declared targets");
         ui.horizontal_wrapped(|ui| {
             for target in &entry.targets {
-                chip(ui, target);
+                chip(ui, services, target);
             }
         });
     }
