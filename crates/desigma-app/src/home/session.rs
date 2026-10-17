@@ -49,7 +49,20 @@ impl Autosave {
 
 pub(crate) fn doc_hash(doc: &Document) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    doc.to_json().unwrap_or_default().hash(&mut h);
+    // Expanded bound canvases are derived views. Their geometry, language and
+    // occurrence allocation must not manufacture a saved semantic revision.
+    // Keep every document-owned field and the complete exchange payload in the
+    // dirty comparison; ordinary designs and local theme libraries stay native.
+    if doc.cityos.as_ref().is_some_and(|binding| binding.exchange().is_some() && binding.validate().is_ok()) {
+        let mut value = serde_json::to_value(doc).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            for key in ["nodes", "pages", "next_id"] { object.remove(key); }
+        }
+        if let Some(binding) = value["cityos"].as_object_mut() { binding.remove("occurrences"); }
+        value.to_string().hash(&mut h);
+    } else {
+        doc.to_json().unwrap_or_default().hash(&mut h);
+    }
     h.finish()
 }
 

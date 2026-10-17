@@ -6,6 +6,7 @@ mod dependencies;
 mod submission_recovery;
 mod repaint;
 mod native_projection;
+mod presentation;
 use crate::app::App;
 pub use bridge::Config;
 #[cfg(test)]
@@ -200,6 +201,11 @@ pub struct Workspace {
     preview_generation: u64,
     submissions: submission_recovery::Recovery,
     accepted_bundle: Option<Value>,
+    sent_presentation: Option<Value>,
+    projection_attempted: Option<Value>,
+    canvas_presentation: Option<Value>,
+    resume_presentation: Option<Value>,
+    native_fit: Option<presentation::AutoFit>,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -259,6 +265,11 @@ impl Default for Workspace {
             preview_generation: 0,
             submissions: Default::default(),
             accepted_bundle: None,
+            sent_presentation: None,
+            projection_attempted: None,
+            canvas_presentation: None,
+            resume_presentation: None,
+            native_fit: None,
         }
     }
 }
@@ -420,6 +431,7 @@ impl Workspace {
         self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
+        self.sent_presentation=None; self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
         self.property_text.clear();
         self.interactive=false;
         self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
@@ -490,6 +502,7 @@ impl Workspace {
         self.dependency_draft = None;
         self.reconciliation_bundle = None;
         self.resume_document = None;
+        self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
         self.changes_mode=false;self.incoming=None;
         self.host.reset();
         self.preview_only = true;
@@ -563,12 +576,13 @@ impl Workspace {
         self.error = None;
         Ok(())
     }
-    fn activate_resumed_document(app: &mut App, document: Document) {
-        if !app.cityos_submission_frozen() { app.doc = document; app.changed(); }
+    fn activate_resumed_document(app: &mut App, document: Document) -> Result<(), String> {
+        presentation::install(app, document)?;
         // Returning from the ordinary file library must restore editor state.
         // Leaving home active would make later save-before-switch checks skip
         // the bound document even after the projection is editable.
         app.home = None;
+        Ok(())
     }
     fn install_resumed_projection(&mut self, app: &mut App, document: Document) -> bool {
         if !self.require_dependencies(app, &document, DependencyAction::Resume) {
@@ -576,7 +590,9 @@ impl Workspace {
             self.validated = false;
             return false;
         }
-        Self::activate_resumed_document(app, document);
+        if let Err(error) = Self::activate_resumed_document(app, document) {
+            self.error = Some(error); self.validated = false; return false;
+        }
         true
     }
     fn save_to_draft_library(app: &mut App) -> Result<(), String> {
@@ -702,6 +718,7 @@ impl Workspace {
         self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
+        self.sent_presentation=None; self.projection_attempted=None; self.canvas_presentation=None; self.resume_presentation=None;
         self.property_text.clear();
         self.dependency_action=None; self.dependency_draft=None; self.reconciliation_bundle=None; self.resolutions.clear();
         self.leave_to_library = true;
@@ -869,7 +886,7 @@ impl Workspace {
             if let Err(error) = self.layout.save(&config.cache) { self.error = Some(error); }
         }
     }
-    fn send(&mut self, value: Value) {
+    fn send(&mut self, mut value: Value) {
         if self.busy.is_some() {
             return;
         }
@@ -890,6 +907,12 @@ impl Workspace {
             self.error = Some("Choose a canonical design file to configure the bridge".into());
             return;
         };
+        if matches!(value["op"].as_str(), Some("Open" | "Command" | "Project")) {
+            let presentation = self.presentation();
+            value["presentation"] = presentation.clone();
+            self.sent_presentation = Some(presentation.clone());
+            if value["op"] == "Project" { self.projection_attempted = Some(presentation::key(&value["draft"], &presentation)); }
+        }
         self.busy = value["op"].as_str().map(str::to_owned);
         if bridge.jobs.try_send(value).is_err() {
             self.busy = None;
@@ -1002,6 +1025,7 @@ impl Workspace {
         let result = self.bridge.as_ref().and_then(|b| b.replies.try_recv().ok());
         if let Some(result) = result {
             let op = self.busy.take().unwrap_or_default();
+            let presentation = self.sent_presentation.take();
             match result {
                 Err(error) => {
                     if op == "FixturePreview" { self.specimen_request = None; }
@@ -1038,15 +1062,22 @@ impl Workspace {
                             self.render_started = None;
                         }
                         "Open" | "Command" | "Project" => {
+                          if op == "Project" && !self.project_response_current(app, &value, presentation.as_ref()) {
+                              self.pending = Some(Instant::now()); return;
+                          }
                           if op=="Command" && app.cityos_submission_frozen() {
                               self.error=Some("A delayed edit cannot replace the frozen submitted draft.".into());return;
+                          }
+                          if value["resource"]["fixture"] == "cityos-accordion" && !presentation::scene_matches(&value["projection"],presentation.as_ref()) {
+                              self.error=Some("Native scene does not match the requested presentation; previous canvas retained".into()); return;
                           }
                           match binding(value["draft"].clone(), &value["projection"]) {
                             Err(e) => self.error = Some(e),
                             Ok(mut document) => {
+                                let projected_key = value["projection"].get("scene").map(|_| presentation::key(&value["draft"], presentation.as_ref().unwrap_or(&Value::Null)));
                                 self.property_text.clear();
                                 if op != "Open" && !self.preview_only { document.name=app.doc.name.clone(); }
-                                self.incoming=None;
+                                if op != "Project" { self.incoming=None; }
                                 self.resource = Some(value["resource"].clone());
                                 if self.preview_only {
                                     self.temporary_canvas = Some(Box::new(App::new(document.clone())));
@@ -1067,11 +1098,12 @@ impl Workspace {
                                     }
                                     match app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(document) }) {
                                         Ok(()) => app.changed(),
-                                        Err(e) => self.error = Some(e.to_string()),
+                                        Err(e) => { self.error = Some(e.to_string()); return; },
                                     }
                                 } else {
-                                    if !self.install_resumed_projection(app, document) { return; }
+                                    if !self.install_resumed_projection(app, document) { self.resume_presentation=projected_key; return; }
                                 }
+                                if let Some(key)=projected_key { self.projection_attempted=Some(key.clone()); self.canvas_presentation=Some(key); }
                                 self.validated = true;
                                 if !self.preview_only { let selected=document_selection(&app.doc,&self.selected); self.select(app,&selected); }
                                 self.observed = None;
@@ -1118,8 +1150,17 @@ impl Workspace {
                                             let history=app.lib.as_ref().zip(app.lib_file.as_ref()).map(|(lib,file)|lib.load_checkpoint(&file.id));
                                             if let Some(Err(error))=history {self.validated=false;self.error=Some(format!("Retained history dependencies are unavailable. Restore a portable checkpoint before editing: {error}"));}
                                             else {
-                                                if let Some(document)=self.resume_document.take(){Self::activate_resumed_document(app,document);}
-                                                self.validated=true; self.observed=None; self.pending=Some(Instant::now());
+                                                if let Some(document)=self.resume_document.take(){
+                                                    let key=self.resume_presentation.take();
+                                                    if self.has_native_scene() && key.as_ref()!=self.active_draft(app).as_ref().map(|draft|presentation::key(draft,&self.presentation())).as_ref() {
+                                                        self.validated=false;self.pending=Some(Instant::now());
+                                                    } else if let Err(error)=Self::activate_resumed_document(app,document){self.error=Some(error);self.validated=false;}
+                                                    else {
+                                                        if let Some(key)=key {self.projection_attempted=Some(key.clone());self.canvas_presentation=Some(key);}
+                                                        self.validated=true;
+                                                    }
+                                                }
+                                                self.observed=None; self.pending=Some(Instant::now());
                                             }
                                         },
                                         Some(DependencyAction::Reconcile) => if let Some(bundle)=self.reconciliation_bundle.take() { self.install_reconciliation(app,bundle); },
@@ -1189,7 +1230,9 @@ impl Workspace {
             self.current = false;
             self.pending = Some(Instant::now());
         }
-        if self.validated && self.actual_preview() && !self.is_specimen() && !self.themes_loaded && self.busy.is_none() {
+        if self.refresh_native_presentation(app) {
+            // Projection and renderer are serialized over the same semantic draft.
+        } else if self.validated && self.actual_preview() && !self.is_specimen() && !self.themes_loaded && self.busy.is_none() {
             if let Some(d) = self.active_draft(app) {
                 self.send(json!({"op":"Themes","draft":d}));
             }
@@ -1736,6 +1779,9 @@ impl Workspace {
         } else {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading(if !self.validated { "Selected design" } else if self.actual_preview() { "Native canvas" } else { "Protected composition structure" });
+                if self.has_native_scene() && !self.native_presentation_current(app) {
+                    ui.small("Canvas presentation out of date · previous view retained");
+                }
                 if !self.validated {
                     if self.busy.is_some() {
                         crate::cityos_jobs::progress_marker(ui);
@@ -1749,6 +1795,7 @@ impl Workspace {
                     }
                     return;
                 }
+                let native_scene=self.has_native_scene();
                 let app = if self.preview_only {
                     let Some(canvas) = self.temporary_canvas.as_mut() else {
                         return;
@@ -1759,7 +1806,8 @@ impl Workspace {
                 };
                 let rect = ui.available_rect_before_wrap();
                 app.canvas_rect = rect;
-                if !app.first_fit_done {
+                if native_scene { presentation::fit_canvas(&mut self.native_fit,app); }
+                else if !app.first_fit_done {
                     app.first_fit_done = true;
                     app.fit_all();
                 }
@@ -2670,7 +2718,12 @@ mod tests {
         let directory=std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_EVIDENCE").unwrap());
         let bundle:Value=serde_json::from_slice(&std::fs::read(directory.join("accordion-bundle.json")).unwrap()).unwrap();
         let edited:Value=serde_json::from_slice(&std::fs::read(directory.join("accordion-edited-bundle.json")).unwrap()).unwrap();
-        let document=binding(bundle["draft"].clone(),&bundle["projection"]).unwrap();let path=crate::io::save_path(&document,&directory.join("native-accordion.desigma")).unwrap();
+        let document=binding(bundle["draft"].clone(),&bundle["projection"]).unwrap();
+        assert_eq!(document.cityos.as_ref().unwrap().occurrences.len(),9,"Requires actual native visual parts");
+        assert_eq!(document.nodes.values().filter(|node|matches!(node.kind,desigma_doc::NodeKind::Text(_))).count(),2);
+        assert_eq!(document.nodes.values().filter(|node|matches!(node.kind,desigma_doc::NodeKind::Vector {..})).count(),2);
+        for node in document.nodes.values().filter(|node|!document.pages.contains(&node.id)) {assert!(node.locked);}
+        let path=crate::io::save_path(&document,&directory.join("native-accordion.desigma")).unwrap();
         let mut reopened=crate::io::load_path(&path).unwrap();let mut history=desigma_doc::History::default();
         history.exec(&mut reopened,Command::CityosInstall{document:Box::new(binding(edited["draft"].clone(),&edited["projection"]).unwrap())}).unwrap();
         crate::io::save_path(&reopened,&path).unwrap();let reopened=crate::io::load_path(&path).unwrap();
@@ -2679,6 +2732,17 @@ mod tests {
         bridge.jobs.send(json!({"op":"Export","draft":draft(&reopened).unwrap()})).unwrap();
         let exported=bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();assert_eq!(exported["operationCount"],1);assert_eq!(exported["ownerSubmission"],false);
         assert_eq!(exported["changeset"]["changes"][0]["sourcePointer"],"/root/props/allowMultiple");
+        bridge.jobs.send(json!({"op":"Export","draft":draft(&document).unwrap()})).unwrap();
+        assert_eq!(bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap()["operationCount"],0);
+        let d=draft(&reopened).unwrap();
+        bridge.jobs.send(json!({"op":"Command","draft":d,"command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],
+            "operationId":"native-accordion-return","operation":"set-property","nodeId":"accordion","property":"allowMultiple","value":false}})).unwrap();
+        let returned=bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        assert_eq!(returned["draft"]["semanticDraft"]["root"]["items"],bundle["draft"]["semanticBase"]["root"]["items"]);
+        let returned=binding(returned["draft"].clone(),&returned["projection"]).unwrap();
+        let path=crate::io::save_path(&returned,&directory.join("native-accordion-returned.desigma")).unwrap();let returned=crate::io::load_path(&path).unwrap();
+        bridge.jobs.send(json!({"op":"Export","draft":draft(&returned).unwrap()})).unwrap();
+        assert_eq!(bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap()["operationCount"],0);
     }
     #[test]
     fn resource_preview_never_replaces_the_current_document_or_starts_its_autosave() {
