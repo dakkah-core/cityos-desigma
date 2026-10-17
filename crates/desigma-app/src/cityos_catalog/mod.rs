@@ -161,15 +161,19 @@ pub struct Browser {
 
 pub struct WorkspaceRequest {
     pub source_path: Option<String>,
+    pub resource_pin: Option<Value>,
     pub preview_only: bool,
     pub resume: bool,
 }
 impl WorkspaceRequest {
     pub fn browse() -> Self {
-        Self { source_path: None, preview_only: true, resume: false }
+        Self { source_path: None, resource_pin: None, preview_only: true, resume: false }
     }
     pub fn selected(source: &str, preview_only: bool) -> Self {
-        Self { source_path: Some(source.into()), preview_only, resume: false }
+        Self { source_path: Some(source.into()), resource_pin: None, preview_only, resume: false }
+    }
+    pub fn pinned_preview(resource: Value) -> Self {
+        Self { source_path: resource["sourcePath"].as_str().map(str::to_owned), resource_pin: Some(resource), preview_only: true, resume: false }
     }
 }
 

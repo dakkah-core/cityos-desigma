@@ -7,9 +7,19 @@ fn selected_workspace_requests_preserve_the_source_and_do_not_resume_unrelated_d
     assert_eq!(request.source_path.as_deref(), Some("config/experience/another-page.input.json"));
     assert!(request.preview_only);
     assert!(!request.resume);
+    assert!(request.resource_pin.is_none());
     let browse = WorkspaceRequest::browse();
     assert!(browse.source_path.is_none());
     assert!(!browse.resume);
+}
+
+#[test]
+fn design_preview_requests_preserve_the_complete_captured_locator_without_draft_authority() {
+    let pin = exact_specimen_profile("fixture.second", "2", "Second", "authoring-two", "web");
+    let request = WorkspaceRequest::pinned_preview(pin.clone());
+    assert!(request.preview_only && !request.resume);
+    assert_eq!(request.source_path.as_deref(), pin["sourcePath"].as_str());
+    assert_eq!(request.resource_pin, Some(pin));
 }
 
 fn profile_summary() -> Value {
@@ -34,10 +44,11 @@ fn registered_default_inline_preview_preserves_the_full_locator_and_requires_mat
     assert_eq!(actions.inline_pin,Some(profile.clone()));
     assert!(support::actions(&selected,None,Some(&summary),"local").inline_pin.is_none());
     let mut registration=selected.clone(); registration.kind="registered-component".into();
+    registration.semantic_id="fixture.context".into();
     registration.source_path="registrations.json".into(); registration.source_digest="c".repeat(64); registration.label="ContextCapsule".into();
-    let mut specimen=json!({"entry":registration,"digest":registration.source_digest,"data":{"name":"ContextCapsule","sourcePath":"packages/ui/src/ContextCapsule.tsx"},"workspaceProfile":profile});
+    let mut specimen=json!({"entry":registration,"digest":registration.source_digest,"data":{"name":"ContextCapsule","publicExport":"ContextCapsule","sourcePath":"packages/ui/src/ContextCapsule.tsx"},"workspaceProfile":profile});
     assert!(support::actions(&registration,Some(&specimen),Some(&summary),"committed").actual_preview);
-    specimen["data"]["name"]=json!("UnrelatedExport"); registration.label="UnrelatedExport".into();
+    specimen["data"]["publicExport"]=json!("UnrelatedExport");
     assert!(!support::actions(&registration,Some(&specimen),Some(&summary),"committed").actual_preview);
     summary["workspaceProfiles"][0]["implementationDigest"]=json!("c".repeat(64));
     assert!(!support::actions(&selected,None,Some(&summary),"committed").actual_preview);
@@ -108,6 +119,7 @@ fn inline_renderer_requires_matching_selection_and_exact_captured_commit_and_dig
     let mut selected = entry("frame");
     selected.kind = "authored-composition".into();
     selected.source_path = "config/experience/living-canvas-frame/cityos-web.input.json".into();
+    selected.source_digest = "b".repeat(64);
     let mut specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{},"workspaceProfile":summary["workspaceProfiles"][0]});
     specimen["workspaceProfile"]["sourceDigest"] = json!("b".repeat(64));
     let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
@@ -149,6 +161,142 @@ fn every_level_reports_captured_support_and_preserves_missing_coverage_as_unknow
         assert!(level.count.is_none() && level.renderers.is_none());
     }
     assert!(support::levels(None).iter().all(|l| l.count.is_none()));
+}
+
+fn exact_specimen_profile(id: &str, version: &str, export: &str, authoring: &str, target: &str) -> Value {
+    json!({"id":format!("{id}:{version}:{authoring}:{target}"),"kind":"registered-specimen",
+        "resourceId":format!("{id}:{version}:{authoring}:{target}"),"sourcePath":"packages/runtime/src/shared.tsx",
+        "sourcePaths":["packages/runtime/src/shared.tsx","packages/runtime/src/Receiver.tsx"],"publicExport":export,
+        "componentId":id,"componentVersion":version,"profileRef":authoring,"targetProfileRef":target,
+        "locator":{"componentId":id,"componentVersion":version,"profileRef":authoring,"targetProfileRef":target},
+        "sourceDigest":"b".repeat(64),"implementationDigest":"b".repeat(64),
+        "fixture":"registered-fixture","actualWebPreview":true,"editable":false,"ownerWrites":false,"qualification":"unqualified"})
+}
+
+#[test]
+fn shared_modules_preserve_ambiguity_and_require_an_exact_export_before_opening() {
+    let first = exact_specimen_profile("fixture.first", "1", "First", "authoring", "web");
+    let second = exact_specimen_profile("fixture.second", "1", "Second", "authoring", "web");
+    let summary = json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[first,second]});
+    let mut selected = entry("shared"); selected.kind = "source-file".into(); selected.label = "First".into();
+    selected.source_path = "packages/runtime/src/shared.tsx".into(); selected.source_digest = "b".repeat(64);
+    let actions = support::actions(&selected, None, Some(&summary), "committed");
+    assert!(!actions.actual_preview && !actions.editable && actions.source.is_none() && actions.inline_pin.is_none());
+    assert!(actions.preview_reason.contains("Several registered definitions") && actions.edit_reason.contains("Select an exact"));
+    assert_eq!(actions.preview_choices, vec![first, second.clone()]);
+    assert_eq!(actions.capability_rows()[0].1, "Choose definition");
+    assert!(support::actions(&selected, None, Some(&summary), "local").preview_choices.is_empty());
+    selected.kind = "public-declaration".into(); selected.label = "Second".into();
+    let exact = support::actions(&selected, None, Some(&summary), "committed");
+    assert!(exact.actual_preview && exact.preview_here);
+    assert!(exact.workspace_reason.as_deref().unwrap().contains("Registered defaults are temporary"));
+    assert_eq!(exact.capability_rows()[1].1, "Unavailable", "Temporary defaults have no canonical authored draft binding");
+    assert_eq!(exact.inline_pin.unwrap()["componentId"], "fixture.second");
+    selected.label = "MissingExport".into();
+    assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
+}
+
+#[test]
+fn registered_fallback_checks_component_version_and_every_profile_target_claim() {
+    let first = exact_specimen_profile("fixture.first", "1", "First", "authoring", "web");
+    let summary = json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[
+        exact_specimen_profile("fixture.first", "2", "First", "authoring", "web"),
+        exact_specimen_profile("fixture.first", "1", "First", "other-authoring", "web"),
+        exact_specimen_profile("fixture.first", "1", "First", "authoring", "native"),first]});
+    let mut selected = entry("registered"); selected.kind = "registration".into(); selected.semantic_id = "fixture.first".into();
+    selected.label = "First".into(); selected.source_path = "registry.json".into();
+    selected.dependencies = vec!["packages/runtime/src/shared.tsx".into()];
+    assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
+    let data = json!({"id":"fixture.first","version":"1","sourcePath":"packages/runtime/src/shared.tsx",
+        "locator":first["locator"]});
+    let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":data});
+    let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
+    assert!(actions.actual_preview); assert_eq!(actions.inline_pin.unwrap()["locator"], first["locator"]);
+    for (key, value) in [("version", "9"), ("componentVersion", "9"), ("profileRef", "missing"),
+        ("targetProfileRef", "missing"), ("componentId", "fixture.wrong"), ("id", "fixture.wrong"), ("publicExport", "WrongExport")] {
+        let mut wrong = specimen.clone(); wrong["data"][key] = json!(value);
+        let actions = support::actions(&selected, Some(&wrong), Some(&summary), "committed");
+        assert!(!actions.actual_preview && actions.source.is_none(), "{key}");
+    }
+    let mut wrong = specimen.clone(); wrong["data"]["canvasLocator"] = first["locator"].clone();
+    wrong["data"]["canvasLocator"]["componentVersion"] = json!("9");
+    assert!(support::actions(&selected, Some(&wrong), Some(&summary), "committed").source.is_none());
+    let versions = json!({"workspaceProfiles":[summary["workspaceProfiles"][0], first]});
+    let without_version = json!({"entry":selected,"digest":selected.source_digest,
+        "data":{"id":"fixture.first","sourcePath":"packages/runtime/src/shared.tsx","profileRef":"authoring","targetProfileRef":"web"}});
+    let unresolved = support::actions(&selected, Some(&without_version), Some(&versions), "committed");
+    assert!(unresolved.source.is_none() && unresolved.preview_reason.contains("Several registered definitions"));
+    selected.semantic_id = "fixture.wrong".into();
+    assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
+}
+
+#[test]
+fn materialized_ambiguity_or_identity_failure_cannot_fall_back_to_a_summary_first_match() {
+    let profile = exact_specimen_profile("fixture.first", "1", "First", "authoring", "web");
+    let summary = json!({"workspaceProfiles":[profile]});
+    let mut selected = entry("shared"); selected.kind = "source-file".into();
+    selected.source_path = "packages/runtime/src/shared.tsx".into(); selected.source_digest = "b".repeat(64);
+    for status in ["ambiguous", "unavailable"] {
+        let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":"captured bytes",
+            "workspaceSelection":{"status":status,"reason":"Select the exact locator."}});
+        let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
+        assert!(actions.source.is_none() && !actions.actual_preview && actions.inline_pin.is_none());
+        assert!(actions.preview_reason.contains("Select"));
+    }
+    let mut specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{},"workspaceProfile":profile});
+    specimen["workspaceProfile"]["sourceDigest"] = json!("c".repeat(64));
+    assert!(support::actions(&selected, Some(&specimen), Some(&summary), "committed").source.is_none());
+}
+
+#[test]
+fn missing_locator_identity_and_shared_helper_files_do_not_select_a_registered_leaf() {
+    let profile = exact_specimen_profile("fixture.first", "1", "First", "authoring", "web");
+    let mut selected = entry("helper"); selected.kind = "source-file".into(); selected.label = "First".into();
+    selected.source_path = "packages/runtime/src/Receiver.tsx".into(); selected.source_digest = "b".repeat(64);
+    let summary = json!({"workspaceProfiles":[profile]});
+    assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
+    selected.kind = "registration".into(); selected.source_path = "registry.json".into();
+    selected.dependencies = vec!["packages/runtime/src/shared.tsx".into()];
+    let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{"name":"First","sourcePath":"packages/runtime/src/shared.tsx"}});
+    assert!(support::actions(&selected, Some(&specimen), Some(&summary), "committed").source.is_none());
+    selected.kind = "source-file".into(); selected.source_path = "packages/runtime/src/shared.tsx".into();
+    for key in ["componentId", "componentVersion", "profileRef", "targetProfileRef"] {
+        let mut missing = summary.clone(); missing["workspaceProfiles"][0].as_object_mut().unwrap().remove(key);
+        assert!(support::actions(&selected, None, Some(&missing), "committed").source.is_none(), "{key}");
+    }
+}
+
+#[test]
+fn unavailable_actual_adapter_keeps_the_selected_compositions_structure_canvas() {
+    let mut selected = entry("structure"); selected.kind = "authored-composition".into();
+    selected.source_path = "config/experience/another-page.input.json".into();
+    let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{},
+        "workspaceSelection":{"status":"unavailable","reason":"No renderer binding."}});
+    let actions = support::actions(&selected, Some(&specimen), None, "committed");
+    assert_eq!(actions.source.as_deref(), Some(selected.source_path.as_str()));
+    assert!(!actions.actual_preview && !actions.editable);
+    assert!(actions.preview_reason.contains("Authored structure"));
+}
+
+#[test]
+fn selected_capability_labels_separate_preview_canvas_local_drafts_and_qualification_from_accounting() {
+    assert_eq!(support::LEVEL_OVERVIEW_TITLE, "Source accounting by level");
+    assert!(support::LEVEL_EDITING_TOTALS.contains("Not aggregated"));
+    let mut selected = entry("accordion"); selected.kind = "public-declaration".into(); selected.label = "Accordion".into();
+    selected.source_path = "packages/design-system/src/components/ui/accordion.tsx".into();
+    let actions = support::actions(&selected, None, Some(&profile_summary()), "committed");
+    let rows = actions.capability_rows();
+    assert_eq!(rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(), vec![
+        ("Actual preview", "Available"), ("Structure canvas", "Available"), ("Local copy", "Unavailable"),
+        ("Local draft", "Available"), ("Renderer qualification", "Not established here"), ("Owner writes", "Separate workflow")]);
+    assert!(!selected.editable && !selected.renderer_qualified && !selected.persistent_draft);
+    let local = support::actions(&selected, None, Some(&profile_summary()), "local");
+    assert!(local.inline_pin.is_none() && local.edit_reason.contains("Local-preview bytes are not adopted"));
+    let (theme, specimen, snapshot) = editable_fixture();
+    let summary = json!({"snapshot":snapshot});
+    let theme_actions = support::actions(&theme, Some(&specimen), Some(&summary), "committed");
+    let rows = theme_actions.capability_rows();
+    assert_eq!(rows[2].1, "Available"); assert_eq!(rows[3].1, "Unavailable");
 }
 
 #[test]

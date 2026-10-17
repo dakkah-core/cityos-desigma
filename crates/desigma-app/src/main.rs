@@ -41,6 +41,7 @@ mod vecfixture;
 mod vecops;
 mod video;
 mod widgets;
+mod window_geometry;
 
 use std::sync::atomic::Ordering;
 

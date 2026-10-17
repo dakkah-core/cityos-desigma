@@ -35,6 +35,7 @@ pub struct Shell {
     cityos: crate::cityos_catalog::Browser,
     workspace: crate::design_workspace::Workspace,
     performance: Option<performance::Reporter>,
+    repair_startup_geometry: bool,
 }
 
 impl Shell {
@@ -60,6 +61,7 @@ impl Shell {
     }
 
     pub fn build(ctx: &Context, opts: Options) -> Self {
+        let repair_startup_geometry = opts.screenshot.is_none() && opts.size.is_none();
         let performance = opts.cityos_performance_report.clone().and_then(|path| {
             match performance::Reporter::start(path) {
                 Ok(reporter) => Some(reporter),
@@ -246,7 +248,7 @@ impl Shell {
             frames: 0,
             requested: false,
         });
-        Self { app, shot, title: String::new(), cityos, workspace, performance }
+        Self { app, shot, title: String::new(), cityos, workspace, performance, repair_startup_geometry }
     }
 
     fn drive_screenshot(&mut self, ctx: &Context) {
@@ -555,6 +557,9 @@ impl eframe::App for Shell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.repair_startup_geometry && crate::window_geometry::repair_startup(ui.ctx()) {
+            self.repair_startup_geometry = false;
+        }
         // No clocks, state snapshots, allocations or I/O when the explicit flag is absent.
         if let Some(reporter) = &mut self.performance {
             let (pointer_down, minimized) = ui.ctx().input(|i| (i.pointer.any_down(), i.viewport().minimized.unwrap_or(false)));
@@ -633,6 +638,8 @@ impl eframe::App for Shell {
                 self.cityos.open = false;
                 if request.resume {
                     self.workspace.resume(self.cityos.workspace_config(), &self.app);
+                } else if let Some(pin) = request.resource_pin {
+                    self.workspace.begin_pinned_preview(self.cityos.workspace_config(), pin);
                 } else {
                     self.workspace.begin(self.cityos.workspace_config(), request.source_path, request.preview_only);
                 }

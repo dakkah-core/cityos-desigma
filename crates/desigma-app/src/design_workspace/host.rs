@@ -66,6 +66,18 @@ impl Host {
         self.allowed = None;
         self.origin = None;
     }
+    /// Release a renderer that no longer has a visible workspace. Transient
+    /// dialogs still use hide(), preserving their live interaction state.
+    pub fn release(&mut self) -> bool {
+        let active = self.url.is_some();
+        #[cfg(windows)]
+        let active = active || self.view.is_some() || self.context.is_some();
+        self.reset();
+        #[cfg(windows)]
+        { self.context = None; }
+        self.version = None;
+        active
+    }
     pub fn poll(&mut self) -> Vec<Value> {
         self.messages.as_ref().map(|rx| rx.try_iter().take(16).collect()).unwrap_or_default()
     }
@@ -153,6 +165,23 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn releasing_an_inactive_renderer_fences_old_ipc_and_retains_its_cache_location() {
+        let mut host = Host::default();
+        let cache = std::env::temp_dir().join("desigma-inactive-host-test");
+        host.configure_storage(&cache);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        host.messages = Some(receiver);
+        host.url = Some("http://127.0.0.1:1/fixture".into());
+        host.version = Some("fixture-runtime".into());
+        host.visible.set(true);
+        assert!(host.release());
+        assert!(host.url.is_none() && host.version.is_none() && host.messages.is_none());
+        assert!(!host.visible.get());
+        assert_eq!(host.storage.as_deref(), Some(cache.join("webview2-preview").as_path()));
+        assert!(sender.try_send(serde_json::json!({"kind":"rendered"})).is_err(), "Old renderer responses cannot enter a recreated host");
+        assert!(!host.release(), "Release is idempotent");
+    }
     #[test]
     fn child_bounds_use_the_same_rounding_at_each_required_dpi() {
         let rect = egui::Rect::from_min_size(egui::pos2(80., 120.), egui::vec2(640., 480.));

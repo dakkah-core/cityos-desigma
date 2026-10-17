@@ -213,7 +213,7 @@ impl Browser {
                 self.workspace_request = Some(super::WorkspaceRequest::browse());
             }
             if self.has_bound_draft && ui.button("Resume canvas draft").clicked() {
-                self.workspace_request = Some(super::WorkspaceRequest { source_path: None, preview_only: false, resume: true });
+                self.workspace_request = Some(super::WorkspaceRequest { source_path: None, resource_pin: None, preview_only: false, resume: true });
             }
             self.atlas_tools.menu(ui);
             ui.with_layout(Layout::right_to_left(Align::Center).with_main_wrap(true), |ui| {
@@ -518,14 +518,50 @@ impl Browser {
         ui.label(RichText::new(&entry.source_path).small().color(theme::TEXT_SECONDARY));
         let actions = support::actions(&entry, self.specimen.as_ref(), self.summary.as_ref(), &self.mode);
         ui.horizontal_wrapped(|ui| {
-            let unavailable = actions.source.is_none().then_some(actions.preview_reason.as_str());
-            let label = if actions.source.is_some() && !actions.actual_preview { "Open structure workspace" } else { "Open actual preview" };
+            for (label, status, reason) in actions.capability_rows() {
+                ui.small(format!("{label} · {status}")).on_hover_text(reason);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let unavailable = if actions.preview_here {
+                actions.inline_pin.is_none().then_some("Switch to GitLab main and refresh the matching captured implementation before previewing this registered definition.")
+            } else { actions.source.is_none().then_some(actions.preview_reason.as_str()) };
+            let label = if actions.preview_here { "Preview here" }
+                else if actions.source.is_some() && !actions.actual_preview { "Open structure workspace" } else { "Open actual preview" };
             if action_button(ui, "catalog-preview-action", label, unavailable) {
-                if let Some(source) = &actions.source {
+                if actions.preview_here {
+                    self.detail_tab = DetailTab::Preview;
+                    if self.specimen.is_none() { self.pending_selection = true; }
+                } else if let Some(source) = &actions.source {
                     self.workspace_request = Some(super::WorkspaceRequest::selected(source, true));
                 }
             }
-            let unavailable = (!actions.editable).then_some(actions.edit_reason.as_str());
+            if actions.preview_here && action_button(ui, "catalog-workspace-preview-action", "Open in Design",
+                actions.inline_pin.is_none().then_some("Refresh the matching canonical implementation before opening this preview.")) {
+                if let Some(pin) = &actions.inline_pin {
+                    self.workspace_request = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                }
+            }
+            if !actions.preview_choices.is_empty() {
+                ui.menu_button("Choose preview…", |ui| {
+                    ui.set_max_width(560.);
+                    ui.small("Choose the definition, version, profile and target for this source.");
+                    egui::ScrollArea::vertical().max_height(320.).show_rows(ui, 76., actions.preview_choices.len(), |ui, range| {
+                        for index in range {
+                            let pin = &actions.preview_choices[index];
+                            let label = format!("{} · {}\n{} · {}", pin["publicExport"].as_str().unwrap_or("Registered definition"),
+                                pin["componentVersion"].as_str().unwrap_or(""), pin["profileRef"].as_str().unwrap_or(""),
+                                pin["targetProfileRef"].as_str().unwrap_or(""));
+                            let choice = ui.add_sized([540., 72.], egui::Button::new(label).wrap());
+                            if choice.clicked() {
+                                self.workspace_request = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+            }
+            let unavailable = actions.workspace_reason.as_deref().or_else(|| (!actions.editable).then_some(actions.edit_reason.as_str()));
             if action_button(ui, "catalog-edit-action", if self.mode == "local" { "Open canonical draft" } else { "Open on canvas" }, unavailable) {
                 if let Some(source) = &actions.source {
                     self.workspace_request = Some(super::WorkspaceRequest::selected(source, false));
@@ -678,8 +714,9 @@ impl Browser {
         );
     }
     fn level_overview(&mut self, ui: &mut Ui) {
-        ui.strong("L0–L9 capability coverage");
-        ui.small("Captured record flags · unknown counts are not treated as zero. Selected workspace adapters and editable local token copies are reported separately.");
+        ui.strong(support::LEVEL_OVERVIEW_TITLE);
+        ui.small("L0–L9 captured source occurrences and data specimens. Unknown counts are not treated as zero. Selected workspace actions are reported separately.");
+        ui.small(support::LEVEL_EDITING_TOTALS);
         for level in support::levels(self.summary.as_ref()) {
             Frame::new().inner_margin(egui::Margin::symmetric(0, 6)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -691,11 +728,18 @@ impl Browser {
                     ui.small(format!("{total} records"));
                 });
                 ui.horizontal_wrapped(|ui| {
-                    for (label, number) in [("Data specimens", level.specimens), ("Renderer flags", level.renderers), ("Editing flags", level.editable)] {
+                    for (label, number) in [("Data specimens", level.specimens)] {
                         let number = number.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
                         chip(ui, &format!("{label} · {number}"));
                     }
                 });
+                ui.push_id(&level.id, |ui| ui.collapsing("Captured read-only source flags", |ui| {
+                    for (label, number) in [("Renderer-qualified source flags", level.renderers), ("Editable source flags", level.editable)] {
+                        let number = number.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
+                        ui.small(format!("{label} · {number}"));
+                    }
+                    ui.small("These v1 accounting flags are not totals of installed preview adapters or local draft support.");
+                }));
                 if level.count == Some(0) { ui.small("No classified records are reported at this level."); }
                 else if level.count.is_none() { ui.small("The capture does not report this level; refresh or inspect source accounting."); }
             });

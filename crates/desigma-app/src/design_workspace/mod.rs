@@ -4,8 +4,11 @@ mod host;
 mod layout;
 mod dependencies;
 mod submission_recovery;
+mod repaint;
 use crate::app::App;
 pub use bridge::Config;
+#[cfg(test)]
+use repaint::RENDER_ACK_TIMEOUT;
 use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Color, Command, Document, Node, Paint, Rect, TextStyle};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -401,6 +404,10 @@ impl Workspace {
     pub fn begin(&mut self, config: Config, source: Option<String>, preview_only: bool) {
         self.begin_request(config,source,preview_only,None);
     }
+    pub fn begin_pinned_preview(&mut self, config: Config, resource: Value) {
+        let source = resource["sourcePath"].as_str().map(str::to_owned);
+        self.begin_request(config, source, true, Some(resource));
+    }
     fn begin_request(&mut self, config: Config, source: Option<String>, preview_only: bool,pin:Option<Value>) {
         self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
@@ -520,6 +527,50 @@ impl Workspace {
         }
         if app.hist.can_undo(){return Err("Save your current design before opening a bound draft.".into());}Ok(())
     }
+    fn open_desigma_files(&mut self, app: &mut App) -> Result<(), String> {
+        if self.recovery_pending {
+            return Err("Recover the pending document generation before leaving this draft.".into());
+        }
+        if self.busy.is_some() {
+            return Err("Wait for the current CityOS operation before opening Desigma files.".into());
+        }
+        if app.home.is_none() {
+            if app.lib.is_none() { return Err("The Desigma file library is unavailable. Save this draft before leaving.".into()); }
+            Self::save_before_switch(app)?;
+            app.go_home();
+            if app.home.is_none() { return Err("Could not open Desigma files. The current draft is still open.".into()); }
+        }
+        self.leave_to_library = false;
+        self.open = false;
+        self.host.release();
+        self.bridge = None;
+        self.invalidate_specimen_request();
+        self.preview = None;
+        self.temporary_canvas = None;
+        self.staged = None;
+        self.pending = None;
+        self.render_started = None;
+        self.current = false;
+        self.inline_identity = None;
+        self.error = None;
+        Ok(())
+    }
+    fn activate_resumed_document(app: &mut App, document: Document) {
+        if !app.cityos_submission_frozen() { app.doc = document; app.changed(); }
+        // Returning from the ordinary file library must restore editor state.
+        // Leaving home active would make later save-before-switch checks skip
+        // the bound document even after the projection is editable.
+        app.home = None;
+    }
+    fn install_resumed_projection(&mut self, app: &mut App, document: Document) -> bool {
+        if !self.require_dependencies(app, &document, DependencyAction::Resume) {
+            self.resume_document = Some(document);
+            self.validated = false;
+            return false;
+        }
+        Self::activate_resumed_document(app, document);
+        true
+    }
     fn save_to_draft_library(app: &mut App) -> Result<(), String> {
         if app.lib_file.is_some() { return app.save_library_file(); }
         let lib=app.lib.clone().ok_or("The library is unavailable. Save this draft before switching.")?;
@@ -553,7 +604,7 @@ impl Workspace {
         if self.staged.is_none() {
             return;
         }
-        if self.resource.as_ref().is_some_and(|r| r["references"].as_u64().unwrap_or(0) > 0) {
+        if self.resource.as_ref().is_some_and(|r| r["references"].as_u64().unwrap_or(0) > 0 && r["referenceClosure"]["complete"]!=true) {
             self.error = Some("Reusable dependencies are unresolved. This file remains a temporary structure preview.".into());
             return;
         }
@@ -630,6 +681,9 @@ impl Workspace {
         self.preview_only = true;
         self.harness = true;
         self.validated = false;
+        self.pending = None;
+        self.render_started = None;
+        self.observed = None;
         self.preview = None;
         self.staged = None;
         self.error = None;
@@ -843,6 +897,7 @@ impl Workspace {
         }
     }
     fn request_preview(&mut self, app: &App) {
+        if self.harness { self.send(json!({"op":"Harness"})); return; }
         if self.is_specimen() { self.request_specimen_preview(); return; }
         if let Some(draft) = self.active_draft(app) {
             self.current = false;
@@ -971,10 +1026,12 @@ impl Workspace {
                         "Harness" => {
                             self.preview = Some(value);
                             self.current = false;
+                            self.pending = None;
+                            self.render_started = None;
                         }
                         "Open" | "Command" | "Project" => {
                           if op=="Command" && app.cityos_submission_frozen() {
-                              self.error=Some("A delayed edit cannot replace the frozen submitted draft.".into());continue;
+                              self.error=Some("A delayed edit cannot replace the frozen submitted draft.".into());return;
                           }
                           match binding(value["draft"].clone(), &value["projection"]) {
                             Err(e) => self.error = Some(e),
@@ -1005,10 +1062,7 @@ impl Workspace {
                                         Err(e) => self.error = Some(e.to_string()),
                                     }
                                 } else {
-                                    if !self.require_dependencies(app, &document, DependencyAction::Resume) {
-                                        self.resume_document=Some(document);self.validated=false;return;
-                                    }
-                                    if !app.cityos_submission_frozen() { app.doc = document; app.changed(); }
+                                    if !self.install_resumed_projection(app, document) { return; }
                                 }
                                 self.validated = true;
                                 if !self.preview_only { let selected=document_selection(&app.doc,&self.selected); self.select(app,&selected); }
@@ -1056,7 +1110,7 @@ impl Workspace {
                                             let history=app.lib.as_ref().zip(app.lib_file.as_ref()).map(|(lib,file)|lib.load_checkpoint(&file.id));
                                             if let Some(Err(error))=history {self.validated=false;self.error=Some(format!("Retained history dependencies are unavailable. Restore a portable checkpoint before editing: {error}"));}
                                             else {
-                                                if let Some(document)=self.resume_document.take(){if !app.cityos_submission_frozen(){app.doc=document;app.changed();}}
+                                                if let Some(document)=self.resume_document.take(){Self::activate_resumed_document(app,document);}
                                                 self.validated=true; self.observed=None; self.pending=Some(Instant::now());
                                             }
                                         },
@@ -1120,11 +1174,7 @@ impl Workspace {
                 _ => {}
             }
         }
-        if self.render_started.is_some_and(|at| at.elapsed() > Duration::from_secs(30)) {
-            self.error = Some("Renderer did not acknowledge this revision; restart preview to retry".into());
-            self.render_started = None;
-            self.current = false;
-        }
+        self.expire_render_acknowledgement(Instant::now());
         let identity = if self.preview_only { self.staged.as_ref().and_then(revision) } else { revision(&app.doc) };
         if identity != self.observed {
             self.observed = identity;
@@ -1139,7 +1189,7 @@ impl Workspace {
             self.pending = None;
             self.request_preview(app);
         }
-        if !self.actual_preview() {
+        if self.harness || !self.actual_preview() {
             self.pending = None;
         }
     }
@@ -1180,8 +1230,38 @@ impl Workspace {
         }
     }
     fn progress_repaint_delay(&self) -> Option<Duration> {
-        let visible_pending = self.pending.is_some() && (self.preview_only || self.layout.view != layout::View::Canvas);
-        (self.busy.is_some() || visible_pending || self.render_started.is_some()).then_some(Duration::from_millis(100))
+        self.progress_repaint_delay_at(Instant::now())
+    }
+    fn progress_repaint_delay_at(&self, now: Instant) -> Option<Duration> {
+        let visible_pending = !self.harness && self.pending.is_some() && (self.preview_only || self.layout.view != layout::View::Canvas);
+        repaint::progress_delay(now, self.busy.is_some(), visible_pending, self.render_started)
+    }
+    fn expire_render_acknowledgement(&mut self, now: Instant) {
+        if repaint::acknowledgement_expired(now, self.render_started) {
+            self.error = Some("Renderer did not acknowledge this revision; restart preview to retry".into());
+            self.render_started = None;
+            self.current = false;
+        }
+    }
+    fn observe_preview_viewport(&mut self, viewport: (u32, u32)) {
+        if viewport != self.panel_size {
+            self.panel_size = viewport;
+            self.viewport = viewport;
+            // The inert harness has no semantic revision to compile. Its child
+            // bounds are updated by Host::show without scheduling draft work.
+            if !self.harness {
+                self.current = false;
+                self.pending = Some(Instant::now());
+            }
+        }
+    }
+    fn release_inactive_preview(&mut self) {
+        if self.host.release() {
+            // Keep the semantic draft and immutable prepared artifact. A new
+            // child must acknowledge that exact receipt before becoming current.
+            self.current = false;
+            self.render_started = None;
+        }
     }
     pub(crate) fn performance_state(&self) -> [bool; 5] {
         [self.busy.is_some(), self.pending.is_some(), self.render_started.is_some(), self.current, self.progress_repaint_delay().is_some()]
@@ -1236,7 +1316,17 @@ impl Workspace {
         }
         egui::Panel::top("cityos-workspace-actions").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.recovery_pending,egui::Button::new("Library")).clicked() {
+                let can_leave = !self.recovery_pending && self.busy.is_none();
+                let files = ui.add_enabled(can_leave && (app.lib.is_some() || app.home.is_some()), egui::Button::new("Desigma files"))
+                    .on_hover_text("Save the current draft and return to the Desigma file library")
+                    .on_disabled_hover_text("Wait for the current operation, recover the draft, or attach a Desigma file library");
+                crate::widgets::record(ui, "workspace-desigma-files", files.rect);
+                if files.clicked() {
+                    if let Err(error) = self.open_desigma_files(app) { self.error = Some(error); }
+                }
+                if ui.add_enabled(can_leave,egui::Button::new("Library"))
+                    .on_hover_text("Browse the CityOS library")
+                    .on_disabled_hover_text("Wait for the current operation or recover the draft before leaving").clicked() {
                     self.open = false;
                 }
                 if ui.selectable_label(!self.changes_mode,"Design").clicked(){self.changes_mode=false;}
@@ -1359,7 +1449,7 @@ impl Workspace {
         }
         if self.changes_mode {
             if old_layout != self.layout { self.save_layout(); }
-            self.host.hide();
+            self.release_inactive_preview();
             egui::CentralPanel::default().show(ui,|ui|{
                 ui.heading("Changes");ui.label("Review incoming source changes before updating this draft's pinned baseline.");
                 if let Some(error)=&self.error{ui.colored_label(ui.visuals().error_fg_color,error);}
@@ -1567,8 +1657,10 @@ impl Workspace {
         let preview_width = self.layout.preview_width;
         let mut resized_preview = None;
         let mut web_panel = |ui: &mut egui::Ui| {
-            ui.heading("Actual web renderer");
-            if let Some(p) = &self.preview {
+            ui.heading(if self.harness { "Embedded host diagnostic" } else { "Actual web renderer" });
+            if self.harness {
+                ui.label("Inert application content · no semantic draft or renderer qualification");
+            } else if let Some(p) = &self.preview {
                 let status = if self.current { "Current" } else if self.error.is_some() { "Failed — previous preview retained" }
                     else if matches!(self.busy.as_deref(), Some("Preview" | "FixturePreview")) || self.render_started.is_some() { "Rendering" } else { "Out of date" };
                 if self.is_specimen() { ui.label(format!("{status} · temporary registered defaults")); }
@@ -1582,7 +1674,9 @@ impl Workspace {
             }
             ui.small(if self.harness { "Inert embedded-host diagnostic · no repository code" } else { "Registered CityOS renderer · deterministic fixture · owner actions disabled" });
             let old = (self.locale.clone(), self.theme.clone(), self.theme_id.clone(), self.interactive);
-            if self.is_specimen() {
+            if self.harness {
+                ui.small("Keyboard, clipboard and focus controls are inside the diagnostic page.");
+            } else if self.is_specimen() {
                 ui.small("Registered default theme · light/dark presentation only");
             } else { egui::ComboBox::from_id_salt("workspace-theme")
                 .width(250.)
@@ -1596,12 +1690,14 @@ impl Workspace {
                     }
                 }); }
             ui.horizontal_wrapped(|ui| {
+                if !self.harness {
                 ui.selectable_value(&mut self.locale, "ar".into(), "Arabic · RTL");
                 ui.selectable_value(&mut self.locale, "en".into(), "English · LTR");
                 ui.selectable_value(&mut self.theme, "light".into(), "Light");
                 ui.selectable_value(&mut self.theme, "dark".into(), "Dark");
                 if self.resource.as_ref().is_none_or(|r|r["fixture"]!="cityos-lower-level") {
                     ui.checkbox(&mut self.interactive,"Interact with fixture").on_hover_text("Preview interactions stay local and do not edit the draft or invoke owner actions.");
+                }
                 }
                 if ui.button("Restart preview").clicked() {
                     self.host.reset();
@@ -1620,12 +1716,7 @@ impl Workspace {
             }
             let rect = ui.available_rect_before_wrap();
             let viewport = (rect.width().round().clamp(240., 4096.) as u32, rect.height().round().clamp(240., 4096.) as u32);
-            if viewport != self.panel_size {
-                self.panel_size = viewport;
-                self.viewport = viewport;
-                self.current = false;
-                self.pending = Some(Instant::now());
-            }
+            self.observe_preview_viewport(viewport);
             bounds = Some(rect);
         };
         if show_side_preview {
@@ -1706,7 +1797,7 @@ impl Workspace {
             });
         }
         if (!show_side_preview && !show_full_preview) || !self.open {
-            self.host.hide();
+            self.release_inactive_preview();
         }
         if self.compare_open {
             self.host.hide();
@@ -1724,8 +1815,13 @@ impl Workspace {
             self.host.hide();
         } else if self.open && (show_side_preview || show_full_preview) && self.actual_preview() {
             if let (Some(rect), Some(url)) = (bounds, self.preview.as_ref().and_then(|p| p["url"].as_str())) {
+                let activating = self.host.url.as_deref() != Some(url);
                 if let Err(error) = self.host.show(frame, url, rect, ctx.pixels_per_point(), &ctx) {
                     self.error = Some(error);
+                } else if activating && !self.harness {
+                    self.current = false;
+                    self.render_started = Some(Instant::now());
+                    ctx.request_repaint();
                 }
             }
         }
@@ -1742,6 +1838,230 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct NavigationLibrary(std::path::PathBuf);
+    impl NavigationLibrary {
+        fn app() -> (Self, App, desigma_library::Library) {
+            let root = std::env::temp_dir().join(format!("desigma-workspace-navigation-{}", uuid::Uuid::new_v4()));
+            let library = desigma_library::Library::open(&root).unwrap();
+            library.put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
+            let mut app = App::new(tab_document("navigation"));
+            app.home = None; app.lib = Some(library.clone());
+            Workspace::save_to_draft_library(&mut app).unwrap();
+            (Self(root), app, library)
+        }
+    }
+    impl Drop for NavigationLibrary {
+        fn drop(&mut self) {
+            crate::home::thumb::finish_library_jobs(&self.0);
+            let resolved = self.0.canonicalize().unwrap();
+            assert_eq!(resolved.parent(), Some(std::env::temp_dir().canonicalize().unwrap().as_path()));
+            std::fs::remove_dir_all(resolved).unwrap();
+        }
+    }
+    #[test]
+    fn desigma_files_navigation_saves_the_bound_draft_and_preserves_undo_and_bindings() {
+        let (_directory, mut app, library) = NavigationLibrary::app();
+        let id = app.lib_file.as_ref().unwrap().id.clone();
+        let mut edited = app.doc.clone(); edited.name = "Edited before returning to files".into();
+        app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(edited) }).unwrap();
+        app.changed();
+        let document = app.doc.to_json().unwrap();
+        let history = serde_json::to_value(&app.hist).unwrap();
+        let mut workspace = Workspace::default(); workspace.open = true;
+        workspace.pending = Some(Instant::now()); workspace.preview = Some(json!({"draftRevision":0}));
+        workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
+        workspace.open_desigma_files(&mut app).unwrap();
+        assert!(!workspace.open && !workspace.library_requested());
+        assert!(app.home.is_some() && app.doc.cityos.is_some());
+        assert!(workspace.host.url.is_none() && workspace.preview.is_none() && workspace.pending.is_none());
+        assert_eq!(app.doc.to_json().unwrap(), document);
+        assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
+        let checkpoint = library.load_checkpoint(&id).unwrap();
+        assert_eq!(checkpoint.document.to_json().unwrap(), document);
+        assert_eq!(serde_json::to_value(&checkpoint.history).unwrap(), history);
+        assert_eq!(library.all_files().len(), 1);
+    }
+    #[test]
+    fn desigma_files_navigation_keeps_the_current_workspace_when_saving_fails() {
+        let (_directory, mut app, library) = NavigationLibrary::app();
+        let file = app.lib_file.as_ref().unwrap().clone();
+        let stored = library.load_checkpoint(&file.id).unwrap().to_json().unwrap();
+        app.doc.name = "Unsaved navigation change".into(); app.changed();
+        app.autosave.changed_at = Some(0.); app.autosave.confirmed = true;
+        let document = app.doc.to_json().unwrap(); let hash = app.autosave.saved_hash;
+        let blocker = library.path("projects").join(&file.project_id).join(".save.pending.json");
+        std::fs::create_dir(&blocker).unwrap();
+        let mut workspace = Workspace::default(); workspace.open = true;
+        workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
+        assert!(workspace.open_desigma_files(&mut app).is_err());
+        assert!(workspace.open && workspace.library_requested());
+        assert!(app.home.is_none() && app.autosave.pending());
+        assert!(workspace.host.url.is_some());
+        assert_eq!(app.doc.to_json().unwrap(), document);
+        assert_eq!(app.autosave.saved_hash, hash);
+        assert_eq!(app.lib_file.as_ref().unwrap().id, file.id);
+        std::fs::remove_dir(&blocker).unwrap();
+        assert_eq!(library.load_checkpoint(&file.id).unwrap().to_json().unwrap(), stored);
+    }
+    #[test]
+    fn desigma_files_navigation_discards_temporary_views_without_saving_them_or_resetting_home() {
+        let (_directory, mut app, library) = NavigationLibrary::app();
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let stored = library.load_checkpoint(&file).unwrap().to_json().unwrap();
+        let document = app.doc.to_json().unwrap();
+        let mut home = crate::home::Home::new(); home.search = "Retain my file filter".into(); home.scroll = 42.;
+        app.home = Some(home);
+        let mut workspace = Workspace::default(); workspace.open = true; workspace.preview_only = true;
+        workspace.staged = Some(Document::new("Temporary preview"));
+        workspace.temporary_canvas = Some(Box::new(App::new(Document::new("Temporary canvas"))));
+        workspace.open_desigma_files(&mut app).unwrap();
+        assert!(!workspace.open && !workspace.library_requested());
+        assert!(workspace.staged.is_none() && workspace.temporary_canvas.is_none());
+        assert_eq!(app.home.as_ref().unwrap().search, "Retain my file filter");
+        assert_eq!(app.home.as_ref().unwrap().scroll, 42.);
+        assert_eq!(app.doc.to_json().unwrap(), document);
+        assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), stored);
+        assert_eq!(library.all_files().len(), 1);
+    }
+    #[test]
+    fn desigma_files_navigation_cannot_abandon_inflight_commands_or_uncertain_recovery() {
+        let mut app = App::new(Document::new("Current")); app.home = None;
+        let document = app.doc.to_json().unwrap();
+        let mut workspace = Workspace::default(); workspace.open = true;
+        workspace.busy = Some("Command".into());
+        assert!(workspace.open_desigma_files(&mut app).unwrap_err().contains("current CityOS operation"));
+        workspace.busy = None; workspace.recovery_pending = true;
+        assert!(workspace.open_desigma_files(&mut app).unwrap_err().contains("Recover"));
+        assert!(workspace.open && app.home.is_none());
+        assert_eq!(app.doc.to_json().unwrap(), document);
+    }
+    #[test]
+    fn resumed_projection_exits_file_home_only_after_the_retained_dependencies_validate() {
+        let (_directory, mut app, library) = NavigationLibrary::app();
+        app.home = Some(crate::home::Home::new());
+        let original = app.doc.to_json().unwrap(); let history = serde_json::to_value(&app.hist).unwrap();
+        let mut workspace = Workspace::default();
+        let document = app.doc.clone();
+        assert!(workspace.install_resumed_projection(&mut app, document));
+        assert!(app.home.is_none());
+        assert_eq!(app.doc.to_json().unwrap(), original);
+        assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
+        assert!(dependencies::complete(&library, &app.doc));
+    }
+    #[test]
+    fn missing_resume_dependencies_preserve_the_file_home_and_original_document() {
+        let root = std::env::temp_dir().join(format!("desigma-workspace-navigation-{}", uuid::Uuid::new_v4()));
+        let _directory = NavigationLibrary(root.clone());
+        let mut app = App::new(tab_document("missing-dependency"));
+        app.lib = Some(desigma_library::Library::open(&root).unwrap());
+        app.home = Some(crate::home::Home::new());
+        let original = app.doc.to_json().unwrap(); let document = app.doc.clone();
+        let mut workspace = Workspace::default();
+        assert!(!workspace.install_resumed_projection(&mut app, document));
+        assert!(app.home.is_some() && workspace.resume_document.is_some());
+        assert!(!workspace.validated);
+        assert_eq!(app.doc.to_json().unwrap(), original);
+    }
+    #[test]
+    fn renderer_ack_wait_uses_its_original_deadline_without_a_repaint_heartbeat() {
+        let mut workspace = Workspace::default();
+        let started = Instant::now();
+        workspace.render_started = Some(started);
+        for seconds in [0, 1, 15, 29, 30, 31] {
+            let elapsed = Duration::from_secs(seconds);
+            assert_eq!(workspace.progress_repaint_delay_at(started + elapsed),
+                Some(RENDER_ACK_TIMEOUT.saturating_sub(elapsed)));
+            assert_eq!(workspace.render_started, Some(started), "An unrelated UI pass must not postpone the deadline");
+        }
+        // A matching IPC receipt clears this field in poll(), waking the UI
+        // immediately through Host's existing IPC handler.
+        workspace.render_started = None;
+        workspace.current = true;
+        assert!(workspace.progress_repaint_delay_at(started + Duration::from_secs(1)).is_none());
+    }
+    #[test]
+    fn renderer_ack_wait_keeps_loading_and_pending_edit_progress_serviceable() {
+        let mut workspace = Workspace::default();
+        let started = Instant::now();
+        workspace.render_started = Some(started);
+        workspace.busy = Some("Preview".into());
+        assert_eq!(workspace.progress_repaint_delay_at(started), Some(Duration::from_millis(100)));
+        assert_eq!(workspace.progress_repaint_delay_at(started + Duration::from_millis(29_950)), Some(Duration::from_millis(50)));
+        workspace.busy = None;
+        workspace.pending = Some(started);
+        workspace.preview_only = true;
+        assert_eq!(workspace.progress_repaint_delay_at(started), Some(Duration::from_millis(100)));
+        workspace.pending = None;
+        workspace.harness = true;
+        workspace.render_started = None;
+        workspace.busy = Some("Harness".into());
+        assert_eq!(workspace.progress_repaint_delay_at(started), Some(Duration::from_millis(100)), "Initial harness loading still polls its helper");
+        workspace.busy = None;
+        assert!(workspace.progress_repaint_delay_at(started).is_none());
+    }
+    #[test]
+    fn renderer_ack_timeout_at_the_deadline_retains_the_artifact_and_pending_edit() {
+        let mut workspace = Workspace::default();
+        let started = Instant::now();
+        let artifact = json!({"requestId":"retained-receipt","draftRevision":1,"semanticDigest":"unchanged"});
+        workspace.preview = Some(artifact.clone());
+        workspace.render_started = Some(started);
+        workspace.pending = Some(started);
+        workspace.current = false;
+        workspace.expire_render_acknowledgement(started + RENDER_ACK_TIMEOUT - Duration::from_nanos(1));
+        assert!(workspace.error.is_none());
+        assert_eq!(workspace.render_started, Some(started));
+        workspace.expire_render_acknowledgement(started + RENDER_ACK_TIMEOUT);
+        assert!(workspace.error.as_deref().is_some_and(|error| error.contains("did not acknowledge")));
+        assert!(workspace.render_started.is_none());
+        assert!(!workspace.current);
+        assert_eq!(workspace.preview, Some(artifact));
+        assert_eq!(workspace.pending, Some(started), "A newer semantic revision is not discarded by a renderer timeout");
+        let error = workspace.error.clone();
+        workspace.expire_render_acknowledgement(started + RENDER_ACK_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(workspace.error, error, "Expiry is terminal without another deadline or retry");
+    }
+    #[test]
+    fn releasing_inactive_preview_preserves_the_artifact_and_pending_semantic_revision() {
+        let mut workspace = Workspace::default();
+        workspace.layout.view = layout::View::Canvas;
+        workspace.preview = Some(json!({"requestId":"retained-artifact","draftRevision":1}));
+        workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
+        workspace.current = true;
+        workspace.pending = Some(Instant::now());
+        workspace.render_started = Some(Instant::now());
+        workspace.release_inactive_preview();
+        assert_eq!(workspace.preview, Some(json!({"requestId":"retained-artifact","draftRevision":1})));
+        assert!(workspace.pending.is_some(), "A newer draft must still render when made visible");
+        assert!(!workspace.current && workspace.render_started.is_none());
+        assert!(workspace.progress_repaint_delay().is_none(), "An inactive renderer must not keep the canvas awake");
+        workspace.release_inactive_preview();
+        assert!(workspace.pending.is_some());
+    }
+    #[test]
+    fn inert_host_resize_does_not_schedule_semantic_work_or_idle_repaints() {
+        let mut workspace = Workspace::default();
+        workspace.harness = true;
+        workspace.preview_only = true;
+        for viewport in [(800, 600), (900, 700), (900, 700)] {
+            workspace.observe_preview_viewport(viewport);
+            assert_eq!(workspace.panel_size, viewport);
+            assert_eq!(workspace.viewport, viewport);
+            assert!(workspace.pending.is_none());
+            assert!(workspace.progress_repaint_delay().is_none());
+        }
+        // A retained pre-harness debounce must not keep the diagnostic awake.
+        workspace.pending = Some(Instant::now());
+        assert!(workspace.progress_repaint_delay().is_none());
+        workspace.busy = Some("Harness".into());
+        assert!(workspace.progress_repaint_delay().is_some(), "Loading remains responsive");
+        workspace.busy = None;
+        workspace.harness = false;
+        workspace.pending = None;
+        workspace.observe_preview_viewport((1000, 800));
+        assert!(workspace.pending.is_some(), "Real previews still recompile for changed viewports");
+        assert!(workspace.progress_repaint_delay().is_some());
+    }
     #[test]
     fn current_workspace_is_event_driven_but_pending_work_keeps_progress_repaints() {
         let mut workspace = Workspace::default();
