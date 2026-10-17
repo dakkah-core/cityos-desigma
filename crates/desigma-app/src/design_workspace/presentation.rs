@@ -45,6 +45,10 @@ pub(super) fn scene_matches(projection: &Value, sent: Option<&Value>) -> bool {
         && ["locale", "theme", "viewport"].iter().all(|field| scene[*field] == sent[*field])
 }
 
+pub(super) fn scene_resource(resource: &Value) -> bool {
+    matches!(resource["fixture"].as_str(), Some("cityos-accordion" | "cityos-web-frame"))
+}
+
 pub(super) fn install(app: &mut App, projection: Document) -> Result<(), String> {
     let mut current = serde_json::to_value(&app.doc).map_err(|e| e.to_string())?;
     let derived = serde_json::to_value(&projection).map_err(|e| e.to_string())?;
@@ -75,11 +79,17 @@ pub(super) fn install(app: &mut App, projection: Document) -> Result<(), String>
 
 impl Workspace {
     pub(super) fn presentation(&self) -> Value {
-        json!({"locale":self.locale,"theme":self.theme,"themeId":self.theme_id,
+        // Named repository themes are qualified for the actual renderer only.
+        // Keep the native default-theme projection distinct and explicitly labelled.
+        json!({"locale":self.locale,"theme":self.theme,"themeId":"",
             "viewport":{"width":self.viewport.0,"height":self.viewport.1}})
     }
+    pub(super) fn native_theme_notice(&self) -> Option<&'static str> {
+        (self.has_native_scene() && !self.theme_id.is_empty()).then_some(
+            "Native canvas uses the renderer default theme. The selected theme applies to the actual web preview.")
+    }
     pub(super) fn has_native_scene(&self) -> bool {
-        !self.is_specimen() && self.resource.as_ref().is_some_and(|resource| resource["fixture"] == "cityos-accordion")
+        !self.is_specimen() && self.resource.as_ref().is_some_and(scene_resource)
     }
     pub(super) fn native_presentation_current(&self, app: &App) -> bool {
         self.active_draft(app).is_some_and(|draft| self.canvas_presentation.as_ref() == Some(&key(&draft, &self.presentation())))
@@ -193,6 +203,22 @@ mod tests {
         projection.as_object_mut().unwrap().remove("scene");
         assert!(!scene_matches(&projection,Some(&sent)));
         assert!(!scene_matches(&projection,None));
+    }
+    #[test]
+    fn named_renderer_themes_never_masquerade_as_native_paints_or_block_semantic_commands() {
+        let mut workspace=Workspace::default();
+        workspace.resource=Some(json!({"fixture":"cityos-web-frame","actualWebPreview":true}));
+        let native=workspace.presentation();let rendered=workspace.scenario();
+        workspace.theme_id="pinned-repository-theme".into();
+        assert_eq!(workspace.presentation(),native);assert_ne!(workspace.scenario(),rendered);
+        assert_eq!(workspace.scenario()["themeId"],"pinned-repository-theme");
+        assert!(workspace.native_theme_notice().unwrap().contains("actual web preview"));
+        let (bridge,requests,_responses)=super::super::bridge::Bridge::test_transport();
+        workspace.bridge=Some(bridge);
+        workspace.send(json!({"op":"Command","draft":draft(&document())}));
+        let request=requests.recv().unwrap();
+        assert_eq!(request["presentation"]["themeId"],"");assert_eq!(workspace.theme_id,"pinned-repository-theme");
+        workspace.theme_id.clear();assert!(workspace.native_theme_notice().is_none());
     }
     #[test]
     fn a_locale_change_during_a_command_keeps_the_edit_then_reprojects_without_a_history_entry() {

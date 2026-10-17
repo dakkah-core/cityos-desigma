@@ -794,11 +794,49 @@ fn catalog_refresh_changed_configuration_or_mode_cannot_reuse_a_displayed_genera
         browser.tick();
         assert!(requests.try_recv().is_err());
         browser.refresh();
-        assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
-        assert_eq!(browser.activity, "Reading repository");
+        if change==3 {
+            assert!(matches!(requests.try_recv(), Ok(Job::Restore(..))));
+            assert_eq!(browser.activity,"Restoring saved library");
+        } else {
+            assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
+            assert_eq!(browser.activity, "Reading repository");
+        }
         browser.filters.search = "new".into();
         browser.filters_changed();
         assert!(!browser.cancelled.load(Ordering::Acquire));
+    }
+}
+
+#[test]
+fn initial_cache_recovery_is_separate_from_background_scan_and_queries_only_the_valid_generation() {
+    let (mut browser,tx,requests)=fixture();
+    let summary=browser.summary.take().unwrap();browser.catalog_binding=None;browser.entries.clear();browser.cache=Some("cache-fixture".into());
+    browser.refresh();let epoch=browser.epoch;
+    assert_eq!(browser.activity,"Restoring saved library");
+    assert!(matches!(requests.try_recv(),Ok(Job::Restore(..))));
+    browser.filters.search="requested during recovery".into();browser.filters_changed();browser.tick();
+    assert!(!browser.cancelled.load(Ordering::Acquire));assert!(requests.try_recv().is_err());
+    tx.send(Reply::Scan(epoch,Ok(summary))).unwrap();browser.poll();
+    assert!(matches!(requests.try_recv(),Ok(Job::Query(_,filters,0,binding)) if filters.search=="requested during recovery" && binding.generation=="first"));
+    assert!(browser.usable_generation().is_some());
+}
+
+#[test]
+fn cache_only_misses_fall_back_once_but_protocol_failures_or_obsolete_contexts_cannot_start_a_scan() {
+    for error in ["CACHE_RESTORE_UNAVAILABLE: missing cache","CACHE_RESTORE_UNAVAILABLE: reader capability unavailable","Malformed reader reply"] {
+        let (mut browser,tx,requests)=fixture();browser.summary=None;browser.catalog_binding=None;browser.cache=Some("cache-fixture".into());
+        browser.refresh();assert!(matches!(requests.try_recv(),Ok(Job::Restore(..))));
+        tx.send(Reply::Scan(browser.epoch,Err(error.into()))).unwrap();browser.poll();
+        if error.starts_with("CACHE_RESTORE_UNAVAILABLE") {
+            assert_eq!(browser.activity,"Reading repository");assert!(matches!(requests.try_recv(),Ok(Job::Scan(_,_,_,true))));
+        } else {assert!(requests.try_recv().is_err());assert!(browser.error.is_some());}
+    }
+    for obsolete in [true,false] {
+        let (mut browser,tx,requests)=fixture();browser.summary=None;browser.catalog_binding=None;browser.cache=Some("cache-fixture".into());
+        browser.refresh();let epoch=browser.epoch;assert!(matches!(requests.try_recv(),Ok(Job::Restore(..))));
+        if obsolete {browser.mode="local".into();} else {browser.cancelled.store(true,Ordering::Release);}
+        tx.send(Reply::Scan(epoch,Err("CACHE_RESTORE_UNAVAILABLE: incompatible cache".into()))).unwrap();browser.poll();
+        assert!(requests.try_recv().is_err(),"A retired recovery cannot enqueue new source work");
     }
 }
 
@@ -837,6 +875,60 @@ fn catalog_refresh_failure_preserves_display_and_explicit_refresh_reconnects_wit
     tx.send(Reply::Scan(browser.epoch, Ok(previous.unwrap()))).unwrap();
     browser.poll();
     assert!(matches!(requests.try_recv(), Ok(Job::Query(_, filters, 0, binding)) if filters.search == "changed" && binding.generation == "first"));
+}
+
+#[test]
+fn failed_remote_refresh_recovered_from_cache_keeps_browsing_and_failure_backoff() {
+    let (mut browser,tx,requests)=fixture();browser.auto_refresh=false;
+    let mut recovered=browser.summary.clone().unwrap();
+    recovered["restoredCache"]=json!(true);recovered["stale"]=json!(true);
+    recovered["refreshError"]=json!("Remote unavailable");recovered["restoredAfterRefreshFailure"]=json!(true);
+    browser.refresh();let epoch=browser.epoch;assert!(matches!(requests.try_recv(),Ok(Job::Scan(..))));
+    browser.filters.level="L2".into();browser.filters_changed();
+    tx.send(Reply::Scan(epoch,Ok(recovered))).unwrap();browser.poll();
+    assert_eq!(browser.refresh_failures,1);assert_eq!(browser.summary.as_ref().unwrap()["generationId"],"first");
+    assert!(matches!(requests.try_recv(),Ok(Job::Query(_,filters,0,binding)) if filters.level=="L2"&&binding.generation=="first"));
+    tx.send(Reply::Query(browser.epoch,browser.filters.clone(),0,Ok(Page{entries:vec![entry("L2-match")],total:1,next_offset:None}))).unwrap();
+    browser.poll();assert_eq!(browser.entries[0].id,"L2-match");assert_eq!(browser.displayed_filters,browser.filters);
+    assert_eq!(browser.next_repaint_after(Instant::now()),None);
+}
+
+#[test]
+fn an_unrecoverable_reader_shows_reconnect_instead_of_permanent_loading_or_mismatched_rows() {
+    let (mut browser,_,_)=fixture();browser.auto_refresh=false;browser.catalog_binding=None;
+    browser.filters.level="L2".into();browser.error=Some("Remote unavailable; saved cache is missing".into());
+    let ctx=egui::Context::default();let size=egui::vec2(1440.,900.);
+    catalog_frame(&mut browser,&ctx,size,vec![]);let output=catalog_frame(&mut browser,&ctx,size,vec![]);
+    let mut text=String::new();for shape in &output.shapes {shape_text(&shape.shape,&mut text);}
+    assert!(text.contains("Results unavailable")&&text.contains("Reconnect saved library"));
+    assert!(!text.contains("Updating results")&&!text.contains("token:/colors/surface/page"));
+    assert_eq!(browser.next_repaint_after(Instant::now()),None);
+}
+
+#[test]
+fn remote_failure_recovery_only_restores_the_exact_generation_without_capturing_sources() {
+    for outcome in ["healthy","generation-changed","mode-changed","old-reader"] {
+        let root=std::env::temp_dir().join(format!("desigma-cache-reconnect-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();let fixture=CatalogReaderFixture(root.clone());
+        let reader=root.join("reader.mjs");
+        let script=r#"import readline from 'node:readline';const outcome=__OUTCOME__;let generation=null;
+          const send=(r,body)=>process.stdout.write(JSON.stringify({protocolVersion:r.protocolVersion,requestId:r.requestId,sessionId:r.sessionId,generationId:generation,kind:'result',result:body})+'\n');
+          readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);
+            if(r.op==='Hello')return send(r,{capabilities:{cacheOnlyRestore:outcome!=='old-reader'}});
+            if(r.op==='Scan'){if(r.cacheOnly!==true)process.exit(51);generation=outcome==='generation-changed'?'different':'first';return send(r,{generationId:generation,restoredCache:true,snapshot:{mode:outcome==='mode-changed'?'local':'committed'}});}
+            if(r.op==='Query')return send(r,{entries:[],total:0,nextOffset:null});
+            process.exit(52);});"#.replace("__OUTCOME__",&serde_json::to_string(outcome).unwrap());
+        std::fs::write(&reader,script).unwrap();let marker=root.join("active.json");std::fs::write(&marker,b"immutable fixture pointer").unwrap();
+        let binding=CatalogBinding {config:ReaderConfig{node:"node".into(),reader,repository:root.clone(),cache:Some(root.clone()),canonical_ref:None},
+            mode:"committed".into(),generation:"first".into()};
+        let result=recover_previous_catalog(&binding,Arc::new(AtomicBool::new(false)),"Remote unavailable");
+        if outcome=="healthy" {
+            let (mut client,summary)=result.unwrap();assert_eq!(summary["stale"],true);assert_eq!(summary["refreshError"],"Remote unavailable");
+            assert_eq!(summary["restoredAfterRefreshFailure"],true);assert_eq!(client.generation.as_deref(),Some("first"));
+            assert_eq!(client.query(&Filters::default(),0).unwrap().total,0);drop(client);
+        } else {assert!(result.is_err(),"{outcome}");}
+        assert_eq!(std::fs::read(&marker).unwrap(),b"immutable fixture pointer");drop(fixture);
+    }
 }
 
 struct CatalogReaderFixture(PathBuf);

@@ -434,7 +434,8 @@ impl Browser {
             ui.selectable_value(&mut self.visual_results, true, "Tiles");
         });
         let waiting = self.displayed_filters != self.filters;
-        ui.label(RichText::new(if waiting { "Updating results…".into() } else { format!("{} items", count(self.total)) }).small().color(theme::TEXT_SECONDARY));
+        let unavailable=waiting && !self.busy && self.filter_changed.is_none() && self.usable_generation().is_none() && self.error.is_some();
+        ui.label(RichText::new(if unavailable {"Results unavailable".into()} else if waiting { "Updating results…".into() } else { format!("{} items", count(self.total)) }).small().color(theme::TEXT_SECONDARY));
         ui.add_space(8.0);
         if self.summary.is_none() {
             ui.add_space(24.0);
@@ -451,6 +452,12 @@ impl Browser {
             return;
         }
         if waiting {
+            if unavailable {
+                ui.label("Reconnect to the saved library to load this selection.");
+                if let Some(error)=&self.error {ui.add(egui::Label::new(error).wrap());}
+                if ui.button("Reconnect saved library").clicked() {self.start_refresh(true);}
+                return;
+            }
             crate::cityos_jobs::progress_marker(ui);
             return;
         }

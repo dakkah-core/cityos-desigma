@@ -1,5 +1,5 @@
 //! Bounded component visuals over semantic occurrences. Never imports browser geometry.
-use desigma_doc::{CityosOccurrence, Color, Document, LineHeight, Node, NodeKind, Paint, Path, PathCmd, Rect,
+use desigma_doc::{CityosOccurrence, Color, Document, Effect, LineHeight, Node, NodeKind, Paint, Path, PathCmd, Rect,
     StrokeAlign, StrokeCap, StrokeJoin, TextAlignH, TextAlignV, TextAutoResize, TextDirection, TextStyle, Vec2};
 use serde::Deserialize;
 use serde_json::Value;
@@ -38,6 +38,16 @@ struct Primitive {
     clips_content: Option<bool>,
     text: Option<Text>,
     path: Option<Vec<(String, f32, f32)>>,
+    effects: Option<Vec<DropShadow>>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DropShadow {
+    kind: String,
+    color: [f32; 4],
+    offset: [f32; 2],
+    radius: f32,
+    spread: f32,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,7 +75,8 @@ fn color(value: [f32; 4]) -> Result<Color, String> {
 /// Present scenes fail closed. Only their absence permits the legacy inspection projection.
 pub(super) fn document(projection: &Value, name: &str) -> Result<(Document, BTreeMap<String, CityosOccurrence>), String> {
     let scene: Scene = serde_json::from_value(projection["scene"].clone()).map_err(|e| format!("Invalid native scene: {e}"))?;
-    if scene.schema_version != "cityos.desigma-native-scene.v1" || scene.adapter != "cityos.accordion.visual.v1"
+    let material_scene = scene.adapter == "cityos.living-canvas-frame-material.native-scene.v1";
+    if scene.schema_version != "cityos.desigma-native-scene.v1" || !(material_scene || scene.adapter == "cityos.accordion.visual.v1")
         || !matches!((scene.locale.as_str(), scene.direction.as_str()), ("ar", "rtl") | ("en", "ltr"))
         || !matches!(scene.theme.as_str(), "light" | "dark")
         || !finite(scene.viewport.width, 1., 8192.) || !finite(scene.viewport.height, 1., 8192.)
@@ -98,6 +109,11 @@ pub(super) fn document(projection: &Value, name: &str) -> Result<(Document, BTre
             return Err("Invalid or excessive native scene geometry/identity".into());
         }
         let owner = semantic.get(&row.occurrence_id).ok_or("Unknown native scene semantic occurrence")?;
+        if let Some(effects) = &row.effects {
+            if !material_scene || row.kind != "frame" || owner.definition != "cityos.l1.living-material.v1" || effects.len() > 4 {
+                return Err("Unsupported native scene effects or material owner".into());
+            }
+        }
         let parent = if let Some(parent) = &row.parent {
             let id = *ids.get(parent).ok_or("Native scene parent must precede its child")?;
             let parent_owner = owners.get(parent).ok_or("Missing native scene parent owner")?;
@@ -174,6 +190,14 @@ pub(super) fn document(projection: &Value, name: &str) -> Result<(Document, BTre
                 _ => return Err("Unsupported native stroke join".into()) };
             if matches!(node.kind, NodeKind::Vector { .. }) { node.stroke.align = StrokeAlign::Center; }
         }
+        for effect in row.effects.unwrap_or_default() {
+            if effect.kind != "dropShadow" || !effect.offset.into_iter().all(|v| finite(v, -256., 256.))
+                || !finite(effect.radius, 0., 256.) || !finite(effect.spread, -256., 256.) {
+                return Err("Invalid native material drop shadow".into());
+            }
+            node.effects.push(Effect::DropShadow { color: color(effect.color)?, offset: Vec2::new(effect.offset[0], effect.offset[1]),
+                radius: effect.radius, spread: effect.spread, visible: true, show_behind: false });
+        }
         if parent != page {
             let transform = doc.world_transform(parent);
             node.transform.tx -= transform.tx; node.transform.ty -= transform.ty;
@@ -227,6 +251,65 @@ mod tests {
         assert_eq!(c.a, 0.12);
         let reopened = Document::from_json(&doc.to_json().unwrap()).unwrap();
         assert_eq!(reopened.nodes.len(), doc.nodes.len());
+    }
+    fn material_projection() -> Value {
+        let mut p = projection();
+        p["nodes"][0]["definitionId"] = json!("cityos.l9.living-canvas-frame.v1");
+        p["nodes"][1]["definitionId"] = json!("cityos.l1.living-material.v1");
+        p["nodes"][1]["sourceNodeId"] = json!("material");
+        p["nodes"][1]["slot"] = json!("material");
+        let mut horizon = p["nodes"][1].clone();
+        horizon["id"] = json!("draft:horizon"); horizon["sourceNodeId"] = json!("horizon");
+        horizon["definitionId"] = json!("cityos.l7.living-horizon.v1"); horizon["slot"] = json!("horizon");
+        p["nodes"].as_array_mut().unwrap().push(horizon);
+        p["scene"]["adapter"] = json!("cityos.living-canvas-frame-material.native-scene.v1");
+        p["scene"]["nodes"].as_array_mut().unwrap().truncate(2);
+        p["scene"]["nodes"][1]["fill"] = json!([32. / 255., 62. / 255., 53. / 255., 1]);
+        p["scene"]["nodes"][1]["effects"] = json!([
+            {"kind":"dropShadow","color":[0,0,0,0.35],"offset":[0,10],"radius":15,"spread":-3},
+            {"kind":"dropShadow","color":[0,0,0,0.20],"offset":[0,4],"radius":6,"spread":-4}]);
+        p["scene"]["nodes"].as_array_mut().unwrap().push(json!({"id":"horizon-proxy","occurrenceId":"draft:horizon",
+            "parent":"root","kind":"frame","x":50,"y":80,"width":460,"height":30,"label":"Protected horizon proxy"}));
+        p
+    }
+    #[test]
+    fn material_shadows_survive_native_save_and_reopen_without_reparenting_semantic_siblings() {
+        let p = material_projection();
+        let (doc, bindings) = super::super::projection_document(&p, "Frame material").unwrap();
+        let material = doc.nodes.values().find(|n| n.source_id.as_deref() == Some("material")).unwrap();
+        let horizon = doc.nodes.values().find(|n| n.source_id.as_deref() == Some("horizon")).unwrap();
+        assert_eq!(material.parent, horizon.parent);
+        assert_eq!(material.corner_radii, [0.; 4]); assert!(material.locked && horizon.locked);
+        assert_eq!(material.effects, vec![
+            Effect::DropShadow {color:Color {r:0.,g:0.,b:0.,a:0.35},offset:Vec2::new(0.,10.),radius:15.,spread:-3.,visible:true,show_behind:false},
+            Effect::DropShadow {color:Color {r:0.,g:0.,b:0.,a:0.20},offset:Vec2::new(0.,4.),radius:6.,spread:-4.,visible:true,show_behind:false}]);
+        assert_eq!(bindings.values().map(|o|o.occurrence_id.as_str()).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["draft:accordion","draft:first","draft:horizon"]));
+        assert!(!doc.nodes.values().any(|n| matches!(n.kind, NodeKind::Text(_))));
+        let reopened = Document::from_json(&doc.to_json().unwrap()).unwrap();
+        assert_eq!(reopened.get(material.id).unwrap().effects, material.effects);
+        let mut flat = p; flat["scene"]["nodes"][1]["effects"] = json!([]);
+        let (doc, _) = super::super::projection_document(&flat, "Flat").unwrap();
+        assert!(doc.nodes.values().all(|n|n.effects.is_empty()));
+    }
+    #[test]
+    fn material_effects_reject_unknown_owners_adapters_shapes_and_unbounded_payloads() {
+        for case in ["adapter","owner","primitive","kind","paint","offset","radius","spread","count","unknown-field"] {
+            let mut p = material_projection();
+            match case {
+                "adapter" => p["scene"]["adapter"] = json!("cityos.accordion.visual.v1"),
+                "owner" => p["nodes"][1]["definitionId"] = json!("cityos.l7.living-horizon.v1"),
+                "primitive" => p["scene"]["nodes"][1]["kind"] = json!("text"),
+                "kind" => p["scene"]["nodes"][1]["effects"][0]["kind"] = json!("backgroundBlur"),
+                "paint" => p["scene"]["nodes"][1]["effects"][0]["color"] = json!([0,0,0,1.1]),
+                "offset" => p["scene"]["nodes"][1]["effects"][0]["offset"] = json!([0,257]),
+                "radius" => p["scene"]["nodes"][1]["effects"][0]["radius"] = json!(-1),
+                "spread" => p["scene"]["nodes"][1]["effects"][0]["spread"] = json!(-257),
+                "count" => {let effect=p["scene"]["nodes"][1]["effects"][0].clone();p["scene"]["nodes"][1]["effects"]=json!(vec![effect;5]);},
+                _ => p["scene"]["nodes"][1]["effects"][0]["execute"] = json!("forbidden"),
+            }
+            assert!(super::super::projection_document(&p,"Rejected material").is_err(),"{case}");
+        }
     }
     #[test]
     fn invalid_scenes_never_fall_back_to_inspection_cards() {

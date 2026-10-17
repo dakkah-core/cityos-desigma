@@ -40,6 +40,7 @@ struct Location {
 }
 
 enum Job {
+    Restore(u64, ReaderConfig, String),
     Scan(u64, ReaderConfig, String, bool),
     Query(u64, Filters, usize, CatalogBinding),
     Materialize(u64, String, CatalogBinding),
@@ -59,6 +60,19 @@ fn scan_cancelled(error: &str) -> bool {
 
 fn retain_cancelled_refresh(result: &Result<Value, String>, cancelled: bool, same_session: bool, had_generation: bool) -> bool {
     cancelled && same_session && had_generation && result.as_ref().is_err_and(|error| scan_cancelled(error))
+}
+
+fn recover_previous_catalog(binding: &CatalogBinding, cancelled: Arc<AtomicBool>, refresh_error: &str) -> Result<(Client, Value), String> {
+    if binding.config.cache.is_none() { return Err("Saved-library recovery is unavailable without a cache".into()); }
+    let mut client=Client::connect_with_cancel(&binding.config,cancelled)?;
+    let mut summary=client.restore_cache(&binding.config,&binding.mode)?;
+    if summary["generationId"].as_str()!=Some(binding.generation.as_str()) || summary["snapshot"]["mode"].as_str()!=Some(binding.mode.as_str()) {
+        return Err("The saved library changed; refresh before reading a different generation".into());
+    }
+    summary["stale"]=Value::Bool(true);
+    summary["refreshError"]=Value::String(refresh_error.into());
+    summary["restoredAfterRefreshFailure"]=Value::Bool(true);
+    Ok((client,summary))
 }
 
 fn read_catalog<T>(client: &mut Option<Client>, session: &mut Option<CatalogBinding>, fence: &mut bool,
@@ -214,6 +228,20 @@ impl Browser {
                     Err(_) => break,
                 };
                 let reply = match job {
+                    Job::Restore(epoch, config, mode) => {
+                        let result=crate::cityos_jobs::run(true,Some(&worker_cancel),|| {
+                            client=None;
+                            Client::connect_with_cancel(&config,worker_cancel.clone()).and_then(|mut current| {
+                                let result=current.restore_cache(&config,&mode);client=Some(current);result
+                            })
+                        }).and_then(|summary| {
+                            if summary["snapshot"]["mode"].as_str()!=Some(mode.as_str()) {return Err("The reader returned a different source mode".into());}
+                            let generation=summary["generationId"].as_str().filter(|id|!id.is_empty()).ok_or("Missing generation identity")?;
+                            session=Some(CatalogBinding {config,mode,generation:generation.into()});fence=false;Ok(summary)
+                        });
+                        if result.is_err(){client=None;session=None;fence=false;}
+                        Reply::Scan(epoch,result)
+                    }
                     Job::Scan(epoch, config, mode, prefer_cache) => {
                         // Preserve a healthy session for incremental refresh. Configuration
                         // changes replace the child and cannot reuse its old generations.
@@ -221,6 +249,7 @@ impl Browser {
                             && client.is_some();
                         let had_generation = client.as_ref().is_some_and(|c| session.as_ref().is_some_and(|binding|
                             c.generation.as_deref() == Some(binding.generation.as_str())));
+                        let previous=session.clone();
                         let result = crate::cityos_jobs::run(false,Some(&worker_cancel),|| if same_session {
                             client.as_mut().unwrap().scan(&config, &mode)
                         } else {
@@ -231,7 +260,7 @@ impl Browser {
                                 result
                             })
                         });
-                        let result = result.and_then(|summary| {
+                        let mut result = result.and_then(|summary| {
                             if summary["snapshot"]["mode"].as_str() != Some(mode.as_str()) {
                                 return Err("The reader returned a different source mode".into());
                             }
@@ -240,6 +269,21 @@ impl Browser {
                             fence = false;
                             Ok(summary)
                         });
+                        if let Some(error)=result.as_ref().err().cloned() {
+                            if same_session && had_generation && !worker_cancel.load(Ordering::Acquire) {
+                                if let Some(binding)=previous.filter(|binding|binding.config.cache.is_some()) {
+                                    // A failed remote refresh must not strand browsing. Reconnect
+                                    // only to the exact validated saved generation; never rescan,
+                                    // adopt a replacement pointer, or consult the remote here.
+                                    client=None;
+                                    match crate::cityos_jobs::run(true,Some(&worker_cancel),||
+                                        recover_previous_catalog(&binding,worker_cancel.clone(),&error)) {
+                                        Ok((recovered,summary))=>{client=Some(recovered);session=Some(binding);fence=false;result=Ok(summary);},
+                                        Err(recovery_error)=>result=Err(format!("{error}. Saved-library recovery failed: {recovery_error}")),
+                                    }
+                                }
+                            }
+                        }
                         if retain_cancelled_refresh(&result, worker_cancel.load(Ordering::Acquire), same_session, had_generation) {
                             fence = true;
                         } else if result.is_err() {
@@ -344,6 +388,9 @@ impl Browser {
         }
     }
     fn refresh(&mut self) {
+        self.start_refresh(self.usable_generation().is_none() && self.cache.is_some());
+    }
+    fn start_refresh(&mut self, cache_only: bool) {
         if self.busy {
             return;
         }
@@ -351,15 +398,15 @@ impl Browser {
         self.cancelled.store(false, Ordering::Release);
         self.epoch += 1;
         self.busy = true;
-        self.activity = if prefer_cache { "Reading repository" } else { "Refreshing repository" };
+        self.activity = if cache_only { "Restoring saved library" } else if prefer_cache { "Reading repository" } else { "Refreshing repository" };
         self.error = None;
         self.last_refresh = Instant::now();
         let config = self.reader_config();
         self.scanning = Some((config.clone(), self.mode.clone()));
-        let _ = self.jobs.send(Job::Scan(self.epoch, config, self.mode.clone(), prefer_cache));
+        let _ = self.jobs.send(if cache_only {Job::Restore(self.epoch,config,self.mode.clone())} else {Job::Scan(self.epoch, config, self.mode.clone(), prefer_cache)});
     }
     pub fn yield_to_design(&self) {
-        if self.busy && matches!(self.activity,"Reading repository"|"Refreshing repository") {self.cancelled.store(true,Ordering::Release);}
+        if self.busy && matches!(self.activity,"Reading repository"|"Refreshing repository"|"Restoring saved library") {self.cancelled.store(true,Ordering::Release);}
     }
     fn query(&mut self, offset: usize) {
         if self.busy {
@@ -383,6 +430,13 @@ impl Browser {
                     self.busy = false;
                     self.last_refresh = Instant::now();
                     let scan = self.scanning.take();
+                    if self.activity=="Restoring saved library" && !self.cancelled.load(Ordering::Acquire)
+                        && scan.as_ref().is_some_and(|(config,mode)|*config==self.reader_config() && *mode==self.mode)
+                        && result.as_ref().is_err_and(|error|error.starts_with("CACHE_RESTORE_UNAVAILABLE")) {
+                        // A cache miss/incompatible capture can only enter the
+                        // pressure-aware background path, never this recovery job.
+                        self.start_refresh(false);continue;
+                    }
                     let cancelled_refresh = self.cancelled.load(Ordering::Acquire) && self.usable_generation().is_some()
                         && scan.as_ref().is_some_and(|(config, mode)| *config == self.reader_config() && *mode == self.mode)
                         && result.as_ref().is_err_and(|error| scan_cancelled(error));
@@ -393,7 +447,8 @@ impl Browser {
                         self.error = None;
                         continue;
                     }
-                    self.refresh_failures = if result.as_ref().is_ok_and(|summary| summary["stale"] != true || summary["restoredCache"] == true) {
+                    self.refresh_failures = if result.as_ref().is_ok_and(|summary| summary["refreshError"].is_null()
+                        && (summary["stale"] != true || summary["restoredCache"] == true)) {
                         0
                     } else {
                         self.refresh_failures.saturating_add(1)

@@ -1070,7 +1070,7 @@ impl Workspace {
                           if op=="Command" && app.cityos_submission_frozen() {
                               self.error=Some("A delayed edit cannot replace the frozen submitted draft.".into());return;
                           }
-                          if value["resource"]["fixture"] == "cityos-accordion" && !presentation::scene_matches(&value["projection"],presentation.as_ref()) {
+                          if presentation::scene_resource(&value["resource"]) && !presentation::scene_matches(&value["projection"],presentation.as_ref()) {
                               self.error=Some("Native scene does not match the requested presentation; previous canvas retained".into()); return;
                           }
                           match binding(value["draft"].clone(), &value["projection"]) {
@@ -1783,6 +1783,10 @@ impl Workspace {
         } else {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading(if !self.validated { "Selected design" } else if self.actual_preview() { "Native canvas" } else { "Protected composition structure" });
+                if self.resource.as_ref().is_some_and(|resource| resource["fixture"] == "cityos-web-frame") {
+                    ui.small("Material visual projection · frame and horizon interiors remain protected proxies.");
+                }
+                if let Some(notice)=self.native_theme_notice() { ui.small(notice); }
                 if self.has_native_scene() && !self.native_presentation_current(app) {
                     ui.small("Canvas presentation out of date · previous view retained");
                 }
