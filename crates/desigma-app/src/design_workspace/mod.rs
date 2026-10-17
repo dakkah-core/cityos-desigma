@@ -10,6 +10,10 @@ mod presentation;
 mod history_commands;
 #[cfg(test)]
 mod atlas_tests;
+#[cfg(test)]
+mod material_tests;
+#[cfg(test)]
+mod horizon_tests;
 use crate::app::App;
 pub use bridge::Config;
 #[cfg(test)]
@@ -932,6 +936,16 @@ impl Workspace {
             draft(&app.doc).cloned()
         }
     }
+    fn send_property_command(&mut self, app: &App, field: &Value, value: Value) {
+        if !self.validated || app.cityos_submission_frozen() || self.busy.is_some()
+            || self.selected != field["nodeId"].as_str().unwrap_or("") { return; }
+        let Some(draft) = self.active_draft(app) else { return; };
+        // Values and operations remain subject to the trusted profile/compiler.
+        // The inspector only sends intent; it never installs local semantics.
+        self.send(json!({"op":"Command","command":{"draftId":draft["draftId"],
+            "expectedRevision":draft["draftRevision"],"operationId":uuid::Uuid::new_v4().to_string(),
+            "operation":"set-property","nodeId":field["nodeId"],"property":field["property"],"value":value},"draft":draft}));
+    }
     fn request_preview(&mut self, app: &App) {
         if self.harness { self.send(json!({"op":"Harness"})); return; }
         if self.is_specimen() { self.request_specimen_preview(); return; }
@@ -1010,7 +1024,10 @@ impl Workspace {
     }
     fn matches_preview_event(&self, app: &App, event: &Value) -> bool {
         let receipt_matches = self.preview.as_ref().is_some_and(|p| {
-            ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"].iter().all(|key| p[*key] == event[*key])
+            ["sessionId", "requestId", "draftId", "semanticDigest"].iter()
+                .all(|key| p[*key].as_str().is_some_and(|value| !value.is_empty()) && p[*key] == event[*key])
+                && p["draftRevision"].as_u64().is_some() && p["draftRevision"] == event["draftRevision"]
+                && p["scenario"] == event["scenario"]
         }) && event["scenario"] == self.scenario();
         if self.is_specimen() {
             receipt_matches && self.preview_only && self.specimen_request.is_none() && self.busy.as_deref() != Some("FixturePreview")
@@ -1025,6 +1042,42 @@ impl Workspace {
         json!({"target":"web","locale":self.locale,"theme":self.theme,"themeId":self.theme_id,
         "viewport":{"width":self.viewport.0,"height":self.viewport.1},"fixture":self.resource.as_ref().and_then(|r|r["fixture"].as_str()).unwrap_or("cityos-web-frame"),
         "renderMode":if self.interactive && self.resource.as_ref().is_none_or(|r|r["fixture"]!="cityos-lower-level"){"interactive-fixture"}else{"studio-passive"},"motion":"reduce"})
+    }
+    fn handle_preview_event(&mut self, app: &mut App, event: &Value) {
+        if !self.matches_preview_event(app, event) { return; }
+        match event["kind"].as_str() {
+            Some("rendered") => {
+                // Keep renderer observations behind the full draft/request/scenario
+                // fence. They describe rendered CSS, never authored native paints.
+                self.current = true;
+                if let Some(preview) = &mut self.preview {
+                    for (observed, field) in [
+                        ("observedViewport", "viewport"), ("observedElevation", "elevation"),
+                        ("observedShadow", "shadow"), ("observedThemePrimary", "themePrimary"),
+                        ("observedThemePage", "themePage"), ("observedMaterial", "material"),
+                        ("observedBackground", "background"), ("observedBorder", "border"),
+                        ("observedBackdrop", "backdrop"),
+                        ("observedHorizonLayout", "horizonLayout"),
+                    ] { preview[observed] = event[field].clone(); }
+                }
+                self.render_started = None;
+            }
+            Some("failed") => {
+                self.current = false;
+                self.error = Some("Renderer failed; draft retained".into());
+                self.render_started = None;
+            }
+            Some("selection") => {
+                if let Some(node) = event["nodeId"].as_str() { self.select(app, node); }
+            }
+            Some("shortcut") if !self.preview_only && self.busy.is_none() && !self.recovery_pending => match event["key"].as_str() {
+                Some("s") => { self.host.hide(); app.save(false); }
+                Some("z") if event["shift"] != true => app.undo(),
+                Some("z" | "y") => app.redo(),
+                _ => {}
+            },
+            _ => {}
+        }
     }
     fn poll(&mut self, app: &mut App) {
         self.dispatch_history_request(app);
@@ -1192,47 +1245,7 @@ impl Workspace {
             }
         }
         for event in self.host.poll() {
-            if !self.matches_preview_event(app, &event) {
-                continue;
-            }
-            match event["kind"].as_str() {
-                Some("rendered") => {
-                    // A receipt identifies the observed CSS viewport as well as the
-                    // requested scenario. Child-window DPI may map these differently.
-                    // Retain the observation instead of recompiling into a size loop.
-                    self.current = true;
-                    if let Some(preview) = &mut self.preview {
-                        preview["observedViewport"] = event["viewport"].clone();
-                        preview["observedElevation"] = event["elevation"].clone();
-                        preview["observedShadow"] = event["shadow"].clone();
-                    }
-                    if let Some(preview) = &mut self.preview {
-                        preview["observedThemePrimary"] = event["themePrimary"].clone();
-                        preview["observedThemePage"] = event["themePage"].clone();
-                    }
-                    self.render_started = None;
-                }
-                Some("failed") => {
-                    self.current = false;
-                    self.error = Some("Renderer failed; draft retained".into());
-                    self.render_started = None;
-                }
-                Some("selection") => {
-                    if let Some(node) = event["nodeId"].as_str() {
-                        self.select(app, node);
-                    }
-                }
-                Some("shortcut") if !self.preview_only && self.busy.is_none() && !self.recovery_pending => match event["key"].as_str() {
-                    Some("s") => {
-                        self.host.hide();
-                        app.save(false);
-                    }
-                    Some("z") if event["shift"] != true => app.undo(),
-                    Some("z" | "y") => app.redo(),
-                    _ => {}
-                },
-                _ => {}
-            }
+            self.handle_preview_event(app, &event);
         }
         self.dispatch_history_request(app);
         self.expire_render_acknowledgement(Instant::now());
@@ -1718,7 +1731,7 @@ impl Workspace {
                             ui.small("Validated against the registered component contract before applying.");
                         }
                     });
-                    if value!=previous {self.send(json!({"op":"Command","command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],"operationId":uuid::Uuid::new_v4().to_string(),"operation":"set-property","nodeId":field["nodeId"],"property":field["property"],"value":value},"draft":d}));}
+                    if value!=previous {self.send_property_command(app,&field,value);}
                 }}
                 ui.small("Only the declared properties are editable. Slots and owner actions remain protected.");
                 } else {ui.small("Protected source nodes. No editing adapter is enabled for this file.");}
@@ -2235,7 +2248,7 @@ mod tests {
             "label":component,"fixture":"cityos-lower-level","actualWebPreview":true,"editable":false,"openAvailable":true,
             "provenance":{"kind":"registered-defaults","canonicalResource":false,"temporary":true,"locale":locale,"sourceCommit":"a".repeat(40)}})
     }
-    fn specimen_receipt(workspace: &Workspace) -> Value {
+    pub(super) fn specimen_receipt(workspace: &Workspace) -> Value {
         let component = workspace.resource.as_ref().unwrap()["componentId"].as_str().unwrap();
         let resource = registered_specimen(component, &workspace.locale);
         json!({"sessionId":"session-1","requestId":"workspace-3","draftId":format!("registered-fixture:{}",resource["resourceId"].as_str().unwrap()),
@@ -2243,7 +2256,7 @@ mod tests {
             "url":"http://127.0.0.1:12345/fixture","resource":resource,"provenance":resource["provenance"],
             "canonicalResource":false,"ownerWrites":false,"state":"prepared"})
     }
-    fn specimen_workspace() -> Workspace {
+    pub(super) fn specimen_workspace() -> Workspace {
         let mut workspace = Workspace::default();
         workspace.prepare_resource(registered_specimen("fixture.component", "ar"));
         workspace.specimen_request = workspace.captured_specimen_request();
@@ -2478,7 +2491,7 @@ mod tests {
         workspace.resource = Some(registered_specimen("other.component", "ar"));
         assert!(!workspace.matches_preview_event(&app, &receipt));
     }
-    fn tab_document(id:&str)->Document{
+    pub(super) fn tab_document(id:&str)->Document{
         tab_document_node(id,"material")
     }
     fn tab_document_node(id:&str,node:&str)->Document{
