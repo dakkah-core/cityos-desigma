@@ -72,6 +72,33 @@ fn modal_publishes_this_file_and_lists_the_library() {
 }
 
 #[test]
+fn failed_library_refresh_preserves_loaded_rows_and_reports_error_until_retry() {
+    let root = tmp("refresh-failure");
+    let mut sim = publish_from_a(&root);
+    let before = sim.app().libs.available.clone();
+    assert_eq!(before.len(), 1);
+    let index = root.join("libraries").join(&before[0].id).join("index.json");
+    let original = std::fs::read(&index).unwrap();
+    std::fs::write(&index, b"{truncated").unwrap();
+    sim.shell.app.refresh_libraries();
+    assert_eq!(sim.app().libs.available, before, "failed refresh must retain the last complete listing");
+    let toast = sim.app().toast.as_ref().expect("visible refresh error");
+    assert!(toast.error && toast.text.contains("refresh"));
+    assert!(sim.app().libs.refresh_error.is_some());
+    frames(&mut sim, 2);
+    sim.rect_of("lib-refresh-retry");
+    sim.shell.app.set_library_enabled(&before[0].id, true);
+    assert!(!sim.app().is_library_enabled(&before[0].id));
+    std::fs::write(&index, original).unwrap();
+    let retry = sim.rect_of("lib-refresh-retry");
+    sim.click(retry.center());
+    frames(&mut sim, 2);
+    assert_eq!(sim.app().libs.available, before);
+    assert!(sim.app().libs.refresh_error.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn changelog_lists_changed_assets_since_last_publish() {
     let root = tmp("changelog");
     let mut a = publish_from_a(&root);

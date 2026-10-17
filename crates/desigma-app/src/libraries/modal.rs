@@ -333,13 +333,25 @@ fn available(app: &mut App, ui: &mut Ui, m: Rect, top: f32) {
             rows.push((r.id.clone(), r.name.clone(), "Not available".into(), false));
         }
     }
-    let list = Rect::from_min_max(Pos2::new(m.left(), y + 36.0), m.max);
+    let mut list_top = y + 36.0;
+    if let Some(error) = app.libs.refresh_error.clone() {
+        let status = Rect::from_min_max(Pos2::new(x0, list_top), Pos2::new(x1 - 72.0, list_top + 26.0));
+        let label = widgets::elide(&p, "Refresh failed · last loaded libraries", &theme::font_small(), status.width());
+        p.text(status.left_center(), Align2::LEFT_CENTER, label, theme::font_small(), theme::TEXT);
+        ui.interact(status, Id::new("lib-refresh-error"), Sense::hover()).on_hover_text(error);
+        let retry = Rect::from_min_size(Pos2::new(x1 - 64.0, list_top + 1.0), Vec2::new(64.0, 24.0));
+        if button(ui, retry, "lib-refresh-retry", "Retry", false, true) { app.refresh_libraries(); }
+        list_top += 32.0;
+    }
+    let list = Rect::from_min_max(Pos2::new(m.left(), list_top), m.max);
     let content_h = rows.len() as f32 * ROW_H + 8.0;
     let mut scroll = app.libs.scroll;
     wheel_scroll(ui, list, &mut scroll, content_h);
     app.libs.scroll = scroll;
     if rows.is_empty() {
-        let (a, b) = if app.libs.available.is_empty() {
+        let (a, b) = if app.libs.refresh_error.is_some() {
+            ("Libraries unavailable", "Use Retry after storage is available.")
+        } else if app.libs.available.is_empty() {
             ("No libraries yet", "Publish a file to share its components, styles and variables.")
         } else {
             ("No results", "Try a different search.")

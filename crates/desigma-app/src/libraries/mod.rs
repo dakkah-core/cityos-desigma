@@ -119,6 +119,8 @@ pub struct LibrariesState {
     pub review: bool,
     /// Published libraries (refreshed while the modal is open).
     pub available: Vec<LibraryIndex>,
+    /// Failed refresh retains the last complete listing and its visible status.
+    pub refresh_error: Option<String>,
     /// Description typed in "This file".
     pub description: String,
     /// Assets that changed since this file was last published.
@@ -156,6 +158,7 @@ impl LibrariesState {
         self.render_docs.clear();
         self.entries = None;
         self.available.clear();
+        self.refresh_error = None;
         self.next_check = 0.0;
     }
 
@@ -219,7 +222,21 @@ impl App {
     /// Reloads the list of published libraries and the publish changelog.
     pub fn refresh_libraries(&mut self) {
         if let Some(lib) = self.library() {
-            self.libs.available = lib.list_libraries().unwrap_or_default();
+            match lib.list_libraries() {
+                Ok(available) => {
+                    self.libs.available = available;
+                    self.libs.refresh_error = None;
+                }
+                Err(error) => {
+                    let message = format!("Library refresh failed: {error}");
+                    self.libs.refresh_error = Some(message.clone());
+                    self.show_toast(message, true);
+                    return;
+                }
+            }
+        } else {
+            self.libs.refresh_error = Some("Library storage is unavailable. Retry to reconnect.".into());
+            return;
         }
         self.libs.changes_at = f64::NEG_INFINITY;
         self.recompute_changes();
@@ -350,6 +367,10 @@ impl App {
     /// Enables a library (pinning its latest version) or disables it. Local
     /// copies and their instances stay either way.
     pub fn set_library_enabled(&mut self, id: &str, on: bool) {
+        if on && self.libs.refresh_error.is_some() {
+            self.show_toast("Refresh libraries successfully before enabling a library", true);
+            return;
+        }
         let cmd = if on {
             let Some(v) = self.library().and_then(|l| l.library_index(id).ok()).map(|i| i.latest_version()) else { return };
             let Some(snap) = self.snapshot_of(id, v) else {

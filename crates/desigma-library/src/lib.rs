@@ -72,6 +72,7 @@ impl Library {
         let _guard = store::write_lock();
         library.recover_pending_saves()?;
         library.recover_pending_versions()?;
+        library.recover_pending_publications()?;
         Ok(library)
     }
 
