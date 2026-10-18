@@ -115,6 +115,22 @@ test('portable owner policy stays in the extension while the library exposes an 
   assert.match(portable, /\bpolicy\.check_portable\s*\(/);
 });
 
+test('submission storage delegates owner semantics to an explicit extension policy', () => {
+  const generic = productionRust(readFileSync(join(root, 'crates/desigma-library/src/submission_policy.rs'), 'utf8'));
+  assert.match(generic, /\bpub\s+trait\s+SubmissionPolicy\b/);
+  for (const name of ['submissions.rs', 'submission_sync.rs']) {
+    const storage = productionRust(readFileSync(join(root, 'crates/desigma-library/src', name), 'utf8'));
+    assert.doesNotMatch(storage, /\.cityos\b|\bCityosBinding\b|CityosBase::/,
+      `${name} must retain journal mechanics without interpreting CityOS bindings`);
+    assert.match(storage, /\bsubmission_policy\s*\(\s*policy\s*\)/,
+      `${name} must require an explicit installed semantic policy`);
+  }
+  const policy = productionRust(readFileSync(join(extension, 'src/submission_policy.rs'), 'utf8'));
+  assert.match(policy, /\bimpl\s+SubmissionPolicy\s+for\s+CityosStoragePolicy\b/);
+  assert.match(policy, /\bCityosBase::CanonicalGit\b/);
+  assert.match(policy, /\.cityos\b/);
+});
+
 test('app workspace is an alias and host adapter, without a production controller copy', () => {
   const directory = join(root, 'crates/desigma-app/src/design_workspace');
   const adapter = productionRust(readFileSync(join(directory, 'mod.rs'), 'utf8'));

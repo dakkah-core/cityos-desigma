@@ -5,6 +5,9 @@ use desigma_doc::{Document, DocumentCheckpoint};
 use std::collections::BTreeSet;
 
 pub trait CheckpointStoragePolicy {
+    /// Explicit installation only. Discovering a journal or binding grants no
+    /// semantic interpretation or submission capability.
+    fn submission_policy(&self) -> Option<&dyn crate::SubmissionPolicy> { None }
     /// Authorization/retention policy belongs to the installed extension.
     fn check_portable(&self, checkpoint: &DocumentCheckpoint) -> Result<()>;
     /// Return the complete dependency union, including inactive and redo state.
@@ -60,6 +63,7 @@ pub(crate) mod tests {
     pub(crate) struct BoundFixturePolicy;
     pub(crate) const BOUND_FIXTURE_POLICY: BoundFixturePolicy = BoundFixturePolicy;
     impl CheckpointStoragePolicy for BoundFixturePolicy {
+        fn submission_policy(&self) -> Option<&dyn crate::SubmissionPolicy> { Some(self) }
         fn check_portable(&self, checkpoint: &DocumentCheckpoint) -> Result<()> {
             if checkpoint_documents(checkpoint).iter().any(|document| document.cityos.as_ref()
                 .is_some_and(|binding| matches!(binding.base, CityosBase::NativeOwner { .. }))) {

@@ -251,7 +251,7 @@ impl Library {
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = crate::store::write_lock(self)?;
         let checkpoint = self.load_checkpoint_locked(id)?;
-        self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
+        self.ensure_portable_submission_safe_locked(policy, Some(id), &checkpoint)?;
         policy.check_portable(&checkpoint)?;
         let payloads = checked_retention_roots(policy, &checkpoint)?.into_iter()
             .map(|hash| self.load_cityos_payload(&hash).map(|bytes| (hash, bytes))).collect::<Result<_>>()?;
@@ -271,7 +271,7 @@ impl Library {
         let _guard = crate::store::write_lock(self)?;
         portable.check_policy(policy)?;
         let (checkpoint, payloads) = portable.into_parts();
-        self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
+        self.ensure_portable_submission_safe_locked(policy, Some(id), &checkpoint)?;
         self.save_checkpoint_payloads_locked(id, &checkpoint, payloads)
     }
 
@@ -286,7 +286,7 @@ impl Library {
         let _guard = crate::store::write_lock(self)?;
         portable.check_policy(policy)?;
         let (checkpoint, payloads) = portable.into_parts();
-        self.ensure_portable_submission_safe_locked(None, &checkpoint)?;
+        self.ensure_portable_submission_safe_locked(policy, None, &checkpoint)?;
         let name = if checkpoint.document.name.trim().is_empty() { "Imported draft" } else { checkpoint.document.name.as_str() };
         self.create_file_state_locked(project, folder, name, &checkpoint.document, Some((checkpoint.to_json()?, payloads)))
     }

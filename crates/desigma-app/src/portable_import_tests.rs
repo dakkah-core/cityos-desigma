@@ -41,7 +41,7 @@ impl Temp {
         // later exports. Its local record cannot travel in this earlier copy.
         let portable = source.export_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).unwrap();
         let binding = checkpoint.document.cityos.as_ref().unwrap();
-        source.prepare_submission(SubmissionCommand {
+        source.prepare_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, SubmissionCommand {
             intent_id: "portable-intent".into(), operation_id: "portable-operation".into(), predecessor: None,
             owner: "experience".into(), resource: "frame".into(),
             scope: BTreeMap::from([("tenantId".into(), "fixture".into()), ("actorId".into(), "fixture".into())]),
@@ -127,8 +127,8 @@ fn portable_open_restores_exact_binding_histories_and_every_payload_without_subm
     for bytes in ["inactive", "undo-only", "active", "redo-only"] {
         assert_eq!(reopened.load_cityos_payload(&desigma_library::payload_digest(bytes.as_bytes())).unwrap(), bytes.as_bytes());
     }
-    assert!(reopened.document_submissions(&imported.id).unwrap().is_empty());
-    assert!(reopened.load_submission("portable-operation").is_err());
+    assert!(reopened.document_submissions_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &imported.id).unwrap().is_empty());
+    assert!(reopened.load_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, "portable-operation").is_err());
     assert!(!reopened.path("cityos/submissions").exists());
     assert!(!reopened.path("cityos/submission-sync").exists());
     assert!(app.file_path.is_none() && app.home.is_none());

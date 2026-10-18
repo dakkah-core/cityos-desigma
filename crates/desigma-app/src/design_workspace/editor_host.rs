@@ -131,7 +131,7 @@ fn adopt(app: &mut App, checkpoint: DocumentCheckpoint) -> Result<(), String> {
 fn submission_context(app: &App, record: &SubmissionRecord) -> Result<(Library, String), String> {
     let library = app.lib.clone().ok_or("Draft library unavailable")?;
     let file = app.lib_file.as_ref().ok_or("Draft file unavailable")?;
-    let belongs = library.document_submissions(&file.id).map_err(|error| error.to_string())?
+    let belongs = library.document_submissions_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).map_err(|error| error.to_string())?
         .into_iter().any(|stored| stored.command == record.command && stored.request_digest == record.request_digest
             && stored.schema_version == record.schema_version);
     if !belongs { return Err("Accepted-state recovery belongs to another document or original operation".into()); }
@@ -455,7 +455,7 @@ impl EditorHost for App {
     fn submissions(&self) -> Result<Vec<SubmissionRecord>, String> {
         let library = self.lib.as_ref().ok_or("Draft library unavailable")?;
         let file = self.lib_file.as_ref().ok_or("Draft file unavailable")?;
-        library.document_submissions(&file.id).map_err(|error| error.to_string())
+        library.document_submissions_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).map_err(|error| error.to_string())
     }
 
     fn set_submission_frozen(&mut self, draft_id: Option<String>) { self.ui.cityos_frozen_draft = draft_id; }
@@ -463,7 +463,7 @@ impl EditorHost for App {
     fn recover_submission(&mut self, record: &SubmissionRecord) -> Result<bool, String> {
         freeze(self);
         let (library, file_id) = submission_context(self, record)?;
-        let intent = match library.load_submission_sync(&record.command.operation_id) {
+        let intent = match library.load_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id) {
             Ok(intent) => intent,
             Err(desigma_library::LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.to_string()),
@@ -476,7 +476,7 @@ impl EditorHost for App {
         if !same_live_state(self, &original)? && !same_live_state(self, &accepted)? {
             return Err("Frozen submitted document changed; reload its durable generation".into());
         }
-        let receipt = library.resume_submission_sync(&record.command.operation_id).map_err(|error| error.to_string())?;
+        let receipt = library.resume_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id).map_err(|error| error.to_string())?;
         adopt(self, receipt.checkpoint)?;
         refresh_submission_freeze(self)?;
         Ok(true)
@@ -487,7 +487,7 @@ impl EditorHost for App {
         document.name = self.doc.name.clone();
         next_revision(self, &document)?;
         let (library, file_id) = submission_context(self, record)?;
-        let stored = library.load_submission(&record.command.operation_id).map_err(|error| error.to_string())?;
+        let stored = library.load_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id).map_err(|error| error.to_string())?;
         if stored != *record || stored.state != SubmissionState::AcceptedSyncPending {
             return Err("Original accepted outcome changed; refresh recovery".into());
         }
@@ -497,7 +497,7 @@ impl EditorHost for App {
         }
         checkpoint.history = self.hist.clone();
         checkpoint.install_baseline(document);
-        let receipt = library.synchronize_accepted_submission(&file_id, &stored, &checkpoint).map_err(|error| error.to_string())?;
+        let receipt = library.synchronize_accepted_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file_id, &stored, &checkpoint).map_err(|error| error.to_string())?;
         adopt(self, receipt.checkpoint)?;
         refresh_submission_freeze(self)?;
         Ok(())

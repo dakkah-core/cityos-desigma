@@ -467,7 +467,7 @@ pub fn apply(app: &mut App, act: Act) {
             changed = false;
         }
         Act::Duplicate(id) => {
-            if ok(app, lib.duplicate_file(&id)).is_some() {
+            if ok(app, lib.duplicate_file_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &id)).is_some() {
                 app.show_toast("Duplicated", false);
             }
         }

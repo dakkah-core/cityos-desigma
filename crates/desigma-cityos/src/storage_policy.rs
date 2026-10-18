@@ -9,6 +9,7 @@ pub struct CityosStoragePolicy;
 pub const CITYOS_STORAGE_POLICY: CityosStoragePolicy = CityosStoragePolicy;
 
 impl CheckpointStoragePolicy for CityosStoragePolicy {
+    fn submission_policy(&self) -> Option<&dyn desigma_library::SubmissionPolicy> { Some(self) }
     fn check_portable(&self, checkpoint: &DocumentCheckpoint) -> Result<()> {
         for document in checkpoint_documents(checkpoint) {
             if let Some(binding) = &document.cityos {

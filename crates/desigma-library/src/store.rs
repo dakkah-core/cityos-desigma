@@ -866,6 +866,9 @@ impl Library {
     /// Duplicate an ordinary checkpoint. Bound CityOS identities require an
     /// explicit successor contract and cannot become eligible through a copy.
     pub fn duplicate_file(&self, id: &str) -> Result<FileEntry> {
+        self.duplicate_file_with_policy(&crate::UNMANAGED_STORAGE_POLICY, id)
+    }
+    pub fn duplicate_file_with_policy(&self, policy: &dyn crate::CheckpointStoragePolicy, id: &str) -> Result<FileEntry> {
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = write_lock(self)?;
         let (m, i) = self.find_file_locked(id)?;
@@ -874,10 +877,10 @@ impl Library {
         let states = std::iter::once((&checkpoint.document, &checkpoint.history))
             .chain(checkpoint.retained.iter().map(|state| (&state.document, &state.history)));
         if states.flat_map(|(document, history)| std::iter::once(document).chain(history.retained_documents()))
-            .any(|document| document.cityos.is_some()) {
+            .any(|document| document.is_managed()) {
             return Err(LibraryError::Invalid("Bound CityOS documents cannot be duplicated without an explicit successor contract".into()));
         }
-        self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
+        self.ensure_portable_submission_safe_locked(policy, Some(id), &checkpoint)?;
         let mut new = self.create_file_state_locked(&src.project, src.folder.as_deref(), &format!("{} (copy)", src.name),
             &checkpoint.document, Some((checkpoint.to_json()?, BTreeMap::new())))?;
         // The document, both history stacks and retained archives are durable
@@ -1517,7 +1520,7 @@ mod tests {
         let (_temp, library) = Tmp::new();
         let project = library.create_project("P").unwrap();
         let source = library.create_file_checkpoint(&project.id, None, "Source", &ordinary_duplicate_checkpoint()).unwrap();
-        let record = library.prepare_submission(crate::SubmissionCommand {
+        let record = library.prepare_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, crate::SubmissionCommand {
             intent_id: "duplicate-intent".into(), operation_id: "duplicate-operation".into(), predecessor: None,
             owner: "experience".into(), resource: "frame".into(),
             scope: BTreeMap::from([("tenantId".into(), "t".into()), ("actorId".into(), "a".into())]),
@@ -1534,8 +1537,8 @@ mod tests {
         let path = library.submission_path(&record.command.operation_id).unwrap();
         let original = serde_json::to_vec(&stored).unwrap();
         std::fs::write(&path, &original).unwrap();
-        assert_eq!(library.document_submissions(&source.id).unwrap(), [record]);
-        assert!(matches!(library.duplicate_file(&source.id), Err(LibraryError::Invalid(ref message)) if message.contains("Unresolved submission")));
+        assert_eq!(library.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source.id).unwrap(), [record]);
+        assert!(matches!(library.duplicate_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source.id), Err(LibraryError::Invalid(ref message)) if message.contains("Unresolved submission")));
         assert_eq!(std::fs::read(path).unwrap(), original);
         assert_eq!(library.files_in(&project.id, None).unwrap().len(), 1);
     }
@@ -1641,7 +1644,7 @@ mod tests {
                 submitted_snapshot: serde_json::json!({"elevation":"resting"}),
                 dependency_pins: vec![hash.clone(), submission_only.clone()],
             };
-            let original = library.prepare_submission(command.clone()).unwrap();
+            let original = library.prepare_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone()).unwrap();
             let submission_path = library.submission_path(&command.operation_id).unwrap();
             let original_record = std::fs::read(&submission_path).unwrap();
             let document_path = library.file_path(&project.id, &file.id);
@@ -1668,9 +1671,9 @@ mod tests {
             }
             assert!(library.save_checkpoint(&file.id, &checkpoint).is_err(), "ordinary saves still require verified CAS bytes");
             let mut dispatches = 0;
-            assert!(library.dispatch_prepared(command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
+            assert!(library.dispatch_prepared_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
             assert_eq!(dispatches, 0);
-            assert_eq!(library.prepare_submission(command.clone()).unwrap(), original);
+            assert_eq!(library.prepare_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone()).unwrap(), original);
             let expected_roots = BTreeSet::from([hash.clone(), submission_only.clone()]);
             assert_eq!(library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
 
@@ -1705,11 +1708,11 @@ mod tests {
             }
             assert!(!journal.exists());
             assert_eq!(std::fs::read(&submission_path).unwrap(), original_record);
-            assert_eq!(reopened.load_submission(&command.operation_id).unwrap(), original);
+            assert_eq!(reopened.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &command.operation_id).unwrap(), original);
             assert!(original.frozen());
             assert_eq!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
             assert!(reopened.load_cityos_payload(&submission_only).is_err());
-            assert!(reopened.dispatch_prepared(command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
+            assert!(reopened.dispatch_prepared_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
             assert_eq!(dispatches, 0, "repair must not bypass the still-missing submission dependency");
         }
     }

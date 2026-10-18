@@ -674,7 +674,7 @@ mod tests {
             owner:"fixture-owner".into(),resource:"submitted".into(),scope:BTreeMap::from([("tenantId".into(),"fixture-tenant".into()),("actorId".into(),"fixture-actor".into())]),
             base:binding.base.clone(),expected_revision:exchange["base"]["sourceDigest"].as_str().unwrap().into(),semantic_base:binding.semantic_base.clone(),
             submitted_snapshot:exchange["semanticDraft"].clone(),dependency_pins:binding.dependency_pins.clone()};
-        let record=library.prepare_submission_for_file(&app.lib_file.as_ref().unwrap().id,command).unwrap();
+        let record=library.prepare_submission_for_file_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &app.lib_file.as_ref().unwrap().id,command).unwrap();
         (root,app,record)
     }
     #[test]
@@ -702,12 +702,12 @@ mod tests {
         value["semanticBase"]=semantic.clone();value["semanticDraft"]=semantic.clone();
         value["draftRevision"]=json!(value["draftRevision"].as_u64().unwrap()+1);
         value["semanticDigest"]=json!(desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap()));
-        let accepted_record=library.record_submission_observation(desigma_library::SubmissionObservation{
+        let accepted_record=library.record_submission_observation_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, desigma_library::SubmissionObservation{
             operation_id:record.command.operation_id.clone(),request_digest:record.request_digest.clone(),owner:record.command.owner.clone(),resource:record.command.resource.clone(),scope:record.command.scope.clone(),
             state:desigma_library::SubmissionState::AcceptedSyncPending,receipt_ref:"fixture-authenticated-owner-observation".into(),owner_revision:Some("b".repeat(40)),conclusively_ineligible:false,
             details:json!({"acceptedSemanticDigest":desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap())})}).unwrap();
         let file=app.lib_file.as_ref().unwrap().id.clone();let mut checkpoint=library.load_checkpoint(&file).unwrap();checkpoint.install_baseline(accepted.clone());
-        library.prepare_submission_sync(&file,&accepted_record,&checkpoint).unwrap();
+        library.prepare_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file,&accepted_record,&checkpoint).unwrap();
         // Restart before any accepted projection is installed; recover the durable
         // generation without requesting a new proposal or owner operation.
         app.lib=Some(desigma_library::Library::open(&root).unwrap());
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(),saved,"projection alone never persists a document");
         workspace.open_local_document(&mut app,document);
         assert!(!workspace.open);assert!(app.doc.cityos.is_none());assert!(app.lib_file.is_none());
-        assert_eq!(library.all_files().len(),count);assert_eq!(library.load_submission(&record.command.operation_id).unwrap(),record);
+        assert_eq!(library.all_files().len(),count);assert_eq!(library.load_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id).unwrap(),record);
         crate::home::thumb::finish_library_jobs(&root);std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
