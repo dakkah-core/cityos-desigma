@@ -283,6 +283,11 @@ pub fn projection_document(projection: &Value, name: &str) -> Result<(Document,B
 use crate::draft::{binding, draft, revision, local_copy};
 
 impl<H: EditorHost> Workspace<H> {
+    pub fn coverage_open(&self) -> bool { self.coverage.open }
+    /// Catalog accounting is a separate observation; it cannot modify a draft or capabilities.
+    pub fn set_catalog_coverage(&mut self, observation: Option<crate::catalog::CoverageObservation>) {
+        self.coverage.catalog = observation;
+    }
     pub fn set_preview_theme(&mut self, id: String) {
         self.theme_id = if self.is_specimen() { String::new() } else { id };
         self.current = false;
@@ -1256,11 +1261,12 @@ impl<H: EditorHost> Workspace<H> {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) && !self.preview_only {
                 app.save();
             }
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) && !self.preview_only {
-                app.undo();
-            }
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)) && !self.preview_only {
-                app.redo();
+            if !self.preview_only {
+                match ctx.input_mut(history_commands::take_shortcut) {
+                    Some(history_commands::Shortcut::Undo) => app.undo(),
+                    Some(history_commands::Shortcut::Redo) => app.redo(),
+                    None => {},
+                }
             }
         }
         egui::Panel::top("cityos-workspace-actions").show(ui, |ui| {

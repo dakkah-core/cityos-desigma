@@ -597,6 +597,9 @@ impl eframe::App for Shell {
         }
         if self.workspace.open {
             self.app.now = ui.ctx().input(|i| i.time);
+            if self.workspace.coverage_open() {
+                self.workspace.set_catalog_coverage(self.cityos.coverage_observation());
+            }
             self.workspace.show(&mut self.app, ui, _frame);
             if !self.workspace.open {
                 self.cityos.open = self.workspace.library_requested();

@@ -14,6 +14,8 @@ pub use style::{CatalogStyle, CatalogUiServices, SpecimenRenderer};
 pub mod local_library;
 mod preview;
 mod support;
+mod observation;
+pub use observation::CoverageObservation;
 mod tools;
 #[cfg(test)]
 mod tests;
@@ -197,6 +199,11 @@ impl WorkspaceRequest {
 }
 
 impl Browser {
+    /// Reuse only the currently bound loaded generation. No query, scan or source read.
+    pub fn coverage_observation(&self) -> Option<CoverageObservation> {
+        self.usable_generation()?;
+        CoverageObservation::from_summary(self.summary.as_ref()?, self.error.is_some())
+    }
     pub fn workspace_config(&self) -> crate::bridge::Config {
         crate::bridge::Config::from_reader_options(Some(self.repository.clone().into()),Some(self.reader.clone().into()),
             Some(self.node.clone().into()),self.cache.clone())

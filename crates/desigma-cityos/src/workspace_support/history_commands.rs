@@ -7,6 +7,19 @@ use desigma_doc::Document;
 use crate::history::CityosHistoryStep;
 use serde_json::{json, Value};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shortcut { Undo, Redo }
+
+pub fn take_shortcut(input: &mut egui::InputState) -> Option<Shortcut> {
+    // egui accepts additional Shift for the less specific Command+Z match.
+    // Consume the more specific chord first, once per keyboard event.
+    if input.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z) {
+        Some(Shortcut::Redo)
+    } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z) {
+        Some(Shortcut::Undo)
+    } else { None }
+}
+
 pub struct PendingHistory {
     step: CityosHistoryStep,
     command: Value,

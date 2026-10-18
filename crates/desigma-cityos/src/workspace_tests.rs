@@ -324,6 +324,29 @@ fn transport(workspace: &mut Workspace<FakeHost>) -> (Receiver<Value>, Sender<Re
 fn property_field() -> Value { json!({"nodeId":"root", "property":"elevation"}) }
 
 #[test]
+fn redo_keyboard_chord_is_consumed_before_the_less_specific_undo_chord() {
+    use crate::workspace_support::history_commands::{take_shortcut, Shortcut};
+    for (modifiers, expected) in [
+        (egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Some(Shortcut::Redo)),
+        (egui::Modifiers::COMMAND, Some(Shortcut::Undo)),
+        (egui::Modifiers::SHIFT, None),
+        (egui::Modifiers::NONE, None),
+    ] {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {modifiers, events:vec![egui::Event::Key {
+            key:egui::Key::Z, physical_key:None, pressed:true, repeat:false, modifiers,
+        }], ..Default::default()};
+        let mut observed = None;
+        let _ = ctx.run_ui(input, |ui| {
+            let step = ui.ctx().input_mut(take_shortcut);
+            if step.is_some() { observed = step; }
+            assert_eq!(ui.ctx().input_mut(take_shortcut), None, "one event cannot trigger both directions");
+        });
+        assert_eq!(observed, expected);
+    }
+}
+
+#[test]
 fn coverage_is_explicit_coalesced_read_only_and_keeps_draft_and_preview_state() {
     let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
     let before = host.active.snapshot();
@@ -359,6 +382,35 @@ fn coverage_is_explicit_coalesced_read_only_and_keeps_draft_and_preview_state() 
     assert_eq!(workspace.resource, resource);
     assert_eq!(host.active.snapshot(), before);
     assert!(host.calls.is_empty());
+}
+
+#[test]
+fn catalog_coverage_never_rebases_or_grants_capabilities_and_context_removal_clears_it() {
+    let host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+    let before = host.active.snapshot();
+    let mut workspace = ready_workspace();
+    workspace.preview = Some(json!({"draftRevision":5,"requestId":"retained-preview"}));
+    workspace.current = true;
+    let resource = workspace.resource.clone();
+    let (requests, _) = transport(&mut workspace);
+    let catalog = crate::catalog::CoverageObservation {
+        repository_id:"b".repeat(64), generation_id:"a".repeat(64), canonical_commit:"c".repeat(40),
+        reader_identity:"d".repeat(64), mode:"local".into(), accounting_complete:Some(false), stale:true,
+        source_occurrences:Some(500), library_records:Some(40), theme_records:Some(3), token_records:Some(31), levels:vec![],
+    };
+    workspace.set_catalog_coverage(Some(catalog.clone()));
+    assert_eq!(workspace.coverage.catalog, Some(catalog));
+    assert!(workspace.coverage.report.is_none());
+    assert!(!workspace.coverage_open());
+    assert!(workspace.current);
+    assert_eq!(workspace.preview.as_ref().unwrap()["draftRevision"], 5);
+    assert_eq!(workspace.resource, resource);
+    assert_eq!(host.active.snapshot(), before);
+    assert!(host.calls.is_empty());
+    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    workspace.set_catalog_coverage(None);
+    assert!(workspace.coverage.catalog.is_none());
+    assert_eq!(host.active.snapshot(), before);
 }
 
 #[test]
