@@ -12,14 +12,21 @@ pub struct CheckpointSaveReceipt {
     pub recovered_after_error: bool,
 }
 
+/// SHA-256 of the exact serialized checkpoint, including both history stacks
+/// and retained baselines. Process-local history fences are not serialized.
+/// Fingerprint the checkpoint returned by load; this token grants no owner rights.
+pub fn checkpoint_fingerprint(checkpoint: &DocumentCheckpoint) -> Result<String> {
+    Ok(payload_digest(checkpoint.to_json()?.as_bytes()))
+}
+
 impl Library {
     /// Retention includes inactive/trashed state and version snapshots as well
     /// as live checkpoints. A damaged source fails closed; never turn an unread
     /// history into an empty dependency set for a future collector.
     pub(crate) fn local_document_retention_roots(&self) -> Result<Vec<String>> {
-        let _guard = crate::store::write_lock();
-        self.recover_pending_saves()?;
-        self.recover_pending_versions()?;
+        let _guard = crate::store::write_lock(self)?;
+        self.recover_pending_saves_locked()?;
+        self.recover_pending_versions_locked()?;
         let _versions = crate::versions::lock();
         let mut roots = BTreeSet::new();
         let mut directories = vec![self.path("projects"), self.path("versions"), self.path("trash"), self.path("checkpoints")];
@@ -54,7 +61,7 @@ impl Library {
     /// unsupported or mismatched checkpoint is an error, never an empty-stack
     /// fallback that silently loses the recoverable original history.
     pub fn load_checkpoint(&self, id: &str) -> Result<DocumentCheckpoint> {
-        let _guard = crate::store::write_lock();
+        let _guard = crate::store::write_lock(self)?;
         self.load_checkpoint_locked(id)
     }
 
@@ -69,7 +76,7 @@ impl Library {
     /// every returned pin has been verified and materialized. Corrupt payloads
     /// remain errors rather than being accepted as absent.
     pub fn load_checkpoint_for_recovery(&self, id: &str) -> Result<(DocumentCheckpoint, Vec<String>)> {
-        let _guard = crate::store::write_lock();
+        let _guard = crate::store::write_lock(self)?;
         let checkpoint = self.load_checkpoint_state_locked(id)?;
         let mut missing = Vec::new();
         for hash in checkpoint.dependency_pins() {
@@ -104,7 +111,7 @@ impl Library {
     /// For a new baseline, use `DocumentCheckpoint::install_baseline` and
     /// `save_checkpoint` instead so the pre-baseline document is also retained.
     pub fn save_file_with_history(&self, id: &str, document: &Document, history: &History) -> Result<()> {
-        let _guard = crate::store::write_lock();
+        let _guard = crate::store::write_lock(self)?;
         let mut checkpoint = self.load_checkpoint_state_locked(id)?;
         if checkpoint.history.baseline_id() != history.baseline_id() {
             return Err(LibraryError::CheckpointConflict(id.into()));
@@ -114,12 +121,63 @@ impl Library {
         self.save_checkpoint_payloads_locked(id, &checkpoint, BTreeMap::new())
     }
 
+    /// Save only if the complete persisted predecessor still matches the loaded
+    /// checkpoint. Return the fingerprint of the reconciled saved generation.
+    /// The legacy unconditional API remains for explicit internal workflows.
+    pub fn save_file_with_history_expected(&self, id: &str, document: &Document, history: &History, expected_fingerprint: &str) -> Result<String> {
+        let _guard = crate::store::write_lock(self)?;
+        let mut checkpoint = self.check_checkpoint_fingerprint_locked(id, expected_fingerprint)?;
+        if checkpoint.history.baseline_id() != history.baseline_id() {
+            return Err(LibraryError::CheckpointConflict(id.into()));
+        }
+        checkpoint.document = document.clone();
+        checkpoint.history = history.clone();
+        let receipt = self.save_checkpoint_reconciled_locked(id, &checkpoint)?;
+        checkpoint_fingerprint(&receipt.checkpoint)
+    }
+
+    /// Compare without replaying any pending document intent. A caller must
+    /// explicitly recover/reload first, then fingerprint that loaded generation.
+    /// Otherwise CAS itself could change disk before rejecting a stale writer.
+    fn check_checkpoint_fingerprint_locked(&self, id: &str, expected: &str) -> Result<DocumentCheckpoint> {
+        crate::validate_id(id)?;
+        match std::fs::read_dir(self.path("projects")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() && entry.path().join(".save.pending.json").try_exists()? {
+                        return Err(LibraryError::ReconciliationRequired {
+                            file_id: id.into(), save_error: "CAS save was not attempted".into(),
+                            recovery_error: "Recover the pending document intent explicitly before comparing checkpoints".into(),
+                        });
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        // No document intent can appear while this root guard is held.
+        let checkpoint = self.load_checkpoint_state_locked(id)?;
+        if checkpoint_fingerprint(&checkpoint)? != expected {
+            return Err(LibraryError::CheckpointConflict(id.into()));
+        }
+        Ok(checkpoint)
+    }
+
     /// Save, recover an error-after-journal, and read back without releasing the
-    /// process writer lock. Install only the returned checkpoint in the UI. An
+    /// root/process writer lock. Install only the returned checkpoint in the UI. An
     /// unresolved error must block editing/saving until recovery is conclusive.
     /// Recovered new baselines also fence out stale autosaves in the library.
     pub fn save_checkpoint_reconciled(&self, id: &str, candidate: &DocumentCheckpoint) -> Result<CheckpointSaveReceipt> {
-        let _guard = crate::store::write_lock();
+        let _guard = crate::store::write_lock(self)?;
+        self.save_checkpoint_reconciled_locked(id, candidate)
+    }
+
+    /// CAS the complete predecessor before any save or recovery write, retaining
+    /// the same root/process guard through installation and exact readback.
+    pub fn save_checkpoint_reconciled_expected(&self, id: &str, candidate: &DocumentCheckpoint, expected_fingerprint: &str) -> Result<CheckpointSaveReceipt> {
+        let _guard = crate::store::write_lock(self)?;
+        self.check_checkpoint_fingerprint_locked(id, expected_fingerprint)?;
         self.save_checkpoint_reconciled_locked(id, candidate)
     }
 
@@ -185,7 +243,7 @@ impl Library {
         // Match prepare's lock order. The checkpoint and original submission
         // journal must be observed together; a later prepare cannot race export.
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let _guard = crate::store::write_lock();
+        let _guard = crate::store::write_lock(self)?;
         let checkpoint = self.load_checkpoint_locked(id)?;
         self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
         crate::portable::check_policy(&checkpoint)?;
@@ -201,8 +259,9 @@ impl Library {
     pub fn import_checkpoint(&self, id: &str, text: &str) -> Result<()> {
         let (checkpoint, payloads) = crate::VerifiedPortableCheckpoint::parse(text)?.into_parts();
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::store::write_lock(self)?;
         self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
-        self.save_checkpoint_payloads(id, &checkpoint, payloads)
+        self.save_checkpoint_payloads_locked(id, &checkpoint, payloads)
     }
 
     /// Explicit local restore into a fresh file identity. There is no empty
@@ -211,9 +270,10 @@ impl Library {
     pub fn import_checkpoint_as_new(&self, project: &str, folder: Option<&str>, portable: crate::VerifiedPortableCheckpoint) -> Result<crate::FileEntry> {
         let (checkpoint, payloads) = portable.into_parts();
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::store::write_lock(self)?;
         self.ensure_portable_submission_safe_locked(None, &checkpoint)?;
         let name = if checkpoint.document.name.trim().is_empty() { "Imported draft" } else { checkpoint.document.name.as_str() };
-        self.create_file_state(project, folder, name, &checkpoint.document, Some((checkpoint.to_json()?, payloads)))
+        self.create_file_state_locked(project, folder, name, &checkpoint.document, Some((checkpoint.to_json()?, payloads)))
     }
 }
 
@@ -221,6 +281,122 @@ impl Library {
 mod tests {
     use super::*;
     use desigma_doc::{CityosBase, CityosBinding, Document};
+
+    fn disk_bytes(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &std::path::Path, directory: &std::path::Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() { visit(root, &entry.path(), files); }
+                else { files.insert(entry.path().strip_prefix(root).unwrap().to_owned(), std::fs::read(entry.path()).unwrap()); }
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
+
+    #[test]
+    fn expected_history_save_rejects_stale_same_baseline_without_changing_disk() {
+        for sealed in [false, true] {
+            for change_document in [false, true] {
+                let (root, library, id) = Temp::new();
+                if sealed {
+                    let mut checkpoint = library.load_checkpoint(&id).unwrap();
+                    checkpoint.install_baseline(Document::new("sealed baseline"));
+                    library.save_checkpoint(&id, &checkpoint).unwrap();
+                }
+                let other = Library::open(&root.0).unwrap();
+                let mut a = library.load_checkpoint(&id).unwrap();
+                let mut b = other.load_checkpoint(&id).unwrap();
+                let expected = checkpoint_fingerprint(&a).unwrap();
+                if change_document { b.document.name = "B is current".into(); }
+                // Even identical document bytes with a changed history stack must conflict.
+                b.history.exec(&mut b.document, desigma_doc::Command::SetComments { comments: vec![] }).unwrap();
+                assert_eq!(a.history.baseline_id(), b.history.baseline_id());
+                let saved = other.save_file_with_history_expected(&id, &b.document, &b.history, &expected).unwrap();
+                assert_ne!(saved, expected);
+                assert_eq!(saved, checkpoint_fingerprint(&other.load_checkpoint(&id).unwrap()).unwrap());
+                let before = disk_bytes(&root.0);
+                a.document.name = "stale A".into();
+                a.history.exec(&mut a.document, desigma_doc::Command::SetComments { comments: vec![] }).unwrap();
+                assert!(matches!(library.save_file_with_history_expected(&id, &a.document, &a.history, &expected),
+                    Err(LibraryError::CheckpointConflict(ref file)) if file == &id));
+                assert_eq!(disk_bytes(&root.0), before);
+                assert_eq!(library.load_checkpoint(&id).unwrap().to_json().unwrap(), b.to_json().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn expected_reconciled_save_rejects_stale_predecessor_before_sealing_or_writing() {
+        let (root, library, id) = Temp::new();
+        let mut initial = library.load_checkpoint(&id).unwrap();
+        initial.install_baseline(Document::new("shared baseline"));
+        library.save_checkpoint(&id, &initial).unwrap();
+        let other = Library::open(&root.0).unwrap();
+        let a = library.load_checkpoint(&id).unwrap();
+        let mut b = other.load_checkpoint(&id).unwrap();
+        let old_fingerprint = checkpoint_fingerprint(&a).unwrap();
+        b.document.name = "B newer edit".into();
+        b.history.exec(&mut b.document, desigma_doc::Command::SetComments { comments: vec![] }).unwrap();
+        let current = other.save_file_with_history_expected(&id, &b.document, &b.history, &old_fingerprint).unwrap();
+        assert_eq!(a.history.baseline_id(), b.history.baseline_id());
+        let mut incoming = a;
+        incoming.install_baseline(Document::new("reviewed from stale A"));
+        let before = disk_bytes(&root.0);
+        assert!(matches!(library.save_checkpoint_reconciled_expected(&id, &incoming, &old_fingerprint),
+            Err(LibraryError::CheckpointConflict(ref file)) if file == &id));
+        assert_eq!(disk_bytes(&root.0), before);
+        assert_eq!(library.load_checkpoint(&id).unwrap().to_json().unwrap(), b.to_json().unwrap());
+        let mut incoming = b.clone();
+        incoming.install_baseline(Document::new("reviewed from current B"));
+        let receipt = library.save_checkpoint_reconciled_expected(&id, &incoming, &current).unwrap();
+        assert_eq!(receipt.checkpoint.to_json().unwrap(), incoming.to_json().unwrap());
+        let archived = receipt.checkpoint.retained.last().unwrap();
+        assert_eq!(archived.document.to_json().unwrap(), b.document.to_json().unwrap());
+        assert_eq!(serde_json::to_value(&archived.history).unwrap(), serde_json::to_value(&b.history).unwrap());
+    }
+
+    #[test]
+    fn expected_saves_never_replay_pending_intents_during_comparison() {
+        let (root, library, id) = Temp::new();
+        let original = library.load_checkpoint(&id).unwrap();
+        let fingerprint = checkpoint_fingerprint(&original).unwrap();
+        let mut candidate = original.clone();
+        candidate.install_baseline(Document::new("committed intent"));
+        crate::store::inject_save_fault("journal", 0);
+        assert!(library.save_checkpoint(&id, &candidate).is_err());
+        let before = disk_bytes(&root.0);
+        assert!(matches!(library.save_file_with_history_expected(&id, &original.document, &original.history, &fingerprint),
+            Err(LibraryError::ReconciliationRequired { .. })));
+        assert_eq!(disk_bytes(&root.0), before);
+        assert!(matches!(library.save_checkpoint_reconciled_expected(&id, &candidate, &fingerprint),
+            Err(LibraryError::ReconciliationRequired { .. })));
+        assert_eq!(disk_bytes(&root.0), before);
+        // Explicit recovery, followed by a fresh load/fingerprint, remains available.
+        let recovered = library.load_checkpoint(&id).unwrap();
+        assert_eq!(recovered.to_json().unwrap(), candidate.to_json().unwrap());
+        let current = checkpoint_fingerprint(&recovered).unwrap();
+        assert_ne!(current, fingerprint);
+        let receipt = library.save_checkpoint_reconciled_expected(&id, &recovered, &current).unwrap();
+        assert_eq!(receipt.checkpoint.to_json().unwrap(), recovered.to_json().unwrap());
+    }
+
+    #[test]
+    fn expected_history_save_returns_the_recovered_fingerprint_after_its_own_journal_commits() {
+        for phase in ["journal", "document", "checkpoint", "manifest", "complete"] {
+            let (_root, library, id) = Temp::new();
+            let mut checkpoint = library.load_checkpoint(&id).unwrap();
+            let expected = checkpoint_fingerprint(&checkpoint).unwrap();
+            checkpoint.document.name = "recover this exact save".into();
+            checkpoint.history.exec(&mut checkpoint.document, desigma_doc::Command::SetComments { comments: vec![] }).unwrap();
+            crate::store::inject_save_fault(phase, 0);
+            let saved = library.save_file_with_history_expected(&id, &checkpoint.document, &checkpoint.history, &expected).unwrap();
+            let recovered = library.load_checkpoint(&id).unwrap();
+            assert_eq!(saved, checkpoint_fingerprint(&recovered).unwrap(), "{phase}");
+            assert_eq!(recovered.to_json().unwrap(), checkpoint.to_json().unwrap(), "{phase}");
+        }
+    }
 
     struct Temp(PathBuf);
     impl Temp {

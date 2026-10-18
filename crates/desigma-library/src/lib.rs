@@ -32,7 +32,7 @@ pub use store::*;
 pub use versions::*;
 pub use submissions::*;
 pub use submission_sync::*;
-pub use checkpoint::CheckpointSaveReceipt;
+pub use checkpoint::{checkpoint_fingerprint, CheckpointSaveReceipt};
 pub use portable::{VerifiedPortableCheckpoint, MAX_PORTABLE_CHECKPOINT_BYTES};
 pub use payloads::{content_digest, PayloadStore};
 
@@ -40,6 +40,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LibraryError {
+    /// Root OS-lock contention: this storage transaction never started.
+    #[error("Library storage is busy; retry the operation")]
+    StorageBusy,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
@@ -48,7 +51,7 @@ pub enum LibraryError {
     NotFound(String),
     #[error("{0}")]
     Invalid(String),
-    #[error("Checkpoint baseline changed for {0}; reload/reconcile before saving")]
+    #[error("Checkpoint generation changed for {0}; reload/reconcile before saving")]
     CheckpointConflict(String),
     #[error("Checkpoint save for {file_id} requires reconciliation; save: {save_error}; recovery: {recovery_error}")]
     ReconciliationRequired { file_id: String, save_error: String, recovery_error: String },
@@ -75,9 +78,9 @@ impl Library {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
         let library=Self { root };
-        let _guard = store::write_lock();
-        library.recover_pending_saves()?;
-        library.recover_pending_versions()?;
+        let _guard = store::write_lock(&library)?;
+        library.recover_pending_saves_locked()?;
+        library.recover_pending_versions_locked()?;
         library.recover_pending_publications()?;
         Ok(library)
     }

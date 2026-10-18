@@ -85,7 +85,7 @@ pub struct UiState {
     /// Original durable submission freezes this draft across every editor input path.
     pub cityos_frozen_draft: Option<String>,
     /// Bound history waits for the trusted compiler; it never installs here.
-    pub cityos_history_request: Option<desigma_doc::CityosHistoryStep>,
+    pub cityos_history_request: Option<desigma_cityos::history::CityosHistoryStep>,
     pub menu: Option<MenuKind>,
     pub menu_anchor: Option<egui::Rect>,
     pub left_collapsed: bool,

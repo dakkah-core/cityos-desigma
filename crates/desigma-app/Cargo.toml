@@ -22,6 +22,7 @@ video = ["dep:openh264"]
 open = { version = "5", optional = true }
 openh264 = { version = "0.9", optional = true }
 desigma-doc.workspace = true
+desigma-engine.workspace = true
 desigma-cityos-catalog.workspace = true
 desigma-cityos.workspace = true
 desigma-render.workspace = true

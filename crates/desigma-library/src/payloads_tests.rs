@@ -105,6 +105,30 @@ fn namespaces_isolate_identical_content_and_survive_reopen() {
     assert!(!reopened.path("cityos").exists());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_extended_paths_support_atomic_payload_creation_and_repair() {
+    use std::os::windows::ffi::OsStrExt;
+    let temp = TempRoot::new();
+    let mut root = temp.0.clone();
+    for _ in 0..9 {
+        root.push("nested-payload-directory");
+    }
+    let library = Library::open(&root).unwrap();
+    let store = library.payloads("cityos").unwrap();
+    let bytes = b"long paths must retain the same exact-byte payload identity";
+    let digest = content_digest(bytes);
+    let target = library.path("cityos/payloads").join(&digest);
+    assert!(target.as_os_str().encode_wide().count() > 320);
+    store.put(&digest, bytes).unwrap();
+    assert_eq!(store.load(&digest).unwrap(), bytes);
+    fs::write(&target, b"damaged payload").unwrap();
+    assert!(store.verify(&digest).is_err());
+    store.put(&digest, bytes).unwrap();
+    let reopened = Library::open(&root).unwrap();
+    assert_eq!(reopened.payloads("cityos").unwrap().load(&digest).unwrap(), bytes);
+}
+
 #[test]
 fn invalid_namespaces_leave_filesystem_unchanged() {
     for populated in [false, true] {

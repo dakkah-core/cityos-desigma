@@ -117,6 +117,8 @@ mod tests {
         let project=library.create_project("Sessions").unwrap();
         let mut app=App::new(document("Current"));
         let file=library.create_file_with_history(&project.id,None,"Current",&app.doc,&app.hist).unwrap();
+        let checkpoint=library.load_checkpoint(&file.id).unwrap();
+        app.autosave=Autosave::created_library_checkpoint(app.canvas.tiles.rev(),&app.doc,&app.hist,checkpoint).unwrap();
         app.lib=Some(library);app.home=None;
         app.lib_file=Some(LibFile{id:file.id.clone(),project_id:project.id.clone(),project:project.name,name:file.name});
         app.save_library_file().unwrap();

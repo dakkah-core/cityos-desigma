@@ -27,7 +27,7 @@ pub type Workspace = desigma_cityos::workspace::Workspace<App>;
 pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<Value, String> {
     let bundle: Value =
         serde_json::from_slice(&std::fs::read(directory.join("canonical-bundle.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let bridge = bridge::Bridge::spawn(config);
+    let bridge = bridge::Bridge::spawn(config.clone());
     let mut document = binding(bundle["draft"].clone(), &bundle["projection"])?;
     let path = crate::io::save_path(&document, &directory.join("native-flat.desigma"))?;
     document = crate::io::load_path(&path)?;
@@ -42,10 +42,30 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     let result = ask(
         json!({"op":"Command","draft":d,"command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],"operationId":"native-roundtrip","operation":"set-property","nodeId":"material","property":"elevation","value":"resting"}}),
     )?;
-    let mut history = desigma_doc::History::default();
-    history
-        .exec(&mut document, Command::CityosInstall { document: Box::new(binding(result["draft"].clone(), &result["projection"])?) })
-        .map_err(|e| e.to_string())?;
+    // Exercise the same native host and conditional checkpoint save used by the
+    // desktop, including exact retained dependencies and reopened Undo/Redo.
+    let library = desigma_library::Library::open(directory.join("draft-library")).map_err(|e| e.to_string())?;
+    let retained = ask(json!({"op":"Dependencies","draft":draft(&document)}))?;
+    dependencies::retain(&config.cache, &library, draft(&document).ok_or("Missing binding")?, &retained)?;
+    let mut app = App::new(document);
+    app.lib = Some(library.clone()); app.home = None;
+    <App as desigma_cityos::editor::EditorHost>::save_to_draft_library(&mut app)?;
+    <App as desigma_cityos::editor::EditorHost>::install_edit(&mut app, binding(result["draft"].clone(), &result["projection"])?)?;
+    if !dependencies::complete(&library, &app.doc) { return Err("Edited dependency closure is incomplete".into()); }
+    app.save_library_file()?;
+    let file = app.lib_file.as_ref().ok_or("Missing saved draft")?.id.clone();
+    fn reopen(library: &desigma_library::Library, file: &str) -> Result<App, String> {
+        let mut reopened = App::new(desigma_doc::Document::new("Unopened checkpoint"));
+        reopened.lib = Some(library.clone());
+        reopened.open_library_file(file);
+        if reopened.lib_file.as_ref().is_none_or(|opened| opened.id != file) {
+            return Err("Native host failed to reopen the saved checkpoint".into());
+        }
+        Ok(reopened)
+    }
+    app = reopen(&library, &file)?;
+    if !app.hist.can_undo() { return Err("Reopening lost the saved undo history".into()); }
+    document = app.doc.clone();
     let path = crate::io::save_path(&document, &directory.join("native-resting.desigma"))?;
     let reopened = crate::io::load_path(&path)?;
     let exported = ask(json!({"op":"Export","draft":draft(&reopened)}))?;
@@ -55,12 +75,16 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     {
         return Err("Unexpected semantic export".into());
     }
-    history.undo(&mut document).map_err(|e| e.to_string())?;
-    if ask(json!({"op":"Export","draft":draft(&document)}))?["operationCount"] != 0 {
+    app.hist.undo(&mut app.doc).map_err(|e| e.to_string())?;
+    app.save_library_file()?;
+    app = reopen(&library, &file)?;
+    if !app.hist.can_redo() { return Err("Reopening lost the saved redo history".into()); }
+    if ask(json!({"op":"Export","draft":draft(&app.doc)}))?["operationCount"] != 0 {
         return Err("Undo manufactured edits".into());
     }
+    crate::home::thumb::finish_library_jobs(library.root());
     Ok(
-        json!({"nativeRoundtrip":true,"unchangedOperationCount":0,"editedOperationCount":1,"undoOperationCount":0,"canonicalBase":bundle["draft"]["base"],"embeddedRendererObserved":false}),
+        json!({"nativeRoundtrip":true,"nativeApplicationHost":true,"checkpointHistoryRestored":true,"unchangedOperationCount":0,"editedOperationCount":1,"undoOperationCount":0,"canonicalBase":bundle["draft"]["base"],"embeddedRendererObserved":false}),
     )
 }
 #[cfg(test)]
@@ -801,9 +825,12 @@ mod tests {
         let mut app = App::new(tab_document("external"));
         let path = root.join("draft.desigma");
         crate::io::save_path(&app.doc, &path).unwrap();
+        let (document, fingerprint) = crate::io::load_path_observed(&path).unwrap();
+        app.doc = document;
         app.file_path = Some(path.clone());
         app.home = None;
-        app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
+        app.autosave = crate::home::Autosave { seen_rev: app.canvas.tiles.rev(), saved_hash: crate::home::doc_hash(&app.doc),
+            external_fingerprint: Some(fingerprint), ..Default::default() };
         app.doc.name = "Edited external".into(); app.changed();
         let ctx = egui::Context::default();
         app.now = 1.; app.autosave_tick(&ctx);
@@ -814,6 +841,7 @@ mod tests {
         assert!(!app.autosave.pending());
         let blocker = root.join("blocked"); std::fs::write(&blocker, b"file").unwrap();
         app.file_path = Some(blocker.join("draft.desigma"));
+        app.autosave.external_fingerprint = None; // This intentionally invalid target has never been observed.
         app.doc.name = "Unsaved external".into(); app.changed();
         assert!(!app.flush_autosave()); assert!(app.autosave.pending());
         assert!(!app.replace_document(Document::new("Replacement"), None));
@@ -901,7 +929,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut app=App::new(crate::decks::new_document("External ordinary design"));app.home=None;
         let path=root.join("ordinary.desigma");crate::io::save_path(&app.doc,&path).unwrap();
-        app.file_path=Some(path.clone());app.autosave.saved_hash=crate::home::doc_hash(&app.doc);
+        let (document,fingerprint)=crate::io::load_path_observed(&path).unwrap();app.doc=document;
+        app.file_path=Some(path.clone());
+        app.autosave=crate::home::Autosave { seen_rev:app.canvas.tiles.rev(),saved_hash:crate::home::doc_hash(&app.doc),
+            external_fingerprint:Some(fingerprint),..Default::default() };
         let slide=app.deck_slides()[0];app.decks.notes_for=Some(slide);app.decks.notes_draft="Persist these pending notes".into();
         Workspace::save_before_switch(&mut app).unwrap();
         let saved=crate::io::load_path(&path).unwrap();

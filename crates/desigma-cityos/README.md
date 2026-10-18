@@ -2,6 +2,10 @@
 
 This package holds CityOS integration behavior independently of the desktop editor. It is a native Rust extension; the existing HTML plugin sandbox does not provide the trusted document, history and preview-window interfaces required by bound drafts.
 
+The current continuation reuses upstream `desigma-engine` for generic editing, layout, component synchronization, resize and variable operations. CityOS semantic history policy lives in `src/history.rs` over the core's generic staged transition and immutable process-local identity fence. Independent restores receive fresh identities; unchanged clones retain their marker. This is source reuse in primary `main`, not upstream Git ancestry integration. Typed document bindings/container and submission-policy/storage still need further isolation.
+
+Generic library prerequisites now include root OS transaction exclusion, expected-checkpoint comparison, complete ordinary checkpoint copies and Windows extended-path atomic replacement. The native host tracks persisted history independently of visible document changes and protects managed files from external-save bypasses. `target/cityos-persistence-routing-check-fixed-20261018/native-compilation.json` records current locked/offline Rust 1.93.1 test-source checking; current executable and packaged qualification are tracked separately under `target/cityos-persistence-final-qualification-20261018/`. The preceding 122-pass library stage predates later copy/routing changes. These records do not close Windows, full persistence, owner acceptance, estate coverage or performance gates. Earlier snapshots below remain historical within their declared scope.
+
 Dependency direction:
 
 ```text

@@ -41,6 +41,166 @@ fn count(app: &App) -> usize {
     app.doc.get(app.page).map(|p| p.children.len()).unwrap_or(0)
 }
 
+fn sealed_app_with_file(t: &Tmp, portable: bool) -> App {
+    let mut app = app_with_file(t, 1);
+    app.save_library_file().unwrap();
+    crate::home::thumb::finish_library_jobs(&t.0);
+    let library = app.lib.clone().unwrap();
+    let file = app.lib_file.as_ref().unwrap().clone();
+    let mut checkpoint = library.load_checkpoint(&file.id).unwrap();
+    let mut next = checkpoint.document.clone();
+    let id = next.alloc_id();
+    next.insert(app.page, Node::rectangle(id, Rect::new(20., 0., 10., 10.))).unwrap();
+    checkpoint.install_baseline(next);
+    library.save_checkpoint(&file.id, &checkpoint).unwrap();
+    let id = if portable {
+        let text = library.export_checkpoint(&file.id).unwrap();
+        let verified = desigma_library::VerifiedPortableCheckpoint::parse(&text).unwrap();
+        library.import_checkpoint_as_new(&file.project_id, None, verified).unwrap().id
+    } else { file.id };
+    app.open_library_file(&id);
+    crate::home::thumb::finish_library_jobs(&t.0);
+    assert_eq!(count(&app), 2);
+    assert!(app.hist.baseline_id().is_some());
+    assert!(!app.hist.can_undo());
+    app
+}
+
+fn retained_states(checkpoint: &desigma_doc::DocumentCheckpoint) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(&checkpoint.to_json().unwrap()).unwrap()["retained"].clone()
+}
+
+fn save_and_reopen_sealed_state(app: &mut App, rects: usize, baseline: &str, retained: &serde_json::Value) {
+    app.save_library_file().unwrap();
+    let root = app.lib.as_ref().unwrap().root().to_path_buf();
+    crate::home::thumb::finish_library_jobs(&root);
+    let file = app.lib_file.as_ref().unwrap().id.clone();
+    let library = desigma_library::Library::open(&root).unwrap();
+    let checkpoint = library.load_checkpoint(&file).unwrap();
+    assert_eq!(checkpoint.history.baseline_id(), Some(baseline));
+    assert_eq!(&retained_states(&checkpoint), retained, "retained baselines remain exact inactive archives");
+    assert_eq!(serde_json::to_value(&checkpoint.history).unwrap(), serde_json::to_value(&app.hist).unwrap());
+    let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint).unwrap();
+    assert_eq!(app.autosave.saved_checkpoint_fingerprint.as_deref(), Some(fingerprint.as_str()));
+    // Replace the editor itself, so the next Undo/Redo must come from disk.
+    let mut reopened = App::new(Document::new("Reopen"));
+    reopened.lib = Some(library);
+    reopened.open_library_file(&file);
+    assert_eq!(count(&reopened), rects);
+    assert_eq!(reopened.doc.to_json().unwrap(), app.doc.to_json().unwrap());
+    assert_eq!(serde_json::to_value(&reopened.hist).unwrap(), serde_json::to_value(&app.hist).unwrap());
+    assert_eq!(reopened.hist.baseline_id(), Some(baseline));
+    assert!(reopened.flush_autosave());
+    crate::home::thumb::finish_library_jobs(&root);
+    *app = reopened;
+}
+
+#[test]
+fn sealed_native_and_portable_version_restore_undo_redo_save_and_reopen_keep_baseline_and_archives() {
+    for portable in [false, true] {
+        let t = Tmp::new(if portable { "sealed_portable_restore" } else { "sealed_native_restore" });
+        let mut app = sealed_app_with_file(&t, portable);
+        let library = app.lib.clone().unwrap();
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let checkpoint = library.load_checkpoint(&file).unwrap();
+        let retained = retained_states(&checkpoint);
+        assert_eq!(checkpoint.retained.len(), 1);
+        assert!(checkpoint.retained[0].history.can_undo());
+        let baseline = app.hist.baseline_id().unwrap().to_owned();
+        assert!(app.save_named_version("Sealed two rectangles", ""));
+        let version = library.list_versions(&file)[0].n;
+        add_rect(&mut app);
+        app.save_library_file().unwrap();
+        crate::home::thumb::finish_library_jobs(&t.0);
+        let fence = app.hist.change_identity();
+        let transition = app.hist.prepare_transition(false).unwrap();
+
+        app.restore_version(version);
+        assert_eq!(count(&app), 2, "ordinary sealed/portable restore must succeed");
+        assert!(app.hist.next_is_document_restore(false));
+        assert_eq!(app.hist.baseline_id(), Some(baseline.as_str()));
+        assert!(!std::sync::Arc::ptr_eq(&fence, &app.hist.change_identity()));
+        assert!(!app.hist.transition_current(&transition));
+        assert!(app.hist.can_undo()); assert!(!app.hist.can_redo());
+        save_and_reopen_sealed_state(&mut app, 2, &baseline, &retained);
+
+        app.undo(); assert_eq!(count(&app), 3);
+        assert!(app.hist.can_undo(), "the same-baseline pre-restore active history returns");
+        save_and_reopen_sealed_state(&mut app, 3, &baseline, &retained);
+        app.redo(); assert_eq!(count(&app), 2);
+        save_and_reopen_sealed_state(&mut app, 2, &baseline, &retained);
+        app.undo(); assert_eq!(count(&app), 3);
+        app.undo(); assert_eq!(count(&app), 2);
+        assert!(app.hist.can_redo()); assert!(!app.hist.can_undo(), "inactive archived Undo never becomes active");
+        save_and_reopen_sealed_state(&mut app, 2, &baseline, &retained);
+        app.redo(); assert_eq!(count(&app), 3);
+        save_and_reopen_sealed_state(&mut app, 3, &baseline, &retained);
+    }
+}
+
+fn bound_version(mut document: Document) -> Document {
+    document.cityos = Some(desigma_doc::CityosBinding {
+        schema_version: "cityos.design-exchange.v1".into(), document_id: "document".into(), draft_id: "draft".into(),
+        base: desigma_doc::CityosBase::CanonicalGit { repository_id: "fixture".into(), commit: "a".repeat(40) },
+        semantic_base: serde_json::json!({"owner":"retained"}), dependency_pins: vec![], occurrences: Default::default(),
+        exchange_v2: None, exchange_v3: None,
+    });
+    document
+}
+
+#[test]
+fn ordinary_restore_undo_redo_cannot_cross_a_sealed_or_bound_baseline() {
+    let t = Tmp::new("sealed_restore_fence");
+    let mut app = sealed_app_with_file(&t, false);
+    let library = app.lib.clone().unwrap();
+    let file = app.lib_file.as_ref().unwrap().id.clone();
+    assert!(app.save_named_version("Before restore", ""));
+    let version = library.list_versions(&file)[0].n;
+    add_rect(&mut app);
+    app.restore_version(version);
+    assert!(app.hist.next_is_document_restore(false));
+    for protected in [false, true] {
+        let mut checkpoint = library.load_checkpoint(&file).unwrap();
+        let next = if protected { bound_version(checkpoint.document.clone()) } else { checkpoint.document.clone() };
+        checkpoint.install_baseline(next);
+        library.save_checkpoint(&file, &checkpoint).unwrap();
+        app.open_library_file(&file);
+        let before = library.load_checkpoint(&file).unwrap().to_json().unwrap();
+        let document = app.doc.to_json().unwrap();
+        assert!(!app.hist.can_undo()); assert!(!app.hist.can_redo());
+        assert!(!app.try_undo_restore()); assert!(!app.try_redo_restore());
+        assert_eq!(app.doc.to_json().unwrap(), document);
+        assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), before);
+    }
+}
+
+#[test]
+fn bound_versions_and_parked_owner_drafts_require_reviewed_baseline_recovery() {
+    let t = Tmp::new("bound_restore_protected");
+    let mut app = sealed_app_with_file(&t, false);
+    let library = app.lib.clone().unwrap();
+    let file = app.lib_file.as_ref().unwrap().id.clone();
+    let ordinary = app.doc.clone();
+    let bound = bound_version(ordinary.clone());
+    let ordinary_version = library.save_version(&file, &ordinary, Some("Ordinary".into()), false).unwrap();
+    let bound_version = library.save_version(&file, &bound, Some("Bound".into()), false).unwrap();
+    let versions = library.list_versions(&file).len();
+    let before = library.load_checkpoint(&file).unwrap().to_json().unwrap();
+    app.restore_version(bound_version.n);
+    assert_eq!(app.doc.to_json().unwrap(), ordinary.to_json().unwrap());
+    assert!(!app.hist.next_is_document_restore(false));
+    app.doc = bound.clone();
+    app.restore_version(ordinary_version.n);
+    assert_eq!(app.doc.to_json().unwrap(), bound.to_json().unwrap());
+    app.doc = ordinary.clone();
+    app.history.viewing = Some(Viewing { n: ordinary_version.n, title: "Ordinary".into(),
+        saved: Snapshot { doc: bound, hist: app.hist.clone(), page: app.page, selection: vec![] } });
+    app.restore_version(ordinary_version.n);
+    assert!(app.history.viewing.is_some(), "a bound live state stays parked and protected");
+    assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), before);
+    assert_eq!(library.list_versions(&file).len(), versions, "denial creates no automatic version");
+}
+
 #[test]
 fn ten_minutes_of_activity_make_an_auto_version() {
     let mut a = Activity::default();

@@ -3,9 +3,16 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
+    /// Restore an ordinary native document within the current history baseline.
+    /// Managed bindings must use their separately validated semantic boundary.
+    RestoreDocument {
+        #[serde(with = "crate::persistence::native_box")]
+        document: Box<Document>,
+    },
     /// Whole validated semantic state and its native projection share one undo boundary.
     CityosInstall {
         #[serde(with = "crate::persistence::native_box")]
@@ -69,6 +76,10 @@ pub enum Command {
         variables: BTreeMap<String, Variable>,
         collections: BTreeMap<String, VariableCollection>,
     },
+    /// Replace the board's timer and voting session.
+    SetBoardSession {
+        session: BoardSession,
+    },
     Batch(Vec<Command>),
 }
 
@@ -77,6 +88,11 @@ impl Command {
     pub fn apply(self, doc: &mut Document) -> Result<Command, DocError> {
         if doc.cityos.is_some() && !matches!(self, Command::CityosInstall { .. }) { return Err(DocError::CityosProtected); }
         Ok(match self {
+            Command::RestoreDocument { document } => {
+                if document.is_managed() { return Err(DocError::CityosProtected); }
+                let previous = std::mem::replace(doc, *document);
+                Command::RestoreDocument { document: Box::new(previous) }
+            }
             Command::CityosInstall { mut document } => {
                 let current=doc.cityos.as_ref().ok_or(DocError::CityosProtected)?;
                 let next=document.cityos.as_mut().ok_or(DocError::CityosProtected)?;
@@ -162,6 +178,7 @@ impl Command {
                 Command::SetGuides { page, guides: old.unwrap_or_default() }
             }
             Command::SetPrototypeDevice { device } => Command::SetPrototypeDevice { device: std::mem::replace(&mut doc.prototype_device, device) },
+            Command::SetBoardSession { session } => Command::SetBoardSession { session: std::mem::replace(&mut doc.board_session, session) },
             Command::SetVariables { variables, collections } => Command::SetVariables {
                 variables: std::mem::replace(&mut doc.variables, variables),
                 collections: std::mem::replace(&mut doc.variable_collections, collections),
@@ -197,69 +214,55 @@ pub struct History {
     /// Local concurrency fence only; never an owner revision or approval.
     #[serde(default, rename = "baselineId", skip_serializing_if = "Option::is_none")]
     baseline_id: Option<String>,
+    /// Process-local identity, renewed after each mutation or deserialization.
+    /// It avoids serializing whole snapshots to check an asynchronous intent.
+    #[serde(skip)]
+    transition_fence: Arc<()>,
 }
 
-/// An in-memory history intent. It grants no semantic validation or write authority.
-/// Its fence survives presentation changes, but not a changed draft, stack or baseline.
+/// An opaque, process-local stack intent. Extensions validate document semantics
+/// separately; this type grants neither semantic validation nor owner authority.
 #[derive(Clone, Debug)]
-pub struct CityosHistoryStep {
+pub struct HistoryTransition {
     redo: bool,
     baseline_id: Option<String>,
     undo_len: usize,
     redo_len: usize,
-    source: serde_json::Value,
+    fence: Arc<()>,
     command: Command,
 }
-impl CityosHistoryStep {
-    pub fn source(&self) -> &serde_json::Value { &self.source }
-    pub fn target(&self) -> &serde_json::Value {
-        match &self.command {
-            Command::CityosInstall { document } => document.cityos.as_ref().unwrap().exchange().unwrap(),
-            _ => unreachable!("only bound installation commands can prepare history"),
-        }
-    }
+impl HistoryTransition {
+    pub fn command(&self) -> &Command { &self.command }
 }
 
 impl History {
-    /// Inspect a bound history entry without applying its historical payload.
-    pub fn prepare_cityos(&self, doc: &Document, redo: bool) -> Result<Option<CityosHistoryStep>, DocError> {
-        let Some(command) = (if redo { &self.redo } else { &self.undo }).last() else { return Ok(None); };
-        let Command::CityosInstall { document } = command else { return Err(DocError::CityosProtected); };
-        let source = doc.cityos.as_ref().ok_or(DocError::CityosProtected)?;
-        let target = document.cityos.as_ref().ok_or(DocError::CityosProtected)?;
-        if source.validate().is_err() || target.validate().is_err() || source.base != target.base
-            || source.semantic_base != target.semantic_base || source.draft_id != target.draft_id
-            || source.document_id != target.document_id {
-            return Err(DocError::CityosProtected);
-        }
-        Ok(Some(CityosHistoryStep { redo, baseline_id:self.baseline_id.clone(), undo_len:self.undo.len(), redo_len:self.redo.len(),
-            source:source.exchange().ok_or(DocError::CityosProtected)?.clone(), command:command.clone() }))
+    /// Cheap process-local observation of stack changes. Keep the Arc alive and
+    /// compare with Arc::ptr_eq; this is neither serialized nor owner authority.
+    pub fn change_identity(&self) -> Arc<()> { self.transition_fence.clone() }
+
+    /// Inspect one stack entry without replaying a historical payload. The caller
+    /// can validate an extension operation asynchronously before committing it.
+    pub fn prepare_transition(&self, redo: bool) -> Option<HistoryTransition> {
+        let command = (if redo { &self.redo } else { &self.undo }).last()?;
+        Some(HistoryTransition { redo, baseline_id: self.baseline_id.clone(),
+            undo_len: self.undo.len(), redo_len: self.redo.len(), fence: self.transition_fence.clone(), command: command.clone() })
     }
 
-    pub fn cityos_step_current(&self, doc: &Document, step: &CityosHistoryStep) -> bool {
-        let top = (if step.redo { &self.redo } else { &self.undo }).last();
-        self.baseline_id == step.baseline_id && self.undo.len() == step.undo_len && self.redo.len() == step.redo_len
-            && doc.cityos.as_ref().and_then(CityosBinding::exchange) == Some(&step.source)
-            && top.is_some_and(|command| match (serde_json::to_value(command),serde_json::to_value(&step.command)) {
-                (Ok(current),Ok(expected)) => current==expected,
-                _ => false,
-            })
+    pub fn transition_current(&self, step: &HistoryTransition) -> bool {
+        Arc::ptr_eq(&self.transition_fence, &step.fence) && self.baseline_id == step.baseline_id
+            && self.undo.len() == step.undo_len && self.redo.len() == step.redo_len
     }
 
-    /// Install a separately validated command result and move the exact prepared
-    /// stack entry together. Never replay a historical receipt list or clear redo.
-    pub fn commit_cityos(&mut self, doc: &mut Document, step: CityosHistoryStep, validated: Document) -> Result<(), DocError> {
-        if !self.cityos_step_current(doc, &step) { return Err(DocError::CityosProtected); }
-        let next = validated.cityos.as_ref().and_then(CityosBinding::exchange).ok_or(DocError::CityosProtected)?;
-        let revision = step.source["draftRevision"].as_u64().and_then(|r|r.checked_add(1)).ok_or(DocError::CityosProtected)?;
-        if next["draftRevision"].as_u64() != Some(revision) || next["semanticDraft"] != step.target()["semanticDraft"] {
-            return Err(DocError::CityosProtected);
-        }
+    /// Install a separately validated command and move the exact prepared stack
+    /// entry atomically. No extension-specific revisions or payloads are interpreted.
+    pub fn commit_transition(&mut self, doc: &mut Document, step: HistoryTransition, validated: Command) -> Result<(), DocError> {
+        if !self.transition_current(&step) { return Err(DocError::HistoryChanged); }
         let mut staged = doc.clone();
-        let inverse = (Command::CityosInstall { document:Box::new(validated) }).apply(&mut staged)?;
+        let inverse = validated.apply(&mut staged)?;
         *doc = staged;
         if step.redo { self.redo.pop(); self.undo.push(inverse); }
         else { self.undo.pop(); self.redo.push(inverse); }
+        self.transition_fence = Arc::new(());
         Ok(())
     }
 
@@ -278,13 +281,19 @@ impl History {
         self.baseline_id.as_deref()
     }
 
+    /// Empty active stacks within this same baseline, with a fresh process-local
+    /// transition fence. This neither creates nor crosses a baseline boundary.
+    pub fn empty_with_same_baseline(&self) -> Self {
+        Self { baseline_id: self.baseline_id.clone(), ..Self::default() }
+    }
+
     /// Documents retained by whole-document undo/redo commands, including batches.
     /// Persistence clients use these immutable snapshots to validate export policy
     /// and recovery dependencies; this never exposes mutable history entries.
     pub fn retained_documents(&self) -> Vec<&Document> {
         fn collect<'a>(command: &'a Command, out: &mut Vec<&'a Document>) {
             match command {
-                Command::CityosInstall { document } => out.push(document),
+                Command::CityosInstall { document } | Command::RestoreDocument { document } => out.push(document),
                 Command::Batch(commands) => commands.iter().for_each(|c| collect(c, out)),
                 _ => {}
             }
@@ -300,6 +309,7 @@ impl History {
         let inv = cmd.apply(doc)?;
         self.undo.push(inv);
         self.redo.clear();
+        self.transition_fence = Arc::new(());
         Ok(())
     }
     pub fn undo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
@@ -309,6 +319,7 @@ impl History {
         *doc=staged;
         self.undo.pop();
         self.redo.push(inverse);
+        self.transition_fence = Arc::new(());
         Ok(true)
     }
     pub fn redo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
@@ -318,10 +329,16 @@ impl History {
         *doc=staged;
         self.redo.pop();
         self.undo.push(inverse);
+        self.transition_fence = Arc::new(());
         Ok(true)
     }
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
+    }
+    /// The application durably saves whole-document restores before showing
+    /// them. Inspecting the kind does not clone a potentially large snapshot.
+    pub fn next_is_document_restore(&self, redo: bool) -> bool {
+        matches!((if redo { &self.redo } else { &self.undo }).last(), Some(Command::RestoreDocument { .. }))
     }
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
@@ -331,6 +348,77 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_transition_is_fenced_after_stack_aba_and_baseline_change() {
+        let mut document = Document::new("history");
+        document.add_page("P");
+        let mut history = History::default();
+        history.exec(&mut document, Command::SetComments { comments: vec![] }).unwrap();
+        let intent = history.prepare_transition(false).unwrap();
+        history.undo(&mut document).unwrap();
+        history.redo(&mut document).unwrap();
+        assert!(!history.transition_current(&intent), "an identical stack must not revive an old asynchronous intent");
+        let fresh = history.prepare_transition(false).unwrap();
+        history.seal();
+        assert!(!history.transition_current(&fresh));
+    }
+
+    #[test]
+    fn rejected_prepared_transition_preserves_document_and_stacks() {
+        let mut document = Document::new("history");
+        document.add_page("P");
+        let mut history = History::default();
+        history.exec(&mut document, Command::SetComments { comments: vec![] }).unwrap();
+        let intent = history.prepare_transition(false).unwrap();
+        let before = document.to_json().unwrap();
+        assert!(history.commit_transition(&mut document, intent.clone(), Command::Remove { id: NodeId(u64::MAX) }).is_err());
+        assert_eq!(document.to_json().unwrap(), before);
+        assert!(history.transition_current(&intent));
+        history.commit_transition(&mut document, intent.clone(), intent.command().clone()).unwrap();
+        assert!(!history.can_undo());
+        assert!(history.can_redo());
+        assert!(!history.transition_current(&intent));
+    }
+
+    #[test]
+    fn process_local_transition_fence_does_not_change_checkpoint_format() {
+        let mut document = Document::new("history");
+        document.add_page("P");
+        let mut history = History::default();
+        history.exec(&mut document, Command::SetComments { comments: vec![] }).unwrap();
+        let encoded = serde_json::to_string(&history).unwrap();
+        assert!(!encoded.contains("transition_fence"));
+        let restored: History = serde_json::from_str(&encoded).unwrap();
+        assert!(restored.can_undo());
+        assert!(restored.prepare_transition(false).is_some());
+    }
+
+    #[test]
+    fn a_reloaded_history_cannot_consume_another_restores_pending_intent() {
+        let mut document = Document::new("history");
+        document.add_page("P");
+        let mut history = History::default();
+        history.exec(&mut document, Command::SetComments { comments: vec![] }).unwrap();
+        let bytes = serde_json::to_string(&history).unwrap();
+        let first: History = serde_json::from_str(&bytes).unwrap();
+        let pending = first.prepare_transition(false).unwrap();
+        let independently_restored: History = serde_json::from_str(&bytes).unwrap();
+        assert!(!independently_restored.transition_current(&pending), "restoring identical bytes starts a new in-memory history context");
+    }
+
+    #[test]
+    fn staged_history_mutation_does_not_invalidate_the_untouched_original() {
+        let mut document = Document::new("history");
+        document.add_page("P");
+        let mut history = History::default();
+        history.exec(&mut document, Command::SetComments { comments: vec![] }).unwrap();
+        let pending = history.prepare_transition(false).unwrap();
+        let mut staged = history.clone();
+        staged.undo(&mut document.clone()).unwrap();
+        assert!(history.transition_current(&pending));
+        assert!(!staged.transition_current(&pending));
+    }
 
     #[test]
     fn undo_redo_update_and_remove() {

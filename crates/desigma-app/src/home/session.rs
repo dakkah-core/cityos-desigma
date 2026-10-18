@@ -3,10 +3,11 @@
 
 use super::{thumb, Home, Section};
 use crate::app::App;
-use desigma_doc::{Document, DocumentKind};
+use desigma_doc::{Document, DocumentKind, History};
 use desigma_library::Library;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Seconds without a document change before a library file is autosaved.
 pub const AUTOSAVE_IDLE: f64 = 1.5;
@@ -33,6 +34,16 @@ pub struct Autosave {
     pub confirmed: bool,
     /// Hash of the document as last written to (or read from) the library.
     pub saved_hash: u64,
+    /// Serialized history identity from a successfully loaded/persisted checkpoint.
+    /// External document-only files never establish durable undo/redo history.
+    pub saved_history_hash: Option<u64>,
+    pub seen_history: Option<Arc<()>>,
+    /// Cache the expensive comparison only while this process-local fence holds.
+    pub checked_history: Option<(Arc<()>, u64)>,
+    /// Exact checkpoint observed before any editor-only name/projection changes.
+    pub saved_checkpoint_fingerprint: Option<String>,
+    /// Exact external bytes observed at load or returned by a successful write.
+    pub external_fingerprint: Option<String>,
     /// Number of autosaves performed (tests).
     pub saves: u32,
     /// Automatic retries back off without clearing the unsaved revision.
@@ -41,6 +52,49 @@ pub struct Autosave {
 }
 
 impl Autosave {
+    pub(crate) fn history_hash(history: &History) -> Result<u64, String> {
+        struct Sink(std::collections::hash_map::DefaultHasher);
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.write(bytes); Ok(bytes.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut sink = Sink(Default::default());
+        serde_json::to_writer(&mut sink, history).map_err(|error| format!("Cannot compare undo history: {error}"))?;
+        Ok(sink.0.finish())
+    }
+
+    pub(crate) fn library_checkpoint(rev: u64, doc: &Document, history: &History, fingerprint: String) -> Result<Self, String> {
+        let hash = Self::history_hash(history)?;
+        let identity = history.change_identity();
+        Ok(Self { seen_rev: rev, saved_hash: doc_hash(doc), saved_history_hash: Some(hash),
+            seen_history: Some(identity.clone()), checked_history: Some((identity, hash)),
+            saved_checkpoint_fingerprint: Some(fingerprint), ..Default::default() })
+    }
+
+    pub(crate) fn created_library_checkpoint(rev: u64, doc: &Document, history: &History, mut checkpoint: desigma_doc::DocumentCheckpoint) -> Result<Self, String> {
+        let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint).map_err(|error| error.to_string())?;
+        // A fresh load may observe a competing writer. Never attach that writer's
+        // expectation to our older candidate; only entry-name normalization is local.
+        checkpoint.document.name = doc.name.clone();
+        if doc_hash(&checkpoint.document) != doc_hash(doc) || Self::history_hash(&checkpoint.history)? != Self::history_hash(history)? {
+            return Err("The newly created checkpoint changed before it could be observed; reopen/reconcile it".into());
+        }
+        Self::library_checkpoint(rev, doc, history, fingerprint)
+    }
+
+    fn history_changed(&mut self, history: &History) -> Result<bool, String> {
+        let identity = history.change_identity();
+        let hash = match &self.checked_history {
+            Some((checked, hash)) if Arc::ptr_eq(checked, &identity) => *hash,
+            _ => {
+                let hash = Self::history_hash(history)?;
+                self.checked_history = Some((identity, hash));
+                hash
+            }
+        };
+        Ok(self.saved_history_hash != Some(hash))
+    }
+
     /// An edit is waiting for the idle delay before it is saved.
     pub fn pending(&self) -> bool {
         self.changed_at.is_some() && self.confirmed
@@ -67,18 +121,60 @@ pub(crate) fn doc_hash(doc: &Document) -> u64 {
 }
 
 impl App {
-    /// Persistent bound files use the same save/dirty rules inside and outside the library.
-    fn save_autosave_target(&mut self) -> Result<(), String> {
-        if self.lib_file.is_some() { return self.save_library_file(); }
-        let path = self.file_path.as_ref().filter(|p| self.doc.cityos.is_some()
-            && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
-            .ok_or("Save this draft to the library or a native file first")?;
-        crate::io::save_path(&self.doc, path)?;
+    pub(crate) fn persist_library_checkpoint(&self, doc: &Document, history: &History) -> Result<Autosave, String> {
+        let (Some(lib), Some(file)) = (&self.lib, &self.lib_file) else { return Err("This file is not in the library".into()); };
+        let expected = self.autosave.saved_checkpoint_fingerprint.as_deref().ok_or("This library file has no observed checkpoint; reopen it before saving")?;
+        let mut saved = Autosave::library_checkpoint(self.canvas.tiles.rev(), doc, history, expected.to_owned())?;
+        saved.saved_checkpoint_fingerprint = Some(lib.save_file_with_history_expected(&file.id, doc, history, expected).map_err(|error| format!("Cannot save: {error}"))?);
+        saved.saves = self.autosave.saves;
+        Ok(saved)
+    }
+
+    fn autosave_target_changed(&mut self) -> Result<bool, String> {
+        if doc_hash(&self.doc) != self.autosave.saved_hash { return Ok(true); }
+        if self.lib_file.is_some() { return self.autosave.history_changed(&self.hist); }
+        Ok(false)
+    }
+
+    /// Same native target, including Save As selecting the current path. Resolving
+    /// the path never supplies an expected generation from current disk contents.
+    pub(crate) fn is_current_external_target(&self, path: &Path) -> bool {
+        let mut target = path.to_path_buf();
+        if target.extension().is_none() { target.set_extension(crate::io::NATIVE_EXT); }
+        self.file_path.as_ref().is_some_and(|current| {
+            current == &target || std::fs::canonicalize(current).ok().zip(std::fs::canonicalize(&target).ok())
+                .is_some_and(|(left, right)| left == right || cfg!(windows) && left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy()))
+        })
+    }
+
+    /// Persist only the external document. Never mark undo/redo as durable here.
+    pub(crate) fn save_current_external(&mut self) -> Result<(), String> {
+        let path = self.file_path.as_ref().ok_or("No external document is open")?;
+        if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case(crate::io::NATIVE_EXT)) {
+            return Err("Save the imported design as a native file before leaving it. The source file was preserved.".into());
+        }
+        let expected = self.autosave.external_fingerprint.as_deref().ok_or("The external file has no observed generation; reopen it before saving")?;
+        let (path, fingerprint) = crate::io::save_path_expected(&self.doc, path, expected)?;
+        self.file_path = Some(path);
         self.autosave.saved_hash = doc_hash(&self.doc);
+        self.autosave.external_fingerprint = Some(fingerprint);
+        self.autosave.saved_history_hash = None;
+        self.autosave.saved_checkpoint_fingerprint = None;
+        self.autosave.checked_history = None;
         self.autosave.changed_at = None;
+        self.autosave.confirmed = false;
         self.autosave.failures = 0;
         self.autosave.retry_at = None;
         Ok(())
+    }
+
+    /// Persistent bound files use the same save/dirty rules inside and outside the library.
+    fn save_autosave_target(&mut self) -> Result<(), String> {
+        if self.lib_file.is_some() { return self.save_library_file(); }
+        self.file_path.as_ref().filter(|p| self.doc.cityos.is_some()
+            && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
+            .ok_or("Save this draft to the library or a native file first")?;
+        self.save_current_external()
     }
     fn has_autosave_target(&self) -> bool {
         self.lib_file.is_some() || self.doc.cityos.is_some() && self.file_path.as_ref()
@@ -127,8 +223,17 @@ impl App {
     /// Opens a library file in the editor.
     pub fn open_library_file(&mut self, id: &str) {
         let Some(lib) = self.lib.clone() else { return };
-        let loaded = lib.file(id).and_then(|e| lib.load_checkpoint_for_recovery(id).map(|(checkpoint,missing)| (e, checkpoint.document, checkpoint.history, missing)));
-        let (entry, mut doc, history, missing) = match loaded {
+        // Observe our own pending save before loading its successor checkpoint.
+        if self.lib_file.as_ref().is_some_and(|file| file.id == id) {
+            self.exit_version_view();
+            if !self.flush_autosave() { return; }
+        }
+        let loaded = lib.file(id).and_then(|e| {
+            let (checkpoint, missing) = lib.load_checkpoint_for_recovery(id)?;
+            let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint)?;
+            Ok((e, checkpoint.document, checkpoint.history, missing, fingerprint))
+        });
+        let (entry, mut doc, history, missing, fingerprint) = match loaded {
             Ok(x) => x,
             Err(e) => {
                 self.show_toast(format!("Cannot open the file: {e}"), true);
@@ -137,11 +242,16 @@ impl App {
         };
         let project = lib.project(&entry.project).map(|p| p.name).unwrap_or_default();
         doc.name = entry.name.clone();
+        let autosave = match Autosave::library_checkpoint(self.canvas.tiles.rev(), &doc, &history, fingerprint) {
+            Ok(autosave) => autosave,
+            Err(error) => { self.show_toast(error, true); return; }
+        };
         let needs_thumb = lib.thumbnail_path(&entry).is_none();
         if !self.replace_document(doc, None){return;}
         self.hist = history;
         self.lib_file = Some(LibFile { id: entry.id.clone(), project_id: entry.project.clone(), project, name: entry.name.clone() });
-        self.autosave = Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: doc_hash(&self.doc), ..Default::default() };
+        self.autosave = autosave;
+        self.autosave.seen_rev = self.canvas.tiles.rev();
         self.history_open_file();
         let _ = lib.mark_opened(id);
         self.home = None;
@@ -228,11 +338,8 @@ impl App {
             // an old version is on screen: the file on disk must keep the live document
             return Err("Go back to the current version before saving".into());
         }
-        lib.save_file_with_history(&lf.id, &self.doc, &self.hist).map_err(|e| format!("Cannot save: {e}"))?;
-        self.autosave.saved_hash = doc_hash(&self.doc);
-        self.autosave.changed_at = None;
-        self.autosave.failures = 0;
-        self.autosave.retry_at = None;
+        // Prepare the comparison before writing; only install it after persistence.
+        self.autosave = self.persist_library_checkpoint(&self.doc, &self.hist)?;
         thumb::refresh_in_background(lib, lf.id, self.export_doc().into_owned());
         Ok(())
     }
@@ -253,8 +360,9 @@ impl App {
         if self.history.viewing.is_some() {
             return true;
         }
-        if self.has_autosave_target() && doc_hash(&self.doc) != self.autosave.saved_hash {
-            if let Err(e) = self.save_autosave_target() {
+        if self.has_autosave_target() {
+            let result = self.autosave_target_changed().and_then(|changed| if changed { self.save_autosave_target() } else { Ok(()) });
+            if let Err(e) = result {
                 self.autosave.changed_at=Some(self.now);
                 self.autosave.confirmed=true;
                 self.show_toast(e, true);
@@ -272,8 +380,11 @@ impl App {
             return;
         }
         let rev = self.canvas.tiles.rev();
-        if rev != self.autosave.seen_rev {
+        let history = self.hist.change_identity();
+        let history_changed = self.lib_file.is_some() && self.autosave.seen_history.as_ref().is_none_or(|seen| !Arc::ptr_eq(seen, &history));
+        if rev != self.autosave.seen_rev || history_changed {
             self.autosave.seen_rev = rev;
+            self.autosave.seen_history = Some(history);
             self.autosave.changed_at = Some(self.now);
             self.autosave.confirmed = false;
         }
@@ -290,14 +401,15 @@ impl App {
             self.autosave.confirmed = false;
         } else if !self.autosave.confirmed && self.now - t >= PROBE_DELAY {
             // Cheap-ish check once the revision settled: did the document really change?
-            if doc_hash(&self.doc) == self.autosave.saved_hash {
-                self.autosave.changed_at = None;
-                return;
+            match self.autosave_target_changed() {
+                Ok(false) => { self.autosave.changed_at = None; return; }
+                Ok(true) => {}
+                Err(error) => { self.show_toast(error, true); return; }
             }
             self.autosave.confirmed = true;
         } else if self.autosave.confirmed && self.now - t >= if self.doc.cityos.is_some(){2.0}else{AUTOSAVE_IDLE} {
-            if doc_hash(&self.doc) != self.autosave.saved_hash {
-                match self.save_autosave_target() {
+            match self.autosave_target_changed() {
+                Ok(true) => match self.save_autosave_target() {
                     Ok(()) => self.autosave.saves += 1,
                     Err(e) => {
                         self.autosave.changed_at=Some(self.now);
@@ -307,9 +419,9 @@ impl App {
                         self.show_toast(e, true);
                         ctx.request_repaint_after(std::time::Duration::from_secs(backoff));
                     },
-                }
-            }else{
-                self.autosave.changed_at=None;
+                },
+                Ok(false) => self.autosave.changed_at = None,
+                Err(error) => self.show_toast(error, true),
             }
             return;
         }
@@ -342,10 +454,17 @@ impl App {
         doc.name = name.trim().to_string();
         match lib.create_file_with_history(project, folder, name, &doc, &self.hist) {
             Ok(e) => {
+                doc.name = e.name.clone();
+                let autosave = lib.load_checkpoint(&e.id).map_err(|error| error.to_string())
+                    .and_then(|checkpoint| Autosave::created_library_checkpoint(self.canvas.tiles.rev(), &doc, &self.hist, checkpoint));
+                let autosave = match autosave {
+                    Ok(autosave) => autosave,
+                    Err(error) => { self.show_toast(format!("File created, but its checkpoint could not be observed: {error}"), true); return; }
+                };
                 self.doc.name = e.name.clone();
                 let project_name = lib.project(project).map(|p| p.name).unwrap_or_default();
                 self.lib_file = Some(LibFile { id: e.id.clone(), project_id: project.to_string(), project: project_name.clone(), name: e.name });
-                self.autosave = Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: doc_hash(&self.doc), ..Default::default() };
+                self.autosave = autosave;
                 self.history_open_file();
                 self.file_path = None;
                 thumb::refresh_in_background(lib, e.id, self.export_doc().into_owned());

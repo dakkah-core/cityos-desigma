@@ -3,7 +3,8 @@
 use crate::draft::draft;
 use crate::workspace::Workspace;
 use crate::editor::EditorHost;
-use desigma_doc::{CityosHistoryStep, Document};
+use desigma_doc::Document;
+use crate::history::CityosHistoryStep;
 use serde_json::{json, Value};
 
 pub struct PendingHistory {

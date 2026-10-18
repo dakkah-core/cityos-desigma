@@ -606,15 +606,7 @@ impl eframe::App for Shell {
             self.cityos.has_bound_draft = self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some());
             self.draw(ui);
             if let Some(document) = self.cityos.local_design_request.take() {
-                let preserved = if self.app.lib_file.is_some() {
-                    self.app.save_library_file()
-                } else if let Some(path) = &self.app.file_path {
-                    crate::io::save_path(&self.app.doc, path).map(|_| ())
-                } else if self.app.home.is_none() && (self.app.doc.cityos.is_some() || self.app.hist.can_undo()) {
-                    Err("Save the current draft before creating another design. Your draft was preserved.".into())
-                } else {
-                    Ok(())
-                };
+                let preserved = self.app.preserve_before_local_design();
                 match preserved {
                     Err(error) => {
                         self.cityos.local_design_error = Some(error.clone());

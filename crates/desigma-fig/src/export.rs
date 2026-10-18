@@ -336,6 +336,9 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
         NodeKind::Component(_) => "COMPONENT",
         NodeKind::ComponentSet(_) => "COMPONENT_SET",
         NodeKind::Instance { .. } => "INSTANCE",
+        NodeKind::BoardSection(_) => "SECTION",
+        NodeKind::Table(_) => "TABLE",
+        NodeKind::TableCell(_) => "TABLE_CELL",
         NodeKind::Unknown { type_name } => type_name.as_str(),
         NodeKind::Sticky(_) | NodeKind::Connector(_) | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. } => {
             crate::board::type_name(&node.kind).unwrap_or("SECTION")

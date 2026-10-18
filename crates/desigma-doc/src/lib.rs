@@ -5,6 +5,7 @@
 //! Coordinates are in Figma units (1 unit = 1 CSS px at 100% zoom), y down.
 
 mod board;
+mod board_blocks;
 mod comments;
 mod cityos;
 mod components;
@@ -18,6 +19,7 @@ mod library_ops;
 mod node;
 mod paint;
 mod prototype;
+mod session;
 mod settings;
 mod textmodel;
 mod variables;
@@ -27,6 +29,7 @@ pub mod vector;
 mod vector_fit;
 
 pub use board::*;
+pub use board_blocks::*;
 pub use comments::*;
 pub use cityos::*;
 pub use components::*;
@@ -39,6 +42,7 @@ pub use library_ops::*;
 pub use node::*;
 pub use paint::*;
 pub use prototype::*;
+pub use session::*;
 pub use settings::*;
 pub use textmodel::*;
 pub use variables::*;
@@ -65,6 +69,8 @@ pub enum DocError {
     NotAContainer(NodeId),
     #[error("CityOS objects require a validated semantic command")]
     CityosProtected,
+    #[error("The prepared history transition is no longer current")]
+    HistoryChanged,
 }
 
 /// A whole file: pages at the root, each page a tree of nodes.
@@ -108,6 +114,9 @@ pub struct Document {
     /// Hidden page holding copies of library components; not in `pages`.
     #[serde(default)]
     pub library_page: Option<NodeId>,
+    /// Timer and voting session of a board.
+    #[serde(default)]
+    pub board_session: BoardSession,
     /// Embedded images keyed by content hash (Figma `imageRef`).
     pub images: BTreeMap<String, Vec<u8>>,
     next_id: u64,
@@ -116,6 +125,12 @@ pub struct Document {
 impl Document {
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into(), ..Default::default() }
+    }
+
+    /// Whether native editing is restricted by an existing managed binding.
+    /// This reports the binding only; it grants no editing or owner authority.
+    pub fn is_managed(&self) -> bool {
+        self.cityos.is_some()
     }
 
     pub fn alloc_id(&mut self) -> NodeId {

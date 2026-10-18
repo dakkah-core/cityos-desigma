@@ -1,7 +1,8 @@
 //! The editor owns native state; CityOS owns semantic workflow and presentation.
 //!
 //! No mutable editor, history, autosave or library reference crosses this port.
-use desigma_doc::{CityosHistoryStep, Document};
+use desigma_doc::Document;
+use crate::history::CityosHistoryStep;
 use desigma_library::SubmissionRecord;
 use serde_json::Value;
 use std::path::{Path, PathBuf};

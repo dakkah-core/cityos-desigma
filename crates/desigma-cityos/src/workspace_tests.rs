@@ -7,7 +7,8 @@ use crate::editor::{
     BaselineInstall, BaselineRecovery, EditorHost, EditorSession, EditorStatus,
 };
 use crate::workspace::{DraftTab, Workspace};
-use desigma_doc::{CityosHistoryStep, Command, Document, DocumentCheckpoint, History};
+use desigma_doc::{Command, Document, DocumentCheckpoint, History};
+use crate::history::{CityosHistory, CityosHistoryStep};
 use desigma_library::{SubmissionCommand, SubmissionRecord, SubmissionState};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -638,13 +639,16 @@ fn uncertain_reviewed_baseline_fences_commands_switches_and_leaving_until_exact_
     let mut wrong_revision = expected.clone(); wrong_revision.revision += 1;
     let mut wrong_digest = expected.clone(); wrong_digest.semantic_digest = "c".repeat(64);
     let mut wrong_binding = expected.clone(); wrong_binding.binding_digest = "d".repeat(64);
-    for readback in [None, Some(wrong_file), Some(wrong_draft), Some(wrong_revision), Some(wrong_digest), Some(wrong_binding)] {
+    let rejected_readbacks = [None, Some(wrong_file), Some(wrong_draft), Some(wrong_revision), Some(wrong_digest), Some(wrong_binding)];
+    let rejected_count = rejected_readbacks.len();
+    for (attempt, readback) in rejected_readbacks.into_iter().enumerate() {
         host.readback = readback;
         workspace.recover_reconciliation(&mut host);
         assert!(workspace.error.is_some());
         assert_eq!(workspace.baseline_recovery.as_ref(), Some(&expected));
         assert_eq!(workspace.reconciliation_bundle.as_ref(), Some(&bundle));
         assert_eq!(host.recovery_requests.last(), Some(&expected));
+        assert_eq!(host.recovery_requests.len(), attempt + 1, "each rejected observation must inquire exactly once");
         assert_eq!(host.active.checkpoint.to_json().unwrap(), before);
         assert_recovery_fences(&mut workspace, &mut host, &requests);
     }
@@ -661,7 +665,7 @@ fn uncertain_reviewed_baseline_fences_commands_switches_and_leaving_until_exact_
     assert_eq!(workspace.resource, Some(bundle["resource"].clone()));
     assert_eq!(host.active.checkpoint.to_json().unwrap(), persisted_candidate, "recovery must not reseal the candidate");
     assert_eq!(host.calls.iter().filter(|call| **call == Call::ReviewedBaseline).count(), 1);
-    assert_eq!(host.recovery_requests, vec![expected; 6]);
+    assert_eq!(host.recovery_requests, vec![expected; rejected_count + 1], "the final successful readback is also an inquiry");
     assert!(!host.active.checkpoint.history.can_undo());
     assert!(!host.active.checkpoint.history.can_redo());
     assert!(host.active.checkpoint.history.baseline_id().is_some());

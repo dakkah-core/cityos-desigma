@@ -32,6 +32,244 @@ fn home_sim() -> (Sim, TmpDir) {
     (s, dir)
 }
 
+fn autosave_app() -> (crate::app::App, Library, TmpDir, String) {
+    let dir = TmpDir::new();
+    let library = Library::open(&dir.0).unwrap();
+    let project = library.create_project("Autosave").unwrap();
+    let mut doc = Document::new("History draft"); doc.add_page("Page");
+    let file = library.create_file(&project.id, None, &doc.name, &doc).unwrap();
+    let mut app = crate::app::App::new(doc);
+    app.lib = Some(library.clone()); app.open_library_file(&file.id);
+    crate::home::thumb::finish_library_jobs(&dir.0);
+    (app, library, dir, file.id)
+}
+
+fn edit_then_undo_same_document(app: &mut crate::app::App) {
+    let before = app.doc.to_json().unwrap();
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone();
+    node.name.push_str(" changed");
+    app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
+    assert!(app.hist.undo(&mut app.doc).unwrap());
+    assert_eq!(app.doc.to_json().unwrap(), before);
+    assert!(app.hist.can_redo());
+}
+
+#[test]
+fn history_only_autosave_preserves_redo_when_edit_undo_returns_to_saved_document() {
+    let (mut app, library, _dir, file) = autosave_app();
+    let saved_hash = app.autosave.saved_hash;
+    let saved_history = app.autosave.saved_history_hash;
+    let fingerprint = app.autosave.saved_checkpoint_fingerprint.clone();
+    let revision = app.canvas.tiles.rev();
+    edit_then_undo_same_document(&mut app);
+    assert_eq!(app.canvas.tiles.rev(), revision, "history events do not require a canvas invalidation");
+    let ctx = egui::Context::default();
+    app.now = 10.; app.autosave_tick(&ctx);
+    app.now = 10.4; app.autosave_tick(&ctx);
+    assert!(app.autosave.pending());
+    app.now = 12.; app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saves, 1);
+    assert_eq!(app.autosave.saved_hash, saved_hash);
+    assert_ne!(app.autosave.saved_history_hash, saved_history);
+    assert_ne!(app.autosave.saved_checkpoint_fingerprint, fingerprint);
+    assert!(library.load_checkpoint(&file).unwrap().history.can_redo());
+    app.open_library_file(&file);
+    assert!(app.hist.can_redo(), "reopening must retain history-only redo");
+    assert!(app.hist.redo(&mut app.doc).unwrap());
+    assert!(app.doc.get(app.doc.pages[0]).unwrap().name.ends_with(" changed"));
+}
+
+#[test]
+fn history_only_failed_autosave_retries_without_advancing_persisted_history_or_fingerprint() {
+    let (mut app, library, dir, file) = autosave_app();
+    let saved = (app.autosave.saved_hash, app.autosave.saved_history_hash, app.autosave.saved_checkpoint_fingerprint.clone());
+    edit_then_undo_same_document(&mut app);
+    let manifest = library.path("projects").join(&app.lib_file.as_ref().unwrap().project_id).join("project.json");
+    let bytes = std::fs::read(&manifest).unwrap();
+    std::fs::write(&manifest, b"{damaged manifest").unwrap();
+    let ctx = egui::Context::default();
+    app.now = 10.; app.autosave_tick(&ctx);
+    app.now = 10.4; app.autosave_tick(&ctx);
+    app.now = 12.; app.autosave_tick(&ctx);
+    assert_eq!((app.autosave.saved_hash, app.autosave.saved_history_hash, app.autosave.saved_checkpoint_fingerprint.clone()), saved);
+    assert!(app.autosave.pending()); assert!(app.hist.can_redo());
+    assert_eq!(app.autosave.failures, 1); assert_eq!(app.autosave.retry_at, Some(14.));
+    std::fs::write(&manifest, bytes).unwrap();
+    app.now = 13.; app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saves, 0);
+    app.now = 14.; app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saves, 1); assert_eq!(app.autosave.failures, 0);
+    assert_eq!(app.autosave.retry_at, None);
+    assert!(library.load_checkpoint(&file).unwrap().history.can_redo());
+    crate::home::thumb::finish_library_jobs(&dir.0);
+}
+
+#[test]
+fn history_only_flush_persists_redo_and_missing_checkpoint_observation_fails_closed() {
+    let (mut app, library, _dir, file) = autosave_app();
+    edit_then_undo_same_document(&mut app);
+    let fingerprint = app.autosave.saved_checkpoint_fingerprint.take().unwrap();
+    assert!(!app.flush_autosave()); assert!(app.autosave.pending());
+    assert!(!library.load_checkpoint(&file).unwrap().history.can_redo());
+    assert!(app.autosave.saved_checkpoint_fingerprint.is_none());
+    app.autosave.saved_checkpoint_fingerprint = Some(fingerprint);
+    assert!(app.flush_autosave());
+    assert!(library.load_checkpoint(&file).unwrap().history.can_redo());
+}
+
+#[test]
+fn history_fence_change_with_identical_serialized_stacks_does_not_rewrite_checkpoint() {
+    let (mut app, library, _dir, file) = autosave_app();
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name.push_str(" changed");
+    app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
+    app.save_library_file().unwrap();
+    let before = library.load_checkpoint(&file).unwrap().to_json().unwrap();
+    let identity = app.hist.change_identity();
+    assert!(app.hist.undo(&mut app.doc).unwrap()); assert!(app.hist.redo(&mut app.doc).unwrap());
+    assert!(!std::sync::Arc::ptr_eq(&identity, &app.hist.change_identity()));
+    let ctx = egui::Context::default();
+    app.now = 10.; app.autosave_tick(&ctx);
+    app.now = 10.4; app.autosave_tick(&ctx);
+    app.now = 20.; app.autosave_tick(&ctx);
+    assert!(app.autosave.changed_at.is_none()); assert_eq!(app.autosave.saves, 0);
+    assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), before);
+}
+
+#[test]
+fn library_observation_precedes_entry_name_normalization_and_rejects_a_newer_writer() {
+    let (mut app, library, _dir, file) = autosave_app();
+    library.rename_file(&file, "Normalized name").unwrap();
+    let checkpoint = library.load_checkpoint(&file).unwrap();
+    let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint).unwrap();
+    app.open_library_file(&file);
+    assert_eq!(app.doc.name, "Normalized name");
+    assert_ne!(app.doc.name, checkpoint.document.name);
+    assert_eq!(app.autosave.saved_checkpoint_fingerprint.as_deref(), Some(fingerprint.as_str()));
+    assert!(app.flush_autosave());
+    assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
+    let mut newer = checkpoint.document; newer.name = "Other writer".into();
+    let newer_fingerprint = library.save_file_with_history_expected(&file, &newer, &checkpoint.history, &fingerprint).unwrap();
+    app.doc.name = "Keep local candidate".into();
+    assert!(app.save_library_file().is_err());
+    assert_eq!(app.doc.name, "Keep local candidate");
+    assert_eq!(app.autosave.saved_checkpoint_fingerprint.as_deref(), Some(fingerprint.as_str()));
+    assert_eq!(desigma_library::checkpoint_fingerprint(&library.load_checkpoint(&file).unwrap()).unwrap(), newer_fingerprint);
+}
+
+#[test]
+fn external_saves_keep_observed_bytes_and_never_claim_durable_history() {
+    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
+    let mut doc = Document::new("External"); doc.add_page("Page");
+    let (path, fingerprint) = crate::io::save_path_observed(&doc, &dir.0.join("external.desigma")).unwrap();
+    let mut app = crate::app::App::new(doc); app.open_path(path.clone());
+    assert_eq!(app.autosave.external_fingerprint.as_deref(), Some(fingerprint.as_str()));
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name = "Edited".into();
+    app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
+    app.save_external_to(&path).unwrap();
+    assert!(app.hist.can_undo()); assert!(app.autosave.saved_history_hash.is_none());
+    assert!(app.autosave.saved_checkpoint_fingerprint.is_none());
+    assert_ne!(app.autosave.external_fingerprint.as_deref(), Some(fingerprint.as_str()));
+    assert_eq!(app.autosave.external_fingerprint.as_ref().unwrap(), &crate::io::file_fingerprint(&path).unwrap());
+    let candidate = app.doc.to_json().unwrap();
+    app.autosave.external_fingerprint = None;
+    assert!(app.save_external_to(&path).is_err(), "same-target Save As cannot infer a missing observation");
+    assert_eq!(app.doc.to_json().unwrap(), candidate);
+}
+
+#[test]
+fn external_same_target_save_as_rejects_stale_observation_but_explicit_copy_observes_its_write() {
+    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
+    let mut doc = Document::new("Original"); doc.add_page("Page");
+    let (path, fingerprint) = crate::io::save_path_observed(&doc, &dir.0.join("external.desigma")).unwrap();
+    let mut app = crate::app::App::new(doc.clone()); app.open_path(path.clone());
+    doc.name = "Other writer".into(); crate::io::save_path_observed(&doc, &path).unwrap();
+    app.doc.name = "Keep local candidate".into();
+    assert!(app.save_external_to(&path.with_extension("")).is_err(), "extension normalization must retain CAS");
+    assert_eq!(app.doc.name, "Keep local candidate");
+    assert_eq!(app.autosave.external_fingerprint.as_deref(), Some(fingerprint.as_str()));
+    assert_eq!(crate::io::load_path(&path).unwrap().name, "Other writer");
+    let copy = dir.0.join("copy.desigma"); app.save_external_to(&copy).unwrap();
+    assert_eq!(app.file_path.as_ref(), Some(&copy));
+    assert_eq!(app.autosave.external_fingerprint.as_ref().unwrap(), &crate::io::file_fingerprint(&copy).unwrap());
+    assert!(app.autosave.saved_history_hash.is_none());
+}
+
+#[test]
+fn local_design_creation_preserves_a_stale_external_candidate_and_the_newer_file() {
+    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
+    let path = dir.0.join("external.desigma");
+    let mut original = Document::new("Original"); original.add_page("Page");
+    crate::io::save_path(&original, &path).unwrap();
+    let mut app = crate::app::App::new(Document::new("Empty")); app.open_path(path.clone());
+    let observation = app.autosave.external_fingerprint.clone();
+    original.name = "Newer saved design".into(); crate::io::save_path(&original, &path).unwrap();
+    let before = std::fs::read(&path).unwrap(); app.doc.name = "Keep local edits".into();
+    assert!(app.preserve_before_local_design().unwrap_err().contains("changed on disk"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(app.doc.name, "Keep local edits");
+    assert_eq!(app.autosave.external_fingerprint, observation);
+    assert_eq!(app.file_path.as_ref(), Some(&path));
+}
+
+#[test]
+fn external_preservation_never_replaces_an_import_source_with_native_json() {
+    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
+    let path = dir.0.join("source.fig"); std::fs::write(&path, b"original import bytes").unwrap();
+    let mut app = crate::app::App::new(Document::new("Imported design"));
+    app.file_path = Some(path.clone());
+    app.autosave.external_fingerprint = Some(crate::io::file_fingerprint(&path).unwrap());
+    assert!(app.save_current_external().unwrap_err().contains("native file"));
+    assert_eq!(std::fs::read(path).unwrap(), b"original import bytes");
+}
+
+#[test]
+fn save_as_cannot_replace_a_managed_library_document_outside_its_checkpoint() {
+    let (mut app, library, _dir, file) = autosave_app();
+    let entry = library.file(&file).unwrap();
+    let target = library.path("projects").join(&entry.project).join("files").join(format!("{file}.desigma"));
+    let before = library.load_checkpoint(&file).unwrap().to_json().unwrap();
+    let observation = app.autosave.saved_checkpoint_fingerprint.clone();
+    app.doc.name = "Unsaved candidate".into();
+    assert!(app.save_external_to(&target).unwrap_err().contains("projects library"));
+    assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), before);
+    assert_eq!(app.doc.name, "Unsaved candidate");
+    assert_eq!(app.autosave.saved_checkpoint_fingerprint, observation);
+    assert!(app.file_path.is_none());
+}
+
+#[test]
+fn opening_a_managed_file_path_uses_its_original_checkpoint_instead_of_an_external_copy() {
+    let (mut app, library, _dir, file) = autosave_app();
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name = "Retain undo".into();
+    app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
+    app.save_library_file().unwrap();
+    let entry = library.file(&file).unwrap();
+    let path = library.path("projects").join(&entry.project).join("files").join(format!("{file}.desigma"));
+    let history = serde_json::to_value(&app.hist).unwrap();
+    let mut other = crate::app::App::new(Document::new("Empty")); other.lib = Some(library.clone());
+    other.open_path(path);
+    assert_eq!(other.lib_file.as_ref().map(|file| file.id.as_str()), Some(file.as_str()));
+    assert!(other.file_path.is_none());
+    assert_eq!(serde_json::to_value(&other.hist).unwrap(), history);
+    assert!(other.autosave.saved_checkpoint_fingerprint.is_some());
+    assert_eq!(library.all_files().len(), 1);
+}
+
+#[test]
+fn reopening_the_active_library_file_observes_its_own_pending_save_and_history() {
+    let (mut app, library, _dir, file) = autosave_app();
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name = "Unsaved layer change".into();
+    app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
+    let expected = app.doc.to_json().unwrap(); let history = serde_json::to_value(&app.hist).unwrap();
+    app.open_library_file(&file);
+    assert_eq!(app.doc.to_json().unwrap(), expected);
+    assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
+    let checkpoint = library.load_checkpoint(&file).unwrap();
+    assert_eq!(checkpoint.document.to_json().unwrap(), expected);
+    assert_eq!(app.autosave.saved_checkpoint_fingerprint.as_ref().unwrap(), &desigma_library::checkpoint_fingerprint(&checkpoint).unwrap());
+    assert!(app.flush_autosave(), "reopen must not leave a stale predecessor fence");
+}
+
 #[test]
 fn cityos_temporary_views_cannot_save_autosave_or_create_history(){
     let (mut s,_dir)=home_sim();

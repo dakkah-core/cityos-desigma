@@ -78,9 +78,18 @@ struct PendingVersion {
 #[cfg(test)]
 thread_local! {
     static VERSION_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static VERSION_HOOK: std::cell::RefCell<Option<VersionHook>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+type VersionHook = (&'static str, Box<dyn FnOnce()>);
+
 fn version_fault(_phase: &str) -> Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = VERSION_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) { slot.take() } else { None }
+    }) { hook.1(); }
     #[cfg(test)]
     if VERSION_FAULT.with(|fault| {
         if fault.get() == Some(_phase) { fault.set(None); true } else { false }
@@ -182,7 +191,8 @@ impl Library {
         remove_durable(&path)
     }
 
-    pub(crate) fn recover_pending_versions(&self) -> Result<()> {
+    /// Caller retains the root/process guard before taking the versions mutex.
+    pub(crate) fn recover_pending_versions_locked(&self) -> Result<()> {
         let _guard = lock();
         let entries = match std::fs::read_dir(self.path("versions")) {
             Ok(entries) => entries,
@@ -267,6 +277,7 @@ impl Library {
         now: u64,
     ) -> Result<FileVersion> {
         crate::validate_id(file_id)?;
+        let _storage = crate::store::write_lock(self)?;
         let _g = lock();
         let mut entries = self.read_index(file_id)?;
         let clean = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -285,6 +296,7 @@ impl Library {
         let prune: Vec<_> = if auto { retention(&entries, now).into_iter().filter(|old| *old != n).collect() } else { Vec::new() };
         entries.retain(|e| !prune.contains(&e.n));
         let pending = PendingVersion { schema_version: "desigma.version-save.v1".into(), version: v.clone(), document: json, entries, prune };
+        version_fault("before-journal")?;
         write_atomic(&self.versions_dir(file_id).join(PENDING), &serde_json::to_vec(&pending)?)?;
         version_fault("journal")?;
         self.recover_version_save(file_id)?;
@@ -299,6 +311,7 @@ impl Library {
     /// Error-preserving history discovery for app reconciliation. The legacy
     /// `list_versions` convenience API cannot distinguish unavailable from empty.
     pub fn try_list_versions(&self, file_id: &str) -> Result<Vec<FileVersion>> {
+        let _storage = crate::store::write_lock(self)?;
         let _g = lock();
         let mut v = self.read_index(file_id)?;
         v.retain(|e| self.version_path(file_id, e.n).exists());
@@ -308,6 +321,7 @@ impl Library {
 
     pub fn load_version(&self, file_id: &str, n: u32) -> Result<Document> {
         crate::validate_id(file_id)?;
+        let _storage = crate::store::write_lock(self)?;
         let _guard = lock();
         self.recover_version_save(file_id)?;
         let text = std::fs::read_to_string(self.version_path(file_id, n)).map_err(|e| {
@@ -322,6 +336,7 @@ impl Library {
 
     /// Gives a version a name and/or description (an empty name clears it).
     pub fn rename_version(&self, file_id: &str, n: u32, label: Option<String>, description: Option<String>) -> Result<()> {
+        let _storage = crate::store::write_lock(self)?;
         let _g = lock();
         let mut entries = self.read_index(file_id)?;
         let e = entries.iter_mut().find(|e| e.n == n).ok_or_else(|| LibraryError::NotFound(format!("version {n} of {file_id}")))?;
@@ -336,6 +351,7 @@ impl Library {
 
     /// Moves a version to the trash (`trash/<file-id>-v<n>/`) and drops it from the index.
     pub fn delete_version(&self, file_id: &str, n: u32) -> Result<()> {
+        let _storage = crate::store::write_lock(self)?;
         let _g = lock();
         let mut entries = self.read_index(file_id)?;
         let i = entries.iter().position(|e| e.n == n).ok_or_else(|| LibraryError::NotFound(format!("version {n} of {file_id}")))?;
@@ -356,6 +372,76 @@ impl Library {
 mod tests {
     use super::*;
     use desigma_doc::{Node, Rect};
+
+    #[test]
+    #[ignore = "subprocess helper for cross_process_version_allocation_and_recovery_are_exclusive"]
+    fn version_storage_worker() {
+        let Some(root) = std::env::var_os("DESIGMA_STORAGE_TEST_ROOT") else { return };
+        let file = std::env::var("DESIGMA_STORAGE_TEST_FILE").unwrap();
+        let mode = std::env::var("DESIGMA_STORAGE_TEST_MODE").unwrap();
+        let library = Library::open(root).unwrap();
+        let (phase, crash) = match mode.as_str() {
+            "before-journal" => ("before-journal", false),
+            "journal" => ("journal", true),
+            "snapshot" => ("snapshot", true),
+            _ => panic!("unexpected version storage worker mode"),
+        };
+        let barrier = library.root().to_owned();
+        VERSION_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(move || {
+            crate::store::storage_test::pause(&barrier);
+            if crash { std::process::exit(94); }
+        }))));
+        let version = library.save_version_described(&file, &doc_with(2), Some("Child".into()), Some("Retain child metadata".into()), false).unwrap();
+        assert_eq!(version.n, 2);
+        std::process::exit(93);
+    }
+
+    #[test]
+    fn cross_process_version_allocation_and_recovery_are_exclusive() {
+        use crate::store::storage_test::{busy, Worker};
+        for mode in ["before-journal", "journal", "snapshot"] {
+            let temp = Tmp::new();
+            let library = Library::open(&temp.0).unwrap();
+            let project = library.create_project("P").unwrap();
+            let file = library.create_file(&project.id, None, "F", &doc_with(0)).unwrap();
+            let first = library.save_version_described(&file.id, &doc_with(1), Some("First".into()), Some("Retain first metadata".into()), false).unwrap();
+            let first_bytes = std::fs::read(library.version_path(&file.id, first.n)).unwrap();
+            let mut worker = Worker::start(&temp.0, "versions::tests::version_storage_worker", mode, &file.id);
+            let snapshot = || -> std::collections::BTreeMap<_, _> {
+                std::fs::read_dir(library.versions_dir(&file.id)).unwrap().map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                }).collect()
+            };
+            let paused = snapshot();
+            busy(library.save_version(&file.id, &doc_with(3), Some("Parent".into()), false));
+            busy(library.try_list_versions(&file.id));
+            busy(library.load_version(&file.id, first.n));
+            busy(library.rename_version(&file.id, first.n, Some("Wrong".into()), None));
+            busy(library.delete_version(&file.id, first.n));
+            busy(library.empty_trash());
+            busy(library.create_folder(&project.id, None, "After version"));
+            busy(library.load_checkpoint(&file.id));
+            busy(Library::open(&temp.0));
+            assert_eq!(snapshot(), paused, "busy reader/writer changed version storage at {mode}");
+            worker.release_and_wait(if mode == "before-journal" { 93 } else { 94 });
+            let reopened = Library::open(&temp.0).unwrap();
+            let versions = reopened.try_list_versions(&file.id).unwrap();
+            assert_eq!(versions.iter().map(|version| version.n).collect::<Vec<_>>(), [2, 1]);
+            assert_eq!(versions[0].label.as_deref(), Some("Child"));
+            assert_eq!(versions[0].description.as_deref(), Some("Retain child metadata"));
+            assert_eq!(versions[1], first);
+            assert_eq!(std::fs::read(reopened.version_path(&file.id, 1)).unwrap(), first_bytes);
+            let child_bytes = std::fs::read(reopened.version_path(&file.id, 2)).unwrap();
+            let parent = reopened.save_version(&file.id, &doc_with(3), Some("Parent".into()), false).unwrap();
+            assert_eq!(parent.n, 3);
+            assert_eq!(std::fs::read(reopened.version_path(&file.id, 2)).unwrap(), child_bytes);
+            assert_eq!(reopened.load_version(&file.id, 2).unwrap().nodes.len(), 3);
+            assert_eq!(reopened.load_version(&file.id, 3).unwrap().nodes.len(), 4);
+            reopened.create_folder(&project.id, None, "After version").unwrap();
+            assert!(!reopened.versions_dir(&file.id).join(PENDING).exists());
+        }
+    }
 
     struct Tmp(PathBuf);
     impl Tmp {

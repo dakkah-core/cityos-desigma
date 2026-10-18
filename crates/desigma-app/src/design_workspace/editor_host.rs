@@ -6,11 +6,17 @@ use super::{presentation, session::EditorSession};
 use crate::app::App;
 use desigma_cityos::draft::{draft, revision};
 use desigma_cityos::editor::{BaselineInstall, BaselineRecovery, EditorHost, EditorStatus, EditorToast};
-use desigma_doc::{CityosHistoryStep, Command, Document, DocumentCheckpoint};
+use desigma_doc::{Command, Document, DocumentCheckpoint};
+use desigma_cityos::history::{CityosHistory, CityosHistoryStep};
 use desigma_library::{Library, SubmissionRecord, SubmissionState};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_REVIEWED_SAVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 fn editable(app: &App) -> Result<(), String> {
     if app.cityos_submission_frozen() {
@@ -107,17 +113,19 @@ fn refresh_submission_freeze(app: &mut App) -> Result<(), String> {
     }
 }
 
-fn adopt(app: &mut App, checkpoint: DocumentCheckpoint) {
+fn adopt(app: &mut App, checkpoint: DocumentCheckpoint) -> Result<(), String> {
+    let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint).map_err(|error| error.to_string())?;
+    let mut autosave = crate::home::Autosave::library_checkpoint(app.canvas.tiles.rev(), &checkpoint.document, &checkpoint.history, fingerprint)?;
     app.doc = checkpoint.document;
     app.hist = checkpoint.history;
     app.history.reset();
     app.changed();
     app.sanitize();
-    app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
-    app.autosave.changed_at = None;
-    app.autosave.confirmed = false;
-    app.autosave.failures = 0;
-    app.autosave.retry_at = None;
+    autosave.seen_rev = app.canvas.tiles.rev();
+    autosave.saved_hash = crate::home::doc_hash(&app.doc);
+    autosave.saves = app.autosave.saves;
+    app.autosave = autosave;
+    Ok(())
 }
 
 fn submission_context(app: &App, record: &SubmissionRecord) -> Result<(Library, String), String> {
@@ -205,7 +213,7 @@ impl EditorHost for App {
         self.finish_variable_editors();
         if self.home.is_some() { return Ok(()); }
         if self.lib_file.is_some() { return self.save_library_file(); }
-        if let Some(path) = &self.file_path { return crate::io::save_path(&self.doc, path).map(|_| ()); }
+        if self.file_path.is_some() { return self.save_current_external(); }
         if self.doc.cityos.is_some() { return <Self as EditorHost>::save_to_draft_library(self); }
         if self.hist.can_undo() { return Err("Save your current design before opening a bound draft.".into()); }
         Ok(())
@@ -220,13 +228,13 @@ impl EditorHost for App {
             .map(Ok).unwrap_or_else(|| library.create_project("CityOS drafts")).map_err(|error| error.to_string())?;
         let file = library.create_file_with_history(&project.id, None, &self.doc.name, &self.doc, &self.hist)
             .map_err(|error| error.to_string())?;
+        let checkpoint = library.load_checkpoint(&file.id).map_err(|error| error.to_string())?;
+        let autosave = crate::home::Autosave::created_library_checkpoint(self.canvas.tiles.rev(), &self.doc, &self.hist, checkpoint)?;
         self.lib_file = Some(crate::home::LibFile {
             id: file.id, project_id: project.id, project: project.name, name: file.name,
         });
         self.file_path = None;
-        self.autosave = crate::home::Autosave {
-            seen_rev: self.canvas.tiles.rev(), saved_hash: crate::home::doc_hash(&self.doc), ..Default::default()
-        };
+        self.autosave = autosave;
         Ok(())
     }
 
@@ -332,7 +340,11 @@ impl EditorHost for App {
         let library = self.lib.clone().ok_or("The draft library is unavailable")?;
         let file = self.lib_file.as_ref().ok_or("Save this draft to the library before applying incoming changes")?;
         let recovery = identity(&file.id, &document)?;
+        let fingerprint = self.autosave.saved_checkpoint_fingerprint.as_deref().ok_or("This library file has no observed checkpoint; reopen it before applying incoming changes")?;
         let mut checkpoint = library.load_checkpoint(&file.id).map_err(|error| error.to_string())?;
+        if desigma_library::checkpoint_fingerprint(&checkpoint).map_err(|error| error.to_string())? != fingerprint {
+            return Err("The durable checkpoint changed; current draft retained. Review/reconcile it before applying incoming changes".into());
+        }
         if checkpoint.history.baseline_id() != self.hist.baseline_id() {
             return Err("The durable baseline changed; recover it before applying incoming changes".into());
         }
@@ -341,15 +353,22 @@ impl EditorHost for App {
         let original = checkpoint.to_json().map_err(|error| error.to_string())?;
         checkpoint.install_baseline(document);
         let expected = checkpoint.to_json().map_err(|error| error.to_string())?;
-        let saved = library.save_checkpoint_reconciled(&file.id, &checkpoint);
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_REVIEWED_SAVE.with(|slot| slot.borrow_mut().take()) { hook(); }
+        let saved = library.save_checkpoint_reconciled_expected(&file.id, &checkpoint, fingerprint);
         if let Err(error) = saved {
+            // The library's locked expected-generation check rejected before
+            // writing. This authoritative non-write is not an uncertain install.
+            if matches!(&error, desigma_library::LibraryError::CheckpointConflict(_) | desigma_library::LibraryError::StorageBusy) {
+                return Err(format!("Incoming changes were not installed; current draft retained: {error}"));
+            }
             // A journal may have committed despite the reported I/O failure.
             // Both document AND history must be known before retrying a save.
             match library.load_checkpoint_for_recovery(&file.id) {
                 Ok((recovered, missing)) if missing.is_empty() => {
                     let saved = recovered.to_json().map_err(|error| error.to_string());
                     if saved.as_ref().is_ok_and(|saved| saved == &expected) {
-                        adopt(self, recovered);
+                        adopt(self, recovered)?;
                         return Ok(BaselineInstall::Installed);
                     }
                     if saved.as_ref().is_ok_and(|saved| saved == &original) {
@@ -366,7 +385,7 @@ impl EditorHost for App {
         }
         // The reconciled save holds the library writer lock through exact
         // readback. Install that receipt, never the unverified input candidate.
-        adopt(self, saved.map_err(|error| error.to_string())?.checkpoint);
+        adopt(self, saved.map_err(|error| error.to_string())?.checkpoint)?;
         Ok(BaselineInstall::Installed)
     }
 
@@ -393,7 +412,7 @@ impl EditorHost for App {
                 return Err("Recovered baseline does not retain and seal the exact original history".into());
             }
             refresh_submission_freeze(self)?;
-            adopt(self, checkpoint);
+            adopt(self, checkpoint)?;
             return Ok(true);
         }
         if !same_live_state(self, &checkpoint)? {
@@ -458,7 +477,7 @@ impl EditorHost for App {
             return Err("Frozen submitted document changed; reload its durable generation".into());
         }
         let receipt = library.resume_submission_sync(&record.command.operation_id).map_err(|error| error.to_string())?;
-        adopt(self, receipt.checkpoint);
+        adopt(self, receipt.checkpoint)?;
         refresh_submission_freeze(self)?;
         Ok(true)
     }
@@ -479,7 +498,7 @@ impl EditorHost for App {
         checkpoint.history = self.hist.clone();
         checkpoint.install_baseline(document);
         let receipt = library.synchronize_accepted_submission(&file_id, &stored, &checkpoint).map_err(|error| error.to_string())?;
-        adopt(self, receipt.checkpoint);
+        adopt(self, receipt.checkpoint)?;
         refresh_submission_freeze(self)?;
         Ok(())
     }
@@ -568,14 +587,78 @@ mod tests {
         let project = library.create_project("Native host").unwrap();
         let mut app = App::new(document());
         let file = library.create_file_with_history(&project.id, None, &app.doc.name, &app.doc, &app.hist).unwrap();
+        let checkpoint = library.load_checkpoint(&file.id).unwrap();
+        let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint).unwrap();
+        app.autosave = crate::home::Autosave::library_checkpoint(app.canvas.tiles.rev(), &app.doc, &app.hist, fingerprint).unwrap();
         app.lib = Some(library);
         app.lib_file = Some(crate::home::LibFile { id: file.id, project_id: project.id, project: project.name, name: file.name });
-        app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
         (root, app)
     }
 
     fn active_state(app: &App) -> (String, Value, u64, Option<f64>) {
         (app.doc.to_json().unwrap(), serde_json::to_value(&app.hist).unwrap(), app.autosave.saved_hash, app.autosave.changed_at)
+    }
+
+    #[test]
+    fn stale_reviewed_baseline_retains_dirty_candidate_without_freezing_or_adopting_latest() {
+        let (_root, mut app) = saved_app();
+        let library = app.lib.clone().unwrap();
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let fingerprint = app.autosave.saved_checkpoint_fingerprint.clone().unwrap();
+        let local = command(&app.doc, true, "local");
+        <App as EditorHost>::install_edit(&mut app, local).unwrap();
+        let next = reviewed(&app.doc);
+        let mut other = library.load_checkpoint(&file).unwrap();
+        other.document.name = "Newer writer".into();
+        let newer = library.save_file_with_history_expected(&file, &other.document, &other.history, &fingerprint).unwrap();
+        let before = active_state(&app);
+        assert!(<App as EditorHost>::install_reviewed_baseline(&mut app, next).is_err());
+        assert_eq!(active_state(&app), before);
+        assert!(!app.cityos_submission_frozen());
+        assert_eq!(app.autosave.saved_checkpoint_fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(desigma_library::checkpoint_fingerprint(&library.load_checkpoint(&file).unwrap()).unwrap(), newer);
+    }
+
+    #[test]
+    fn storage_contention_after_review_read_is_a_nonwrite_and_keeps_the_draft_editable() {
+        let (_root, mut app) = saved_app();
+        let library = app.lib.clone().unwrap();
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let persisted = library.load_checkpoint(&file).unwrap().to_json().unwrap();
+        let local = command(&app.doc, true, "local");
+        <App as EditorHost>::install_edit(&mut app, local).unwrap();
+        let next = reviewed(&app.doc);
+        let state = active_state(&app);
+        let observation = app.autosave.saved_checkpoint_fingerprint.clone();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let held_by_hook = held.clone();
+        BEFORE_REVIEWED_SAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+            let lock = std::fs::OpenOptions::new().read(true).write(true).open(library.path(".storage.lock")).unwrap();
+            lock.try_lock().unwrap();
+            *held_by_hook.lock().unwrap() = Some(lock);
+        })));
+        let outcome = <App as EditorHost>::install_reviewed_baseline(&mut app, next);
+        held.lock().unwrap().take();
+        assert!(outcome.is_err(), "storage contention must remain retryable");
+        assert_eq!(active_state(&app), state);
+        assert_eq!(app.autosave.saved_checkpoint_fingerprint, observation);
+        assert!(!app.cityos_submission_frozen(), "no durable install was attempted");
+        assert_eq!(app.lib.as_ref().unwrap().load_checkpoint(&file).unwrap().to_json().unwrap(), persisted);
+    }
+
+    #[test]
+    fn installed_reviewed_checkpoint_updates_observation_and_does_not_autosave_its_projection() {
+        let (_root, mut app) = saved_app();
+        let next = reviewed(&app.doc);
+        assert!(matches!(<App as EditorHost>::install_reviewed_baseline(&mut app, next).unwrap(), BaselineInstall::Installed));
+        let library = app.lib.clone().unwrap();
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let checkpoint = library.load_checkpoint(&file).unwrap();
+        let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint).unwrap();
+        assert_eq!(app.autosave.saved_checkpoint_fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(app.autosave.saved_history_hash, Some(crate::home::Autosave::history_hash(&checkpoint.history).unwrap()));
+        assert!(app.flush_autosave());
+        assert_eq!(desigma_library::checkpoint_fingerprint(&library.load_checkpoint(&file).unwrap()).unwrap(), fingerprint);
     }
 
     #[test]

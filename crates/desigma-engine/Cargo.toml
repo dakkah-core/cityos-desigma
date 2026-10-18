@@ -1,0 +1,10 @@
+[package]
+name = "desigma-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+desigma-doc.workspace = true
+desigma-render.workspace = true
+unicode-segmentation = "1"

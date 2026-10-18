@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/desigma-doc",
+    "crates/desigma-engine",
     "crates/desigma-render",
     "crates/desigma-fonts",
     "crates/desigma-fig",
@@ -24,6 +25,7 @@ repository = "https://github.com/deepfounder-ai/desigma"
 
 [workspace.dependencies]
 desigma-doc = { path = "crates/desigma-doc" }
+desigma-engine = { path = "crates/desigma-engine" }
 desigma-render = { path = "crates/desigma-render" }
 desigma-fig = { path = "crates/desigma-fig" }
 desigma-library = { path = "crates/desigma-library" }

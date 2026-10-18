@@ -123,10 +123,25 @@ struct PendingSave {
     required_pins: Option<Vec<String>>,
 }
 
-/// Serialises manifest read-modify-write cycles within the process (the app saves
-/// thumbnails on a background thread while the UI thread keeps editing the index).
-pub(crate) fn write_lock() -> MutexGuard<'static, ()> {
-    WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+/// Release the OS handle before admitting the next process-local writer.
+pub(crate) struct StorageGuard {
+    _file: std::fs::File,
+    _process: MutexGuard<'static, ()>,
+}
+
+/// Lock order: submission mutex (when needed), process writer, root OS lock,
+/// then versions/recovery mutexes. Internal `_locked` helpers never reacquire
+/// this guard. The stable file is outside project/version/trash directories.
+pub(crate) fn write_lock(library: &Library) -> Result<StorageGuard> {
+    let process = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Do not create the parent: a late thumbnail must not resurrect a removed root.
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .open(library.path(".storage.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(StorageGuard { _file: file, _process: process }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LibraryError::StorageBusy),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
 }
 
 /// Writes `bytes` to `path` via a temporary file in the same directory, so a
@@ -171,8 +186,24 @@ fn replace_atomic(source: &Path, target: &Path) -> std::io::Result<()> {
         fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
     }
     let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
-        let mut value: Vec<_> = path.as_os_str().encode_wide().collect();
-        if value.contains(&0) { return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in persistence path")); }
+        use std::path::{Component, Prefix};
+        if path.as_os_str().encode_wide().any(|unit| unit == 0) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in persistence path"));
+        }
+        // std::fs handles long paths when creating the temporary file. Use the
+        // same extended path form for the native replacement call, including
+        // when only the unique temporary suffix crosses MAX_PATH.
+        let absolute = std::path::absolute(path)?;
+        let units: Vec<_> = absolute.as_os_str().encode_wide().collect();
+        let mut value: Vec<u16> = match absolute.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _) => units,
+                Prefix::Disk(_) => r"\\?\".encode_utf16().chain(units).collect(),
+                Prefix::UNC(_, _) => r"\\?\UNC\".encode_utf16().chain(units.into_iter().skip(2)).collect(),
+                _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Filesystem persistence path required")),
+            },
+            _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Absolute persistence path required")),
+        };
         value.push(0);
         Ok(value)
     };
@@ -206,7 +237,11 @@ thread_local! {
     static SAVE_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     static SAVE_FAULT_REPEATS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SAVE_EXIT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static SAVE_HOOK: std::cell::RefCell<Option<SaveHook>> = const { std::cell::RefCell::new(None) };
 }
+
+#[cfg(test)]
+type SaveHook = (&'static str, Box<dyn FnOnce()>);
 
 #[cfg(test)]
 pub(crate) fn inject_save_fault(phase: &'static str, repeats: usize) {
@@ -220,6 +255,11 @@ pub(crate) fn exit_during_save(phase: &'static str) {
 }
 
 fn save_fault(_phase: &str) -> Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = SAVE_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) { slot.take() } else { None }
+    }) { hook.1(); }
     #[cfg(test)]
     if SAVE_EXIT.with(|fault| fault.get() == Some(_phase)) { std::process::exit(92); }
     #[cfg(test)]
@@ -304,7 +344,8 @@ impl Library {
         self.path("trash").join(id)
     }
 
-    fn load_manifest(&self, id: &str) -> Result<Manifest> {
+    /// Caller holds the root/process storage guard, including during recovery.
+    fn load_manifest_locked(&self, id: &str) -> Result<Manifest> {
         let _recovery=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         self.recover_project_save(id)?;
         let p = self.project_dir(id).join(MANIFEST);
@@ -457,7 +498,7 @@ impl Library {
     }
 
     pub(crate) fn save_checkpoint_payloads(&self, id: &str, checkpoint: &DocumentCheckpoint, payloads: BTreeMap<String, Vec<u8>>) -> Result<()> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         self.save_checkpoint_payloads_locked(id, checkpoint, payloads)
     }
 
@@ -470,14 +511,14 @@ impl Library {
             return Err(LibraryError::Invalid("Checkpoint dependency closure mismatch".into()));
         }
         self.check_checkpoint_lineage_locked(id, checkpoint)?;
-        let (mut manifest, i) = self.find_file(id)?;
+        let (mut manifest, i) = self.find_file_locked(id)?;
         let now = now_ms();
         manifest.files[i].modified = now;
         manifest.project.modified = now;
         self.commit_document_state(id, &checkpoint.document, Some(checkpoint_json), payloads, manifest)
     }
 
-    pub(crate) fn recover_pending_saves(&self)->Result<()> {
+    pub(crate) fn recover_pending_saves_locked(&self)->Result<()> {
         let projects=self.path("projects");
         if !projects.exists(){return Ok(());}
         for entry in std::fs::read_dir(projects)?{let entry=entry?;if entry.file_type()?.is_dir(){let id=entry.file_name().to_string_lossy().into_owned();let _guard=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());self.recover_project_save(&id)?;}}
@@ -485,12 +526,11 @@ impl Library {
     }
 
     /// Finds the manifest holding `file` and the file's index in it.
-    fn find_file(&self, file: &str) -> Result<(Manifest, usize)> {
-        for p in self.list_projects() {
-            if let Ok(m) = self.load_manifest(&p.id) {
-                if let Some(i) = m.files.iter().position(|f| f.id == file) {
-                    return Ok((m, i));
-                }
+    fn find_file_locked(&self, file: &str) -> Result<(Manifest, usize)> {
+        for p in self.list_projects_locked()? {
+            let m = self.load_manifest_locked(&p.id)?;
+            if let Some(i) = m.files.iter().position(|f| f.id == file) {
+                return Ok((m, i));
             }
         }
         Err(LibraryError::NotFound(format!("file {file}")))
@@ -498,26 +538,47 @@ impl Library {
 
     // ------------------------------------------------------------ projects
 
-    /// All projects, oldest first.
+    /// All projects, oldest first. Use `try_list_projects` to distinguish busy
+    /// or damaged storage from an empty library (legacy convenience API).
     pub fn list_projects(&self) -> Vec<Project> {
-        let Ok(rd) = std::fs::read_dir(self.path("projects")) else { return vec![] };
-        let mut out: Vec<Project> = rd
-            .flatten()
-            .filter_map(|e| {
-                let id = e.file_name().to_string_lossy().into_owned();
-                self.load_manifest(&id).ok().map(|m| m.project)
-            })
-            .collect();
+        self.try_list_projects().unwrap_or_default()
+    }
+
+    /// Recover and read a consistent project catalogue, preserving busy/errors.
+    pub fn try_list_projects(&self) -> Result<Vec<Project>> {
+        let _guard = write_lock(self)?;
+        self.list_projects_locked()
+    }
+
+    fn list_projects_locked(&self) -> Result<Vec<Project>> {
+        let rd = match std::fs::read_dir(self.path("projects")) {
+            Ok(rd) => rd,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut out = Vec::new();
+        for entry in rd {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let id = entry.file_name().to_string_lossy().into_owned();
+                out.push(self.load_manifest_locked(&id)?.project);
+            }
+        }
         out.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.name.cmp(&b.name)));
-        out
+        Ok(out)
     }
 
     pub fn project(&self, id: &str) -> Result<Project> {
-        Ok(self.load_manifest(id)?.project)
+        let _guard = write_lock(self)?;
+        Ok(self.load_manifest_locked(id)?.project)
     }
 
     pub fn create_project(&self, name: &str) -> Result<Project> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
+        self.create_project_locked(name)
+    }
+
+    fn create_project_locked(&self, name: &str) -> Result<Project> {
         let name = clean_name(name, "project")?;
         let now = now_ms();
         let project = Project { id: new_id(), name, folders: vec![], created: now, modified: now };
@@ -526,9 +587,9 @@ impl Library {
     }
 
     pub fn rename_project(&self, id: &str, name: &str) -> Result<()> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         let name = clean_name(name, "project")?;
-        let mut m = self.load_manifest(id)?;
+        let mut m = self.load_manifest_locked(id)?;
         m.project.name = name;
         m.project.modified = now_ms();
         self.save_manifest(&m)
@@ -536,8 +597,8 @@ impl Library {
 
     /// Moves the whole project to the trash (it can be restored).
     pub fn delete_project(&self, id: &str) -> Result<()> {
-        let _guard = write_lock();
-        let m = self.load_manifest(id)?;
+        let _guard = write_lock(self)?;
+        let m = self.load_manifest_locked(id)?;
         let dir = self.trash_dir(id);
         std::fs::create_dir_all(&dir)?;
         let item = TrashItem {
@@ -559,9 +620,9 @@ impl Library {
     // ------------------------------------------------------------ folders
 
     pub fn create_folder(&self, project: &str, parent: Option<&str>, name: &str) -> Result<Folder> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         let name = clean_name(name, "folder")?;
-        let mut m = self.load_manifest(project)?;
+        let mut m = self.load_manifest_locked(project)?;
         if let Some(p) = parent {
             if !m.project.folders.iter().any(|f| f.id == p) {
                 return Err(LibraryError::NotFound(format!("folder {p}")));
@@ -575,9 +636,9 @@ impl Library {
     }
 
     pub fn rename_folder(&self, project: &str, folder: &str, name: &str) -> Result<()> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         let name = clean_name(name, "folder")?;
-        let mut m = self.load_manifest(project)?;
+        let mut m = self.load_manifest_locked(project)?;
         let f = m.project.folders.iter_mut().find(|f| f.id == folder).ok_or_else(|| LibraryError::NotFound(format!("folder {folder}")))?;
         f.name = name;
         self.save_manifest(&m)
@@ -585,8 +646,8 @@ impl Library {
 
     /// Re-parents a folder (`None` = top level). A folder cannot move into itself or its own subtree.
     pub fn move_folder(&self, project: &str, folder: &str, new_parent: Option<&str>) -> Result<()> {
-        let _guard = write_lock();
-        let mut m = self.load_manifest(project)?;
+        let _guard = write_lock(self)?;
+        let mut m = self.load_manifest_locked(project)?;
         if !m.project.folders.iter().any(|f| f.id == folder) {
             return Err(LibraryError::NotFound(format!("folder {folder}")));
         }
@@ -610,20 +671,81 @@ impl Library {
 
     // ------------------------------------------------------------ files
 
-    /// Every file in every project.
+    /// Every file in every project. Use `try_all_files` to preserve busy/errors.
     pub fn all_files(&self) -> Vec<FileEntry> {
-        self.list_projects().iter().filter_map(|p| self.load_manifest(&p.id).ok()).flat_map(|m| m.files).collect()
+        self.try_all_files().unwrap_or_default()
+    }
+
+    pub fn try_all_files(&self) -> Result<Vec<FileEntry>> {
+        let _guard = write_lock(self)?;
+        let mut files = Vec::new();
+        for project in self.list_projects_locked()? {
+            files.extend(self.load_manifest_locked(&project.id)?.files);
+        }
+        Ok(files)
     }
 
     /// Files of one project; with `folder` only that folder's direct children (`Some(None)` = top level).
     pub fn files_in(&self, project: &str, folder: Option<Option<&str>>) -> Result<Vec<FileEntry>> {
-        let m = self.load_manifest(project)?;
+        let _guard = write_lock(self)?;
+        let m = self.load_manifest_locked(project)?;
         Ok(m.files.into_iter().filter(|f| folder.is_none_or(|want| f.folder.as_deref() == want)).collect())
     }
 
     pub fn file(&self, id: &str) -> Result<FileEntry> {
-        let (m, i) = self.find_file(id)?;
+        let _guard = write_lock(self)?;
+        let (m, i) = self.find_file_locked(id)?;
         Ok(m.files[i].clone())
+    }
+
+    /// Resolve a selected path to its existing managed identity, without loading
+    /// it as an external document. Missing or unindexed files return `None`.
+    /// Recovery and catalogue inspection retain the same root/process guard.
+    pub fn file_at_path(&self, path: &Path) -> Result<Option<FileEntry>> {
+        let _guard = write_lock(self)?;
+        let selected = match std::fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !selected.is_file() { return Err(LibraryError::Invalid("A regular document file is required".into())); }
+        let root = std::fs::canonicalize(self.root())?;
+        let entries = match std::fs::read_dir(self.path("projects")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut found = None;
+        let mut ids = BTreeSet::new();
+        for entry in entries {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() { return Err(LibraryError::Invalid("Managed project paths cannot be links".into())); }
+            if !kind.is_dir() { continue; }
+            let project = entry.file_name().into_string().map_err(|_| LibraryError::Invalid("Invalid project path".into()))?;
+            crate::validate_id(&project)?;
+            let manifest = self.load_manifest_locked(&project)?;
+            if manifest.project.id != project { return Err(LibraryError::Invalid("Project manifest identity does not match its path".into())); }
+            for file in manifest.files {
+                crate::validate_id(&file.id)?;
+                if file.project != project || !ids.insert(file.id.clone()) {
+                    return Err(LibraryError::Invalid("Invalid or duplicate managed file identity".into()));
+                }
+                let owned = match std::fs::canonicalize(self.file_path(&project, &file.id)) {
+                    Ok(path) => path,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if !owned.starts_with(root.join("projects").join(&project).join("files")) || !owned.is_file() {
+                    return Err(LibraryError::Invalid("Managed document path escapes its project files".into()));
+                }
+                if selected == owned || cfg!(windows) && selected.to_string_lossy().eq_ignore_ascii_case(&owned.to_string_lossy()) {
+                    if found.is_some() { return Err(LibraryError::Invalid("Selected path has multiple managed identities".into())); }
+                    found = Some(file);
+                }
+            }
+        }
+        Ok(found)
     }
 
     pub fn create_file(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document) -> Result<FileEntry> {
@@ -644,9 +766,13 @@ impl Library {
     }
 
     pub(crate) fn create_file_state(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>) -> Result<FileEntry> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
+        self.create_file_state_locked(project, folder, name, doc, checkpoint)
+    }
+
+    pub(crate) fn create_file_state_locked(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>) -> Result<FileEntry> {
         let name = clean_name(name, "file")?;
-        let mut m = self.load_manifest(project)?;
+        let mut m = self.load_manifest_locked(project)?;
         if let Some(f) = folder {
             if !m.project.folders.iter().any(|x| x.id == f) {
                 return Err(LibraryError::NotFound(format!("folder {f}")));
@@ -676,11 +802,11 @@ impl Library {
 
     /// Overwrites the file's contents atomically and bumps its modified time.
     pub fn save_file(&self, id: &str, doc: &Document) -> Result<()> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         if self.load_checkpoint_state_locked(id)?.history.baseline_id().is_some() {
             return Err(LibraryError::CheckpointConflict(id.into()));
         }
-        let (mut m, i) = self.find_file(id)?;
+        let (mut m, i) = self.find_file_locked(id)?;
         let now = now_ms();
         m.files[i].modified = now;
         m.project.modified = now;
@@ -691,13 +817,13 @@ impl Library {
     /// has no field for it). Parses the file without building a document, so it is cheap enough
     /// to call once per file while listing.
     pub fn file_kind(&self, id: &str) -> Result<DocumentKind> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         #[derive(Deserialize)]
         struct Probe {
             #[serde(default)]
             kind: DocumentKind,
         }
-        let (m, _) = self.find_file(id)?;
+        let (m, _) = self.find_file_locked(id)?;
         let bytes = std::fs::read(self.file_path(&m.project.id, id))?;
         if serde_json::from_slice::<serde_json::Value>(&bytes)?.get("schemaVersion").is_some(){
             return Ok(Document::from_json(&String::from_utf8_lossy(&bytes))?.kind);
@@ -706,19 +832,19 @@ impl Library {
     }
 
     pub fn load_file(&self, id: &str) -> Result<Document> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         self.load_file_locked(id)
     }
 
     pub(crate) fn load_file_locked(&self, id: &str) -> Result<Document> {
-        let (m, _) = self.find_file(id)?;
+        let (m, _) = self.find_file_locked(id)?;
         let text = std::fs::read_to_string(self.file_path(&m.project.id, id))?;
         Ok(Document::from_json(&text)?)
     }
 
     fn update_file(&self, id: &str, f: impl FnOnce(&mut FileEntry)) -> Result<()> {
-        let _guard = write_lock();
-        let (mut m, i) = self.find_file(id)?;
+        let _guard = write_lock(self)?;
+        let (mut m, i) = self.find_file_locked(id)?;
         f(&mut m.files[i]);
         self.save_manifest(&m)
     }
@@ -737,38 +863,40 @@ impl Library {
         self.update_file(id, |e| e.starred = starred)
     }
 
+    /// Duplicate an ordinary checkpoint. Bound CityOS identities require an
+    /// explicit successor contract and cannot become eligible through a copy.
     pub fn duplicate_file(&self, id: &str) -> Result<FileEntry> {
-        let _guard = write_lock();
-        let (mut m, i) = self.find_file(id)?;
+        let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = write_lock(self)?;
+        let (m, i) = self.find_file_locked(id)?;
         let src = m.files[i].clone();
-        let now = now_ms();
-        let mut new = FileEntry {
-            id: new_id(),
-            name: format!("{} (copy)", src.name),
-            created: now,
-            modified: now,
-            opened: now,
-            starred: false,
-            thumbnail: None,
-            ..src.clone()
-        };
-        std::fs::copy(self.file_path(&src.project, &src.id), self.file_path(&src.project, &new.id))?;
+        let checkpoint = self.load_checkpoint_locked(id)?;
+        let states = std::iter::once((&checkpoint.document, &checkpoint.history))
+            .chain(checkpoint.retained.iter().map(|state| (&state.document, &state.history)));
+        if states.flat_map(|(document, history)| std::iter::once(document).chain(history.retained_documents()))
+            .any(|document| document.cityos.is_some()) {
+            return Err(LibraryError::Invalid("Bound CityOS documents cannot be duplicated without an explicit successor contract".into()));
+        }
+        self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
+        let mut new = self.create_file_state_locked(&src.project, src.folder.as_deref(), &format!("{} (copy)", src.name),
+            &checkpoint.document, Some((checkpoint.to_json()?, BTreeMap::new())))?;
+        // The document, both history stacks and retained archives are durable
+        // before best-effort presentation work. Thumbnail failure cannot undo or
+        // orphan that primary generation or replace its manifest with an old one.
         if let Some(t) = &src.thumbnail {
-            let rel = Self::thumb_rel(&src.project, &new.id);
-            if std::fs::copy(self.path(t), self.path(&rel)).is_ok() {
-                new.thumbnail = Some(rel);
+            if let Ok(png) = std::fs::read(self.path(t)) {
+                if self.set_thumbnail_locked(&new.id, &png, || {}).is_ok() {
+                    new.thumbnail = Some(Self::thumb_rel(&src.project, &new.id));
+                }
             }
         }
-        m.files.push(new.clone());
-        m.project.modified = now;
-        self.save_manifest(&m)?;
         Ok(new)
     }
 
     /// Moves a file to another project and/or folder.
     pub fn move_file(&self, id: &str, project: &str, folder: Option<&str>) -> Result<()> {
-        let _guard = write_lock();
-        let (mut src, i) = self.find_file(id)?;
+        let _guard = write_lock(self)?;
+        let (mut src, i) = self.find_file_locked(id)?;
         if src.project.id == project {
             if let Some(f) = folder {
                 if !src.project.folders.iter().any(|x| x.id == f) {
@@ -778,7 +906,7 @@ impl Library {
             src.files[i].folder = folder.map(str::to_string);
             return self.save_manifest(&src);
         }
-        let mut dst = self.load_manifest(project)?;
+        let mut dst = self.load_manifest_locked(project)?;
         if let Some(f) = folder {
             if !dst.project.folders.iter().any(|x| x.id == f) {
                 return Err(LibraryError::NotFound(format!("folder {f}")));
@@ -815,8 +943,12 @@ impl Library {
     }
 
     fn set_thumbnail_before_write(&self, id: &str, png: &[u8], before_write: impl FnOnce()) -> Result<()> {
-        let _guard = write_lock();
-        let (mut m, i) = self.find_file(id)?;
+        let _guard = write_lock(self)?;
+        self.set_thumbnail_locked(id, png, before_write)
+    }
+
+    fn set_thumbnail_locked(&self, id: &str, png: &[u8], before_write: impl FnOnce()) -> Result<()> {
+        let (mut m, i) = self.find_file_locked(id)?;
         before_write();
         let rel = Self::thumb_rel(&m.project.id, id);
         // A delayed renderer must not recreate a deleted/moved project from its
@@ -882,8 +1014,8 @@ impl Library {
 
     /// Moves a file to the trash.
     pub fn trash_file(&self, id: &str) -> Result<()> {
-        let _guard = write_lock();
-        let (mut m, i) = self.find_file(id)?;
+        let _guard = write_lock(self)?;
+        let (mut m, i) = self.find_file_locked(id)?;
         let entry = m.files[i].clone();
         let dir = self.trash_dir(id);
         std::fs::create_dir_all(&dir)?;
@@ -906,25 +1038,42 @@ impl Library {
         self.save_manifest(&m)
     }
 
-    /// Everything in the trash, most recently trashed first.
+    /// Everything in the trash. Use `try_list_trash` to preserve busy/errors.
     pub fn list_trash(&self) -> Vec<TrashItem> {
-        let Ok(rd) = std::fs::read_dir(self.path("trash")) else { return vec![] };
+        self.try_list_trash().unwrap_or_default()
+    }
+
+    pub fn try_list_trash(&self) -> Result<Vec<TrashItem>> {
+        let _guard = write_lock(self)?;
+        self.list_trash_locked()
+    }
+
+    fn list_trash_locked(&self) -> Result<Vec<TrashItem>> {
+        let rd = match std::fs::read_dir(self.path("trash")) {
+            Ok(rd) => rd,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         let mut v: Vec<TrashItem> =
             rd.flatten().filter_map(|e| std::fs::read_to_string(e.path().join(TRASH_MANIFEST)).ok()).filter_map(|t| serde_json::from_str(&t).ok()).collect();
         v.sort_by_key(|t| std::cmp::Reverse(t.trashed));
-        v
+        Ok(v)
     }
 
     /// Restores a trashed file into its original project (and folder, if it still exists).
     pub fn restore_file(&self, id: &str) -> Result<FileEntry> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
+        self.restore_file_locked(id)
+    }
+
+    fn restore_file_locked(&self, id: &str) -> Result<FileEntry> {
         let dir = self.trash_dir(id);
         let item: TrashItem =
             serde_json::from_str(&std::fs::read_to_string(dir.join(TRASH_MANIFEST)).map_err(|_| LibraryError::NotFound(format!("trashed file {id}")))?)?;
         let (Some(project), Some(mut entry)) = (item.project.clone(), item.entry.clone()) else {
             return Err(LibraryError::Invalid("Not a trashed file".into()));
         };
-        let mut m = self.load_manifest(&project).map_err(|_| {
+        let mut m = self.load_manifest_locked(&project).map_err(|_| {
             LibraryError::Invalid(format!("Its project \"{}\" is not available; restore the project first", item.project_name.unwrap_or_default()))
         })?;
         if entry.folder.as_ref().is_some_and(|f| !m.project.folders.iter().any(|x| &x.id == f)) {
@@ -952,7 +1101,11 @@ impl Library {
     }
 
     pub fn restore_project(&self, id: &str) -> Result<Project> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
+        self.restore_project_locked(id)
+    }
+
+    fn restore_project_locked(&self, id: &str) -> Result<Project> {
         let dir = self.trash_dir(id);
         if !dir.join("project").exists() {
             return Err(LibraryError::NotFound(format!("trashed project {id}")));
@@ -963,21 +1116,22 @@ impl Library {
         std::fs::create_dir_all(self.path("projects"))?;
         std::fs::rename(dir.join("project"), self.project_dir(id))?;
         let _ = std::fs::remove_dir_all(dir);
-        self.project(id)
+        Ok(self.load_manifest_locked(id)?.project)
     }
 
     /// Restores whatever the trash item `id` is.
     pub fn restore(&self, id: &str) -> Result<()> {
-        match self.list_trash().into_iter().find(|t| t.id == id) {
-            Some(t) if t.kind == TrashKind::Project => self.restore_project(id).map(|_| ()),
-            Some(_) => self.restore_file(id).map(|_| ()),
+        let _guard = write_lock(self)?;
+        match self.list_trash_locked()?.into_iter().find(|t| t.id == id) {
+            Some(t) if t.kind == TrashKind::Project => self.restore_project_locked(id).map(|_| ()),
+            Some(_) => self.restore_file_locked(id).map(|_| ()),
             None => Err(LibraryError::NotFound(format!("trash item {id}"))),
         }
     }
 
     /// Permanently deletes everything in the trash. This is the only hard delete in the library.
     pub fn empty_trash(&self) -> Result<()> {
-        let _guard = write_lock();
+        let _guard = write_lock(self)?;
         let _versions = crate::versions::lock();
         let dir = self.path("trash");
         if dir.exists() {
@@ -992,16 +1146,86 @@ impl Library {
     /// Returns the created file; later launches (even after the project was
     /// deleted) do nothing.
     pub fn seed_first_run(&self, demo: impl FnOnce() -> Document) -> Result<Option<FileEntry>> {
+        let _guard = write_lock(self)?;
         let marker = self.path(SEED_MARKER);
-        if marker.exists() || !self.list_projects().is_empty() {
+        if marker.exists() || !self.list_projects_locked()?.is_empty() {
             return Ok(None);
         }
-        let project = self.create_project(SEED_PROJECT)?;
+        let project = self.create_project_locked(SEED_PROJECT)?;
         let mut doc = demo();
         doc.name = "Welcome".into();
-        let entry = self.create_file(&project.id, None, "Welcome", &doc)?;
+        let entry = self.create_file_state_locked(&project.id, None, "Welcome", &doc, None)?;
         write_atomic(&marker, b"1")?;
         Ok(Some(entry))
+    }
+}
+
+/// Shared subprocess barriers for storage regressions. Readiness, rather than a
+/// scheduling delay, proves that the child is inside the transaction under test.
+#[cfg(test)]
+pub(crate) mod storage_test {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    pub(crate) struct Worker {
+        child: std::process::Child,
+        root: PathBuf,
+    }
+
+    impl Worker {
+        pub(crate) fn start(root: &Path, worker: &str, mode: &str, file: &str) -> Self {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", worker, "--ignored", "--test-threads=1"])
+                .env("DESIGMA_STORAGE_TEST_ROOT", root)
+                .env("DESIGMA_STORAGE_TEST_MODE", mode)
+                .env("DESIGMA_STORAGE_TEST_FILE", file)
+                .spawn().unwrap();
+            let mut worker = Self { child, root: root.to_owned() };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !root.join("storage-test-ready").exists() {
+                assert!(worker.child.try_wait().unwrap().is_none(), "storage worker exited before its barrier");
+                assert!(Instant::now() < deadline, "storage worker did not reach its barrier");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            worker
+        }
+
+        pub(crate) fn release_and_wait(&mut self, code: i32) {
+            std::fs::write(self.root.join("storage-test-release"), b"release").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    assert_eq!(status.code(), Some(code));
+                    return;
+                }
+                assert!(Instant::now() < deadline, "storage worker did not exit after release");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    pub(crate) fn pause(root: &Path) {
+        std::fs::write(root.join("storage-test-ready"), b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !root.join("storage-test-release").exists() {
+            assert!(Instant::now() < deadline, "parent did not release storage worker");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub(crate) fn busy<T>(result: Result<T>) {
+        match result {
+            Err(LibraryError::StorageBusy) => {}
+            Err(error) => panic!("expected explicit storage contention, got {error}"),
+            Ok(_) => panic!("operation entered another process's storage transaction"),
+        }
     }
 }
 
@@ -1009,6 +1233,88 @@ impl Library {
 mod tests {
     use super::*;
     use desigma_doc::{Node, Rect};
+
+    #[test]
+    #[ignore = "subprocess helper for cross_process_checkpoint_storage_exclusion"]
+    fn checkpoint_storage_worker() {
+        let Some(root) = std::env::var_os("DESIGMA_STORAGE_TEST_ROOT") else { return };
+        let file = std::env::var("DESIGMA_STORAGE_TEST_FILE").unwrap();
+        let mode = std::env::var("DESIGMA_STORAGE_TEST_MODE").unwrap();
+        let library = Library::open(root).unwrap();
+        let (phase, crash) = match mode.as_str() {
+            "before-journal" => ("before-journal", false),
+            "journal" => ("journal", true),
+            "document" => ("document", true),
+            _ => panic!("unexpected storage worker mode"),
+        };
+        let mut checkpoint = library.load_checkpoint(&file).unwrap();
+        checkpoint.document.name = "child committed".into();
+        checkpoint.history.exec(&mut checkpoint.document, desigma_doc::Command::SetComments { comments: vec![] }).unwrap();
+        let barrier = library.root().to_owned();
+        SAVE_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(move || {
+            storage_test::pause(&barrier);
+            if crash { std::process::exit(94); }
+        }))));
+        library.save_checkpoint_reconciled(&file, &checkpoint).unwrap();
+        std::process::exit(93);
+    }
+
+    #[test]
+    fn cross_process_checkpoint_storage_exclusion() {
+        for mode in ["before-journal", "journal", "document"] {
+            let (temp, library) = Tmp::new();
+            let project = library.create_project("P").unwrap();
+            let checkpoint = DocumentCheckpoint::new(doc("old", 1), desigma_doc::History::default());
+            let file = library.create_file_checkpoint(&project.id, None, "F", &checkpoint).unwrap();
+            let version = library.save_version(&file.id, &checkpoint.document, Some("Keep".into()), false).unwrap();
+            let mut worker = storage_test::Worker::start(&temp.0, "store::tests::checkpoint_storage_worker", mode, &file.id);
+            let paths = [library.project_dir(&project.id).join(MANIFEST), library.file_path(&project.id, &file.id),
+                library.checkpoint_path(&file.id).unwrap(), library.project_dir(&project.id).join(".save.pending.json")];
+            let before: Vec<_> = paths.iter().map(std::fs::read).collect();
+            let fingerprint = crate::checkpoint_fingerprint(&checkpoint).unwrap();
+            storage_test::busy(library.save_file_with_history_expected(&file.id, &checkpoint.document, &checkpoint.history, &fingerprint));
+            storage_test::busy(library.save_checkpoint_reconciled_expected(&file.id, &checkpoint, &fingerprint));
+            storage_test::busy(library.create_folder(&project.id, None, "Concurrent folder"));
+            storage_test::busy(library.duplicate_file(&file.id));
+            storage_test::busy(library.create_file(&project.id, None, "Concurrent file", &doc("other", 0)));
+            storage_test::busy(library.star(&file.id, true));
+            storage_test::busy(library.set_thumbnail(&file.id, b"png"));
+            storage_test::busy(library.load_file(&file.id));
+            storage_test::busy(library.load_checkpoint(&file.id));
+            storage_test::busy(library.load_checkpoint_for_recovery(&file.id));
+            storage_test::busy(library.files_in(&project.id, None));
+            storage_test::busy(library.file(&file.id));
+            storage_test::busy(library.file_at_path(&library.file_path(&project.id, &file.id)));
+            storage_test::busy(library.project(&project.id));
+            storage_test::busy(library.try_list_projects());
+            storage_test::busy(library.try_all_files());
+            storage_test::busy(library.try_list_trash());
+            storage_test::busy(library.export_checkpoint(&file.id));
+            storage_test::busy(library.cityos_retention_roots());
+            storage_test::busy(library.try_list_versions(&file.id));
+            storage_test::busy(library.load_version(&file.id, version.n));
+            storage_test::busy(library.save_version(&file.id, &checkpoint.document, None, false));
+            storage_test::busy(Library::open(&temp.0));
+            for (path, bytes) in paths.iter().zip(before) {
+                match bytes {
+                    Ok(bytes) => assert_eq!(std::fs::read(path).unwrap(), bytes, "busy operation changed {}", path.display()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => assert!(!path.exists()),
+                    Err(error) => panic!("cannot snapshot {}: {error}", path.display()),
+                }
+            }
+            worker.release_and_wait(if mode == "before-journal" { 93 } else { 94 });
+            let reopened = Library::open(&temp.0).unwrap();
+            let saved = reopened.load_checkpoint(&file.id).unwrap();
+            assert_eq!(saved.document.name, "child committed");
+            assert!(saved.history.can_undo());
+            reopened.create_folder(&project.id, None, "Concurrent folder").unwrap();
+            reopened.star(&file.id, true).unwrap();
+            assert_eq!(reopened.project(&project.id).unwrap().folders.len(), 1);
+            assert!(reopened.file(&file.id).unwrap().starred);
+            assert_eq!(reopened.load_checkpoint(&file.id).unwrap().to_json().unwrap(), saved.to_json().unwrap());
+            assert!(!library.project_dir(&project.id).join(".save.pending.json").exists());
+        }
+    }
 
     struct Tmp(PathBuf);
     impl Tmp {
@@ -1042,6 +1348,193 @@ mod tests {
             semantic_base: serde_json::json!({}), dependency_pins: pins, occurrences: BTreeMap::new(), exchange_v2: None, exchange_v3: None,
         });
         DocumentCheckpoint::new(document, desigma_doc::History::default())
+    }
+
+    #[test]
+    fn file_at_path_resolves_owned_identity_and_leaves_unindexed_native_paths_external() {
+        let (temp, library) = Tmp::new();
+        let loose = temp.0.join("loose.desigma");
+        std::fs::write(&loose, doc("unindexed", 0).to_json().unwrap()).unwrap();
+        assert!(library.file_at_path(&loose).unwrap().is_none(), "an existing root need not contain any managed files");
+        assert!(library.file_at_path(&temp.0.join("missing.desigma")).unwrap().is_none());
+        let project = library.create_project("P").unwrap();
+        let file = library.create_file_checkpoint(&project.id, None, "Managed", &cas_checkpoint(Vec::new())).unwrap();
+        let native = library.file_path(&project.id, &file.id);
+        let alias = native.parent().unwrap().join("..").join("files").join(native.file_name().unwrap());
+        let original = std::fs::read(library.checkpoint_path(&file.id).unwrap()).unwrap();
+        assert_eq!(library.file_at_path(&native).unwrap(), Some(file.clone()));
+        assert_eq!(library.file_at_path(&alias).unwrap(), Some(file.clone()));
+        assert!(library.file_at_path(&loose).unwrap().is_none());
+        assert_eq!(std::fs::read(library.checkpoint_path(&file.id).unwrap()).unwrap(), original);
+        // Malformed manifest IDs must error rather than turning a managed open
+        // into an external load through a path assembled from untrusted fields.
+        let manifest = library.project_dir(&project.id).join(MANIFEST);
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        value["files"][0]["id"] = serde_json::json!("../escape");
+        std::fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(library.file_at_path(&native), Err(LibraryError::Invalid(_))));
+    }
+
+    fn ordinary_duplicate_checkpoint() -> DocumentCheckpoint {
+        let mut document = doc("previous baseline", 1);
+        document.images.insert("archived image".into(), vec![9, 8, 7]);
+        let mut history = desigma_doc::History::default();
+        let id = document.nodes[&document.pages[0]].children[0];
+        let mut node = document.get(id).unwrap().clone();
+        node.name = "archived edit".into();
+        history.exec(&mut document, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
+        let mut checkpoint = DocumentCheckpoint::new(document, history);
+        checkpoint.install_baseline(doc("current baseline", 1));
+        checkpoint.document.images.insert("current image".into(), vec![1, 2, 3]);
+        let id = checkpoint.document.nodes[&checkpoint.document.pages[0]].children[0];
+        for name in ["first edit", "second edit"] {
+            let mut node = checkpoint.document.get(id).unwrap().clone();
+            node.name = name.into();
+            checkpoint.history.exec(&mut checkpoint.document, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
+        }
+        checkpoint.history.undo(&mut checkpoint.document).unwrap();
+        checkpoint
+    }
+
+    #[test]
+    fn duplicate_preserves_complete_ordinary_checkpoint_metadata_and_thumbnail_after_reopen() {
+        let (temp, library) = Tmp::new();
+        let project = library.create_project("P").unwrap();
+        let folder = library.create_folder(&project.id, None, "Folder").unwrap();
+        let checkpoint = ordinary_duplicate_checkpoint();
+        let source = library.create_file_checkpoint(&project.id, Some(&folder.id), "Source", &checkpoint).unwrap();
+        library.star(&source.id, true).unwrap();
+        library.set_thumbnail(&source.id, b"source png").unwrap();
+        let document_bytes = std::fs::read(library.file_path(&project.id, &source.id)).unwrap();
+        let checkpoint_bytes = std::fs::read(library.checkpoint_path(&source.id).unwrap()).unwrap();
+        let copy = library.duplicate_file(&source.id).unwrap();
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.name, "Source (copy)");
+        assert_eq!(copy.project, project.id);
+        assert_eq!(copy.folder, Some(folder.id));
+        assert!(!copy.starred);
+        assert!(copy.created > source.created);
+        assert_eq!(copy.created, copy.modified);
+        assert_eq!(copy.created, copy.opened);
+        assert_eq!(std::fs::read(library.thumbnail_path(&copy).unwrap()).unwrap(), b"source png");
+        drop(library);
+        let reopened = Library::open(&temp.0).unwrap();
+        let mut restored = reopened.load_checkpoint(&copy.id).unwrap();
+        assert_eq!(restored.to_json().unwrap(), checkpoint.to_json().unwrap());
+        assert!(restored.history.baseline_id().is_some());
+        assert!(restored.history.can_undo() && restored.history.can_redo());
+        assert_eq!(restored.retained.len(), 1);
+        assert!(restored.retained[0].history.can_undo());
+        assert_eq!(restored.retained[0].document.images["archived image"], [9, 8, 7]);
+        let id = restored.document.nodes[&restored.document.pages[0]].children[0];
+        restored.history.redo(&mut restored.document).unwrap();
+        assert_eq!(restored.document.get(id).unwrap().name, "second edit");
+        restored.history.undo(&mut restored.document).unwrap();
+        assert_eq!(restored.document.get(id).unwrap().name, "first edit");
+        assert_eq!(std::fs::read(reopened.file_path(&project.id, &source.id)).unwrap(), document_bytes);
+        assert_eq!(std::fs::read(reopened.checkpoint_path(&source.id).unwrap()).unwrap(), checkpoint_bytes);
+        assert!(reopened.file(&source.id).unwrap().starred);
+    }
+
+    #[test]
+    fn duplicate_missing_thumbnail_does_not_discard_the_durable_primary_checkpoint() {
+        let (_temp, library) = Tmp::new();
+        let project = library.create_project("P").unwrap();
+        let checkpoint = ordinary_duplicate_checkpoint();
+        let source = library.create_file_checkpoint(&project.id, None, "Source", &checkpoint).unwrap();
+        library.set_thumbnail(&source.id, b"png").unwrap();
+        let source = library.file(&source.id).unwrap();
+        std::fs::remove_file(library.thumbnail_path(&source).unwrap()).unwrap();
+        let copy = library.duplicate_file(&source.id).unwrap();
+        assert!(copy.thumbnail.is_none());
+        assert_eq!(library.load_checkpoint(&copy.id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
+        assert_eq!(library.file(&copy.id).unwrap(), copy);
+        assert_eq!(library.files_in(&project.id, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_checkpoint_faults_recover_zero_or_one_complete_copy_at_every_save_boundary() {
+        for phase in ["before-journal", "journal", "payloads", "document", "checkpoint", "manifest", "complete"] {
+            let (temp, library) = Tmp::new();
+            let project = library.create_project("P").unwrap();
+            let checkpoint = ordinary_duplicate_checkpoint();
+            let source = library.create_file_checkpoint(&project.id, None, "Source", &checkpoint).unwrap();
+            let document_bytes = std::fs::read(library.file_path(&project.id, &source.id)).unwrap();
+            let checkpoint_bytes = std::fs::read(library.checkpoint_path(&source.id).unwrap()).unwrap();
+            inject_save_fault(phase, 0);
+            assert!(library.duplicate_file(&source.id).is_err(), "{phase}");
+            drop(library);
+            let reopened = Library::open(&temp.0).unwrap();
+            let copies: Vec<_> = reopened.files_in(&project.id, None).unwrap().into_iter().filter(|file| file.id != source.id).collect();
+            if phase == "before-journal" { assert!(copies.is_empty()); }
+            else {
+                assert_eq!(copies.len(), 1, "{phase}");
+                assert_eq!(copies[0].name, "Source (copy)");
+                assert_eq!(reopened.load_checkpoint(&copies[0].id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap(), "{phase}");
+                assert_eq!(Library::open(&temp.0).unwrap().load_checkpoint(&copies[0].id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
+            }
+            assert_eq!(std::fs::read(reopened.file_path(&project.id, &source.id)).unwrap(), document_bytes);
+            assert_eq!(std::fs::read(reopened.checkpoint_path(&source.id).unwrap()).unwrap(), checkpoint_bytes);
+            assert!(!reopened.project_dir(&project.id).join(".save.pending.json").exists());
+        }
+    }
+
+    #[test]
+    fn duplicate_rejects_bound_current_retained_undo_and_redo_documents_before_creating_a_copy() {
+        for slot in ["current", "retained", "undo", "redo", "retained-undo"] {
+            let (_temp, library) = Tmp::new();
+            let project = library.create_project("P").unwrap();
+            let mut checkpoint = ordinary_duplicate_checkpoint();
+            let bound = cas_checkpoint(Vec::new()).document;
+            match slot {
+                "current" => { checkpoint.document = bound; checkpoint.history = desigma_doc::History::default(); }
+                "retained" => { checkpoint.retained[0].document = bound; checkpoint.retained[0].history = desigma_doc::History::default(); }
+                _ => {
+                    let target = if slot == "retained-undo" { &mut checkpoint.retained[0].history } else { &mut checkpoint.history };
+                    let mut history = serde_json::to_value(&*target).unwrap();
+                    history[if slot == "redo" { "redo" } else { "undo" }].as_array_mut().unwrap().push(
+                        serde_json::to_value(desigma_doc::Command::CityosInstall { document: Box::new(bound) }).unwrap());
+                    *target = serde_json::from_value(history).unwrap();
+                }
+            }
+            let source = library.create_file_checkpoint(&project.id, None, "Bound source", &checkpoint).unwrap();
+            let manifest_path = library.project_dir(&project.id).join(MANIFEST);
+            let before = std::fs::read(&manifest_path).unwrap();
+            let original = std::fs::read(library.checkpoint_path(&source.id).unwrap()).unwrap();
+            assert!(matches!(library.duplicate_file(&source.id), Err(LibraryError::Invalid(ref message)) if message.contains("successor contract")), "{slot}");
+            assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+            assert_eq!(std::fs::read(library.checkpoint_path(&source.id).unwrap()).unwrap(), original);
+            assert_eq!(library.files_in(&project.id, None).unwrap().len(), 1);
+            assert!(!library.project_dir(&project.id).join(".save.pending.json").exists());
+        }
+    }
+
+    #[test]
+    fn duplicate_cannot_shed_a_frozen_legacy_submission_file_association() {
+        let (_temp, library) = Tmp::new();
+        let project = library.create_project("P").unwrap();
+        let source = library.create_file_checkpoint(&project.id, None, "Source", &ordinary_duplicate_checkpoint()).unwrap();
+        let record = library.prepare_submission(crate::SubmissionCommand {
+            intent_id: "duplicate-intent".into(), operation_id: "duplicate-operation".into(), predecessor: None,
+            owner: "experience".into(), resource: "frame".into(),
+            scope: BTreeMap::from([("tenantId".into(), "t".into()), ("actorId".into(), "a".into())]),
+            base: desigma_doc::CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
+            expected_revision: "a".repeat(40), semantic_base: serde_json::json!({}), submitted_snapshot: serde_json::json!({}), dependency_pins: vec![],
+        }).unwrap();
+        // Independent legacy association fixture: no submitted checkpoint was
+        // retained by that format, but its original file must remain frozen.
+        let none: Option<String> = None;
+        let digest = crate::payload_digest(&serde_json::to_vec(&("cityos.submission-file.v1", &source.id, &none, &none,
+            &record.command.operation_id, &record.request_digest)).unwrap());
+        let mut stored = serde_json::to_value(&record).unwrap();
+        stored["local_file"] = serde_json::json!({"file_id":source.id,"document_id":null,"draft_id":null,"digest":digest});
+        let path = library.submission_path(&record.command.operation_id).unwrap();
+        let original = serde_json::to_vec(&stored).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        assert_eq!(library.document_submissions(&source.id).unwrap(), [record]);
+        assert!(matches!(library.duplicate_file(&source.id), Err(LibraryError::Invalid(ref message)) if message.contains("Unresolved submission")));
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert_eq!(library.files_in(&project.id, None).unwrap().len(), 1);
     }
 
     fn backdate_cas(library: &Library, hash: &str) -> SystemTime {
@@ -1384,7 +1877,7 @@ mod tests {
     #[test]
     fn interrupted_document_manifest_commit_recovers_on_reopen(){
         let (_t,lib)=Tmp::new();let project=lib.create_project("P").unwrap();let file=lib.create_file(&project.id,None,"File",&doc("before",1)).unwrap();
-        let mut manifest=lib.load_manifest(&project.id).unwrap();manifest.files[0].modified=now_ms();let pending=PendingSave{schema_version:None,file_id:file.id.clone(),document:doc("accepted-new",2).to_json().unwrap(),manifest,checkpoint:None,payloads:BTreeMap::new(),required_pins:None};
+        let mut manifest={let _guard=write_lock(&lib).unwrap();lib.load_manifest_locked(&project.id).unwrap()};manifest.files[0].modified=now_ms();let pending=PendingSave{schema_version:None,file_id:file.id.clone(),document:doc("accepted-new",2).to_json().unwrap(),manifest,checkpoint:None,payloads:BTreeMap::new(),required_pins:None};
         write_atomic(&lib.project_dir(&project.id).join(".save.pending.json"),serde_json::to_string(&pending).unwrap().as_bytes()).unwrap();
         let reopened=Library::open(lib.root()).unwrap();assert_eq!(reopened.load_file(&file.id).unwrap().name,"accepted-new");assert!(!lib.project_dir(&project.id).join(".save.pending.json").exists());
     }
@@ -1595,7 +2088,10 @@ mod tests {
         let original = std::fs::read(&path).unwrap();
         let journal = library.project_dir(&project.id).join(".save.pending.json");
         for fault in ["checkpoint", "dependency", "identity", "manifest", "future"] {
-            let mut manifest = library.load_manifest(&project.id).unwrap();
+            let mut manifest = {
+                let _guard = write_lock(&library).unwrap();
+                library.load_manifest_locked(&project.id).unwrap()
+            };
             if fault == "manifest" { manifest.files[0].project = "another-project".into(); }
             let pending = PendingSave {
                 schema_version: Some(if fault == "future" { "future".into() } else { "desigma.file-save.v2".into() }),

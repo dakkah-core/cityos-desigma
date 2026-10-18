@@ -1,10 +1,9 @@
 //! Version history of library files: automatic and named versions, viewing an old
 //! version read-only, and restoring it.
 //!
-//! Restoring replaces the document wholesale, which the command history cannot
-//! express, so the pre-restore state (document, undo stack, page) is parked in
-//! [`HistoryState::restore_undo`]; the first undo with nothing left to undo
-//! swaps it back, and the next redo swaps forward again.
+//! Restoring is one ordinary, serialized whole-document history command. Its
+//! inverse and older active history travel in the same durable checkpoint as
+//! the document; reopening retains both restore Undo and Redo.
 
 pub mod banner;
 pub mod modal;
@@ -84,10 +83,6 @@ pub struct HistoryState {
     was_pending: bool,
     /// Hash of the document as last stored as a version (or as opened).
     pub last_version_hash: u64,
-    /// The state before the last restore, for undo.
-    pub restore_undo: Option<Snapshot>,
-    /// The restored state, for redo, valid while the document still hashes to `.1`.
-    pub restore_redo: Option<(Snapshot, u64)>,
 }
 
 impl HistoryState {

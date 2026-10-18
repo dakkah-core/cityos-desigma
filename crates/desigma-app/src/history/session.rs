@@ -3,7 +3,7 @@
 use super::{Snapshot, Viewing};
 use crate::app::App;
 use crate::home::doc_hash;
-use desigma_doc::{Document, History};
+use desigma_doc::{Command, Document, History};
 
 impl App {
     fn take_snapshot(&mut self) -> Snapshot {
@@ -75,65 +75,70 @@ impl App {
                 return;
             }
         };
+        if self.doc.cityos.is_some() || old.cityos.is_some()
+            || self.history.viewing.as_ref().is_some_and(|view| view.saved.doc.cityos.is_some()) {
+            self.show_toast("Bound drafts require their reviewed baseline recovery; ordinary version restore is unavailable", true);
+            return;
+        }
         old.name = lf.name.clone();
         self.exit_version_view();
+        crate::decks::ui::flush_notes(self);
+        crate::io::ensure_page(&mut old);
         if let Err(e) = lib.save_version(&lf.id, &self.doc, None, true) {
             self.show_toast(format!("Cannot keep the current version, restore cancelled: {e}"), true);
             return;
         }
         // Persist before installing the historical projection. A failed disk write
         // must not turn a memory-only restore into a success notification.
-        if let Err(e)=lib.save_file(&lf.id,&old) {
-            self.show_toast(format!("Cannot restore; current document retained: {e}"),true);
+        let mut document = self.doc.clone();
+        let mut history = self.hist.clone();
+        if let Err(e) = history.exec(&mut document, Command::RestoreDocument { document: Box::new(old) }) {
+            self.show_toast(format!("Cannot restore; current document retained: {e}"), true);
             return;
         }
-        let before = self.take_snapshot();
-        let page = Some(before.page);
-        self.install(old, History::default(), page, vec![]);
-        self.history.restore_undo = Some(before);
-        self.history.restore_redo = None;
+        let saved = match self.persist_library_checkpoint(&document, &history) {
+            Ok(saved) => saved,
+            Err(e) => { self.show_toast(format!("Cannot restore; current document retained: {e}"),true); return; }
+        };
+        self.install(document, history, Some(self.page), vec![]);
         self.history.dirty = true;
         self.history.last_version_hash = doc_hash(&self.doc);
-        self.autosave.saved_hash=doc_hash(&self.doc);
-        self.autosave.changed_at=None;
+        self.autosave = saved;
+        self.autosave.seen_rev = self.canvas.tiles.rev();
         self.show_toast("Version restored. Undo brings the previous state back", false);
     }
 
-    /// Undo with nothing left to undo steps back over a restore.
+    /// Persist a restore transition before installing its document. Returning
+    /// true also consumes failures so the ordinary Undo path cannot bypass CAS.
     pub fn try_undo_restore(&mut self) -> bool {
-        if self.hist.can_undo() || self.history.viewing.is_some() {
-            return false;
-        }
-        let Some(snap) = self.history.restore_undo.take() else { return false };
-        if let (Some(lib),Some(lf))=(self.lib.clone(),self.lib_file.clone()) {
-            if let Err(e)=lib.save_file(&lf.id,&snap.doc){self.history.restore_undo=Some(snap);self.show_toast(format!("Cannot undo restore: {e}"),true);return false;}
-        }
-        let now = self.take_snapshot();
-        self.install(snap.doc, snap.hist, Some(snap.page), snap.selection);
-        let expected = doc_hash(&self.doc);
-        self.history.restore_redo = Some((now, expected));
-        self.autosave.saved_hash=doc_hash(&self.doc);
-        self.autosave.changed_at=None;
-        true
+        self.try_restore_history(false)
     }
 
-    /// Redo of an undone restore, while the document is still as undo left it.
+    /// Redo uses the persisted stack; a new edit clears it through normal history.
     pub fn try_redo_restore(&mut self) -> bool {
-        if self.history.viewing.is_some() {
+        self.try_restore_history(true)
+    }
+
+    fn try_restore_history(&mut self, redo: bool) -> bool {
+        if self.history.viewing.is_some() || !self.hist.next_is_document_restore(redo) {
             return false;
         }
-        let Some((snap, expected)) = self.history.restore_redo.take() else { return false };
-        if doc_hash(&self.doc) != expected {
-            return false;
+        let action = if redo { "redo" } else { "undo" };
+        let mut document = self.doc.clone();
+        let mut history = self.hist.clone();
+        let result = if redo { history.redo(&mut document) } else { history.undo(&mut document) };
+        if let Err(error) = result {
+            self.show_toast(format!("Cannot {action} restore: {error}"), true);
+            return true;
         }
-        if let (Some(lib),Some(lf))=(self.lib.clone(),self.lib_file.clone()) {
-            if let Err(e)=lib.save_file(&lf.id,&snap.doc){self.history.restore_redo=Some((snap,expected));self.show_toast(format!("Cannot redo restore: {e}"),true);return false;}
-        }
-        let before = self.take_snapshot();
-        self.install(snap.doc, snap.hist, Some(snap.page), snap.selection);
-        self.history.restore_undo = Some(before);
-        self.autosave.saved_hash=doc_hash(&self.doc);
-        self.autosave.changed_at=None;
+        let saved = if self.lib_file.is_some() {
+            match self.persist_library_checkpoint(&document, &history) {
+                Ok(saved) => Some(saved),
+                Err(error) => { self.show_toast(format!("Cannot {action} restore: {error}"), true); return true; }
+            }
+        } else { None };
+        self.install(document, history, Some(self.page), self.selection.clone());
+        if let Some(saved) = saved { self.autosave = saved; self.autosave.seen_rev = self.canvas.tiles.rev(); }
         true
     }
 }

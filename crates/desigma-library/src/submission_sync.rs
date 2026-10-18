@@ -176,7 +176,7 @@ impl Library {
     /// no owner dispatch, owner qualification, or UI activation in this method.
     pub fn prepare_submission_sync(&self, file_id: &str, accepted: &SubmissionRecord, candidate: &DocumentCheckpoint) -> Result<SubmissionSyncIntent> {
         let _submission = SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let _writer = crate::store::write_lock();
+        let _writer = crate::store::write_lock(self)?;
         crate::validate_id(file_id)?;
         let stored = self.check_sync_acceptance(accepted)?;
         let candidate_json = DocumentCheckpoint::from_json(&candidate.to_json()?)?.to_json()?;
@@ -225,7 +225,7 @@ impl Library {
         let _submission = SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         // Retain the writer lock through comparison, installation and finalization
         // so an autosave cannot invalidate the readback-to-state transition.
-        let _writer = crate::store::write_lock();
+        let _writer = crate::store::write_lock(self)?;
         let intent = self.load_submission_sync(operation_id)?;
         let (_, candidate) = intent.checkpoints()?;
         let mut stored = self.check_sync_acceptance(&intent.accepted)?;

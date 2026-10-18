@@ -473,6 +473,8 @@ fn derived_shape(doc: &Document, n: &Node, tol: f32) -> Option<Shape> {
             derived_shape(doc, &body, tol)
         }
         NodeKind::Page { .. } | NodeKind::Group | NodeKind::Text(_) | NodeKind::Unknown { .. } => None,
+        // Shared-engine model support; the full board renderer is a separate port.
+        NodeKind::BoardSection(_) | NodeKind::Table(_) | NodeKind::TableCell(_) => None,
     }
 }
 

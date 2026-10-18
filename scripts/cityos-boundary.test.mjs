@@ -93,6 +93,16 @@ test('EditorHost exposes operations without returning mutable editor state or st
   assertEditorPort(readFileSync(join(extension, 'src/editor.rs'), 'utf8'));
 });
 
+test('semantic history policy belongs to the extension over a generic core transition', () => {
+  const core = productionRust(readFileSync(join(root, 'crates/desigma-doc/src/history.rs'), 'utf8'));
+  assert.doesNotMatch(core, /\b(?:struct\s+CityosHistoryStep|fn\s+(?:prepare_cityos|commit_cityos|cityos_step_current))\b/);
+  assert.match(core, /\bpub\s+struct\s+HistoryTransition\b/);
+  assert.match(core, /\bpub\s+fn\s+commit_transition\b/);
+  const policy = productionRust(readFileSync(join(extension, 'src/history.rs'), 'utf8'));
+  assert.match(policy, /\bimpl\s+CityosHistory\s+for\s+History\b/);
+  assert.match(policy, /\.commit_transition\s*\(/);
+});
+
 test('app workspace is an alias and host adapter, without a production controller copy', () => {
   const directory = join(root, 'crates/desigma-app/src/design_workspace');
   const adapter = productionRust(readFileSync(join(directory, 'mod.rs'), 'utf8'));

@@ -218,8 +218,9 @@ fn portable_open_saves_ordinary_native_edits_and_aborts_on_native_save_failure()
         let mut app = App::new(ordinary("External"));
         app.lib = Some(lib.clone());
         let native = temp.0.join("current.desigma");
-        if fail { std::fs::create_dir(&native).unwrap(); }
-        else { io::save_path(&app.doc, &native).unwrap(); }
+        io::save_path(&app.doc, &native).unwrap();
+        app.autosave.external_fingerprint = Some(io::file_fingerprint(&native).unwrap());
+        if fail { std::fs::remove_file(&native).unwrap(); std::fs::create_dir(&native).unwrap(); }
         app.file_path = Some(native.clone());
         app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
         app.add_page();

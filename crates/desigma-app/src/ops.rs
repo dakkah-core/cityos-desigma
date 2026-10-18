@@ -10,6 +10,7 @@ use crate::layout;
 use crate::theme;
 use crate::util::*;
 use desigma_doc::*;
+use desigma_cityos::history::CityosHistory;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,27 +23,7 @@ pub enum Align {
     Bottom,
 }
 
-/// Sets size + transform of a node, applying constraints/auto-layout to its
-/// content and fixing ancestors. Shared by canvas resizing and the inspector.
-pub fn apply_resize(doc: &mut Document, ed: &mut Edit, id: NodeId, size: Vec2, transform: Affine, relayout: bool) {
-    let Some(old) = doc.get(id).map(|n| n.size) else { return };
-    if let Some(n) = ed.node(doc, id) {
-        n.size = size;
-        n.transform = transform;
-        if let NodeKind::Text(t) = &mut n.kind {
-            if t.auto_resize == TextAutoResize::WidthAndHeight {
-                t.auto_resize = TextAutoResize::None;
-            }
-        }
-    }
-    if doc.get(id).map(|n| n.kind.is_container()).unwrap_or(false) {
-        layout::apply_constraints(doc, ed, id, old, size);
-        layout::layout_node(doc, ed, id);
-    }
-    if relayout {
-        layout::relayout_up(doc, ed, id);
-    }
-}
+pub use desigma_engine::apply_resize;
 
 /// Rotates every `(node, world transform at start)` by `delta` radians about
 /// the page-space point `center`, keeping each node's parent untouched.
@@ -863,6 +844,20 @@ impl App {
     }
 
     pub fn open_path(&mut self, p: PathBuf) {
+        if p.extension().is_some_and(|extension| extension.eq_ignore_ascii_case(io::NATIVE_EXT)) {
+            if let Some(library) = self.lib.clone() {
+                let owned = crate::io::inside_library_storage(&p, library.root())
+                    .and_then(|owned| if owned {
+                        library.file_at_path(&p).map_err(|error| error.to_string()).and_then(|file|
+                            file.map(Some).ok_or_else(|| "Open this managed document through its library or version history.".into()))
+                    } else { Ok(None) });
+                match owned {
+                    Ok(Some(file)) => { self.open_library_file(&file.id); return; }
+                    Err(error) => { self.show_toast(error, true); return; }
+                    Ok(None) => {}
+                }
+            }
+        }
         // Recognition and complete validation must precede even flushing the
         // current editors. Portable checkpoints are new local library files;
         // their document, histories and payloads travel in one create journal.
@@ -891,12 +886,13 @@ impl App {
                 }
             }
         }
-        match io::load_path(&p) {
-            Ok(doc) => {
+        match io::load_path_observed(&p) {
+            Ok((doc, fingerprint)) => {
                 let name = doc.name.clone();
                 // An SVG becomes a new unsaved document, never overwritten by Save.
                 let svg = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
                 if !self.replace_document(doc, (!svg).then_some(p)){return;}
+                if !svg { self.autosave.external_fingerprint = Some(fingerprint); }
                 self.show_toast(format!("Opened {name}"), false);
             }
             Err(e) => self.show_toast(e, true),
@@ -925,15 +921,11 @@ impl App {
                 return;
             }
             if changed && self.doc.cityos.is_none() {
-                if let Some(path) = native {
-                    if let Err(e) = io::save_path(&self.doc, path) {
+                if native.is_some() {
+                    if let Err(e) = self.save_current_external() {
                         self.show_toast(e, true);
                         return;
                     }
-                    self.autosave.saved_hash = crate::home::doc_hash(&self.doc);
-                    self.autosave.changed_at = None;
-                    self.autosave.failures = 0;
-                    self.autosave.retry_at = None;
                 }
             }
         }
@@ -981,19 +973,57 @@ impl App {
             _ => io::pick_save(&self.doc.name),
         };
         let Some(path) = target else { return };
-        match io::save_path(&self.doc, &path) {
+        match self.save_external_to(&path) {
             Ok(p) => {
                 self.show_toast(format!("Saved {}", p.display()), false);
-                if self.lib_file.is_none() {
-                    self.file_path = Some(p);
-                    self.autosave.saved_hash = crate::home::doc_hash(&self.doc);
-                    self.autosave.changed_at = None;
-                    self.autosave.failures = 0;
-                    self.autosave.retry_at = None;
-                }
             }
             Err(e) => self.show_toast(e, true),
         }
+    }
+
+    /// Preserve the active document before installing a generated local design.
+    pub(crate) fn preserve_before_local_design(&mut self) -> Result<(), String> {
+        crate::decks::ui::flush_notes(self);
+        self.finish_variable_editors();
+        if self.lib_file.is_some() { return self.save_library_file(); }
+        if let Some(path) = &self.file_path {
+            if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case(io::NATIVE_EXT)) {
+                return Err("Save the current design as a native file before creating another design. Your imported source was preserved.".into());
+            }
+            return self.save_current_external();
+        }
+        if self.home.is_none() && (self.doc.cityos.is_some() || self.hist.can_undo() || self.hist.can_redo()) {
+            return Err("Save the current draft before creating another design. Your draft was preserved.".into());
+        }
+        Ok(())
+    }
+
+    /// Save As may establish a new external observation. Managed paths can only
+    /// be changed by their checkpoint transaction; the current file retains CAS.
+    pub(crate) fn save_external_to(&mut self, path: &std::path::Path) -> Result<PathBuf, String> {
+        if let Some(library) = &self.lib {
+            if crate::io::inside_library_storage(path, library.root())? {
+                return Err("This path belongs to the projects library. Use Save draft or choose a file outside the library.".into());
+            }
+        }
+        if self.is_current_external_target(path) {
+            self.save_current_external()?;
+            return self.file_path.clone().ok_or_else(|| "No external document is open".into());
+        }
+        let (path, fingerprint) = io::save_path_observed(&self.doc, path)?;
+        if self.lib_file.is_none() {
+            self.file_path = Some(path.clone());
+            self.autosave.saved_hash = crate::home::doc_hash(&self.doc);
+            self.autosave.external_fingerprint = Some(fingerprint);
+            self.autosave.saved_history_hash = None;
+            self.autosave.saved_checkpoint_fingerprint = None;
+            self.autosave.checked_history = None;
+            self.autosave.changed_at = None;
+            self.autosave.confirmed = false;
+            self.autosave.failures = 0;
+            self.autosave.retry_at = None;
+        }
+        Ok(path)
     }
 
     pub fn new_document(&mut self) {

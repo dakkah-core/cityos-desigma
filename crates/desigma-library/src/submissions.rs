@@ -390,7 +390,7 @@ impl Library {
         }
         // Pin the complete persisted generation under the writer lock. Both
         // history stacks, inactive archives, assets and dependencies are retained.
-        let _writer = file_id.map(|_| crate::store::write_lock());
+        let _writer = file_id.map(|_| crate::store::write_lock(self)).transpose()?;
         let document = file_id.map(|file| self.load_checkpoint_locked(file)).transpose()?;
         if let Some(checkpoint) = &document { validate_submitted_checkpoint(&command, checkpoint)?; }
         if let Some(predecessor) = &command.predecessor {
@@ -476,7 +476,7 @@ impl Library {
             }
             for hash in &record.command.dependency_pins { self.verify_cityos_payload(hash)?; }
             let stored = self.load_stored_submission(&record.command.operation_id)?;
-            let _writer = stored.local_file.as_ref().map(|_| crate::store::write_lock());
+            let _writer = stored.local_file.as_ref().map(|_| crate::store::write_lock(self)).transpose()?;
             if let Some(binding) = &stored.local_file {
                 if binding.submitted_checkpoint.is_none() {
                     return Err(LibraryError::Invalid("Original checkpoint unavailable; retain identity and inquire".into()));
