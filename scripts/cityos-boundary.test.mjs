@@ -20,7 +20,7 @@ function productionRust(source) {
   const shape = source.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|r(#{0,})"[\s\S]*?"\1|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])'/g,
     value => value.replace(/[^\n]/g, ' '));
   const output = shape.split('');
-  const modules = /#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+\w+\s*\{/g;
+  const modules = /#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+\w+\s*\{/g;
   for (let match; (match = modules.exec(shape));) {
     let depth = 1;
     let end = modules.lastIndex;
@@ -103,6 +103,18 @@ test('semantic history policy belongs to the extension over a generic core trans
   assert.match(policy, /\.commit_transition\s*\(/);
 });
 
+test('portable owner policy stays in the extension while the library exposes an explicit generic port', () => {
+  const portable = productionRust(readFileSync(join(root, 'crates/desigma-library/src/portable.rs'), 'utf8'));
+  const generic = productionRust(readFileSync(join(root, 'crates/desigma-library/src/storage_policy.rs'), 'utf8'));
+  const policy = productionRust(readFileSync(join(extension, 'src/storage_policy.rs'), 'utf8'));
+  assert.doesNotMatch(portable + generic, /\b(?:CityosBase|CityosBinding|NativeOwner)\b/,
+    'Shared storage must not interpret owner-specific portability or dependency contracts');
+  assert.match(generic, /\bpub\s+trait\s+CheckpointStoragePolicy\b/);
+  assert.match(policy, /\bimpl\s+CheckpointStoragePolicy\s+for\s+CityosStoragePolicy\b/);
+  assert.match(policy, /\bCityosBase::NativeOwner\b/);
+  assert.match(portable, /\bpolicy\.check_portable\s*\(/);
+});
+
 test('app workspace is an alias and host adapter, without a production controller copy', () => {
   const directory = join(root, 'crates/desigma-app/src/design_workspace');
   const adapter = productionRust(readFileSync(join(directory, 'mod.rs'), 'utf8'));
@@ -125,4 +137,6 @@ test('boundary checks detect nested mutable returns and production code after re
   const production = productionRust(source);
   assert.equal([...production.matchAll(/\bstruct\s+Workspace\b/g)].length, 1);
   assert.match(production, /struct Workspace;/);
+  assert.doesNotMatch(productionRust('#[cfg(test)] pub(crate) mod fixtures { use desigma_doc::CityosBase; }\nfn production() {}'), /CityosBase/);
+  assert.match(productionRust('#[cfg(test)] pub(crate) mod fixtures { struct TestOnly; }\nstruct CityosBase;'), /struct CityosBase;/);
 });

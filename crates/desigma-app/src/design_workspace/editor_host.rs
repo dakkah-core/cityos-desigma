@@ -272,7 +272,7 @@ impl EditorHost for App {
         <Self as EditorHost>::save_before_switch(self)?;
         let library = self.lib.as_ref().ok_or("Draft library unavailable")?;
         let file = self.lib_file.as_ref().ok_or("Save this draft to the library before exporting")?;
-        let payload = library.export_checkpoint(&file.id).map_err(|error| error.to_string())?;
+        let payload = library.export_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).map_err(|error| error.to_string())?;
         if let Some(path) = rfd::FileDialog::new().add_filter("Portable Desigma checkpoint", &["json"])
             .set_file_name(format!("{}.portable.json", self.doc.name)).save_file()
         {

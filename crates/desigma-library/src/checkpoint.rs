@@ -1,6 +1,7 @@
 //! Portable, self-contained local checkpoints. Importing never dispatches an
 //! owner operation or confers acceptance/qualification on embedded semantic data.
-use crate::{payload_digest, Library, LibraryError, Result};
+use crate::{payload_digest, CheckpointStoragePolicy, Library, LibraryError, Result, UNMANAGED_STORAGE_POLICY};
+use crate::storage_policy::checked_retention_roots;
 use desigma_doc::{Document, DocumentCheckpoint, History};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ impl Library {
     /// Retention includes inactive/trashed state and version snapshots as well
     /// as live checkpoints. A damaged source fails closed; never turn an unread
     /// history into an empty dependency set for a future collector.
-    pub(crate) fn local_document_retention_roots(&self) -> Result<Vec<String>> {
+    pub(crate) fn local_document_retention_roots(&self, policy: &dyn CheckpointStoragePolicy) -> Result<Vec<String>> {
         let _guard = crate::store::write_lock(self)?;
         self.recover_pending_saves_locked()?;
         self.recover_pending_versions_locked()?;
@@ -43,9 +44,9 @@ impl Library {
                 if file_type.is_dir() { directories.push(path); }
                 else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "desigma") {
                     let document = Document::from_json(&std::fs::read_to_string(&path)?)?;
-                    roots.extend(DocumentCheckpoint::new(document, History::default()).dependency_pins());
+                    roots.extend(checked_retention_roots(policy, &DocumentCheckpoint::new(document, History::default()))?);
                 } else if file_type.is_file() && directory == self.path("checkpoints") && path.extension().is_some_and(|ext| ext == "json") {
-                    roots.extend(DocumentCheckpoint::from_json(&std::fs::read_to_string(&path)?)?.dependency_pins());
+                    roots.extend(checked_retention_roots(policy, &DocumentCheckpoint::from_json(&std::fs::read_to_string(&path)?)?)?);
                 }
             }
         }
@@ -240,16 +241,21 @@ impl Library {
     /// added. Shared-library copies already live inside the document; remote
     /// library update services and owner eligibility remain external capabilities.
     pub fn export_checkpoint(&self, id: &str) -> Result<String> {
+        self.export_checkpoint_with_policy(&UNMANAGED_STORAGE_POLICY, id)
+    }
+    /// The installed extension interprets portability and roots; storage still
+    /// owns the complete lock/observe/verify/encode transaction.
+    pub fn export_checkpoint_with_policy(&self, policy: &dyn CheckpointStoragePolicy, id: &str) -> Result<String> {
         // Match prepare's lock order. The checkpoint and original submission
         // journal must be observed together; a later prepare cannot race export.
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = crate::store::write_lock(self)?;
         let checkpoint = self.load_checkpoint_locked(id)?;
         self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
-        crate::portable::check_policy(&checkpoint)?;
-        let payloads = checkpoint.dependency_pins().into_iter()
+        policy.check_portable(&checkpoint)?;
+        let payloads = checked_retention_roots(policy, &checkpoint)?.into_iter()
             .map(|hash| self.load_cityos_payload(&hash).map(|bytes| (hash, bytes))).collect::<Result<_>>()?;
-        crate::portable::encode(&checkpoint, payloads)
+        crate::portable::encode_with_policy(policy, &checkpoint, payloads)
     }
 
     /// Imports into an existing library file. Validate everything before the
@@ -257,9 +263,14 @@ impl Library {
     /// The parent owns whether an incoming baseline should be archived/reconciled
     /// before import, and must not treat this local import as owner acceptance.
     pub fn import_checkpoint(&self, id: &str, text: &str) -> Result<()> {
-        let (checkpoint, payloads) = crate::VerifiedPortableCheckpoint::parse(text)?.into_parts();
+        self.import_checkpoint_with_policy(&UNMANAGED_STORAGE_POLICY, id, text)
+    }
+    pub fn import_checkpoint_with_policy(&self, policy: &dyn CheckpointStoragePolicy, id: &str, text: &str) -> Result<()> {
+        let portable = crate::VerifiedPortableCheckpoint::parse_with_policy(policy, text)?;
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = crate::store::write_lock(self)?;
+        portable.check_policy(policy)?;
+        let (checkpoint, payloads) = portable.into_parts();
         self.ensure_portable_submission_safe_locked(Some(id), &checkpoint)?;
         self.save_checkpoint_payloads_locked(id, &checkpoint, payloads)
     }
@@ -268,9 +279,13 @@ impl Library {
     /// placeholder: document, active/inactive history, payloads and manifest
     /// share the existing replayable save journal. Opening grants no owner right.
     pub fn import_checkpoint_as_new(&self, project: &str, folder: Option<&str>, portable: crate::VerifiedPortableCheckpoint) -> Result<crate::FileEntry> {
-        let (checkpoint, payloads) = portable.into_parts();
+        self.import_checkpoint_as_new_with_policy(&UNMANAGED_STORAGE_POLICY, project, folder, portable)
+    }
+    pub fn import_checkpoint_as_new_with_policy(&self, policy: &dyn CheckpointStoragePolicy, project: &str, folder: Option<&str>, portable: crate::VerifiedPortableCheckpoint) -> Result<crate::FileEntry> {
         let _submissions = crate::submissions::SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = crate::store::write_lock(self)?;
+        portable.check_policy(policy)?;
+        let (checkpoint, payloads) = portable.into_parts();
         self.ensure_portable_submission_safe_locked(None, &checkpoint)?;
         let name = if checkpoint.document.name.trim().is_empty() { "Imported draft" } else { checkpoint.document.name.as_str() };
         self.create_file_state_locked(project, folder, name, &checkpoint.document, Some((checkpoint.to_json()?, payloads)))
@@ -431,9 +446,9 @@ mod tests {
         let mut checkpoint = DocumentCheckpoint::new(bound(hash.clone()), History::default());
         checkpoint.install_baseline(Document::new("incoming"));
         source.save_checkpoint(&source_id, &checkpoint).unwrap();
-        let portable = source.export_checkpoint(&source_id).unwrap();
+        let portable = source.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source_id).unwrap();
         let (target_dir, target, target_id) = Temp::new();
-        target.import_checkpoint(&target_id, &portable).unwrap();
+        target.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &target_id, &portable).unwrap();
         drop(target);
         let reopened = Library::open(&target_dir.0).unwrap();
         let mut restored = reopened.load_checkpoint(&target_id).unwrap();
@@ -465,8 +480,8 @@ mod tests {
         let project = target.list_projects()[0].id.clone();
         let before = target.files_in(&project, None).unwrap().len();
         let file = target_dir.0.join("restore.portable.json");
-        std::fs::write(&file, source.export_checkpoint(&source_id).unwrap()).unwrap();
-        let imported = target.import_file(&file, &project, None).expect("Portable export must reopen through the normal file import path");
+        std::fs::write(&file, source.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source_id).unwrap()).unwrap();
+        let imported = target.import_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file, &project, None).expect("Portable export must reopen through the normal file import path");
         drop(target);
         let reopened = Library::open(&target_dir.0).unwrap();
         assert_eq!(reopened.files_in(&project, None).unwrap().len(), before + 1);
@@ -488,7 +503,7 @@ mod tests {
             let mut checkpoint = DocumentCheckpoint::new(document, History::default());
             if retained { checkpoint.install_baseline(Document::new("Current repository design")); }
             library.save_checkpoint(&id, &checkpoint).unwrap();
-            assert!(library.export_checkpoint(&id).is_err(), "Unqualified Native payloads cannot enter portable files through history");
+            assert!(library.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &id).is_err(), "Unqualified Native payloads cannot enter portable files through history");
         }
     }
 
@@ -498,14 +513,14 @@ mod tests {
         let hash = source.retain_cityos_payload(b"portable recovery dependency").unwrap();
         let checkpoint = DocumentCheckpoint::new(bound(hash.clone()), History::default());
         source.save_checkpoint(&source_id, &checkpoint).unwrap();
-        let portable = source.export_checkpoint(&source_id).unwrap();
+        let portable = source.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source_id).unwrap();
         for phase in ["before-journal", "journal", "payloads", "document", "checkpoint", "manifest", "complete"] {
             let (directory, target, _) = Temp::new();
             let project = target.list_projects()[0].id.clone();
             let before: BTreeSet<_> = target.files_in(&project, None).unwrap().into_iter().map(|file| file.id).collect();
             crate::store::inject_save_fault(phase, 0);
-            let verified = crate::VerifiedPortableCheckpoint::parse(&portable).unwrap();
-            assert!(target.import_checkpoint_as_new(&project, None, verified).is_err(), "{phase}");
+            let verified = crate::VerifiedPortableCheckpoint::parse_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &portable).unwrap();
+            assert!(target.import_checkpoint_as_new_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &project, None, verified).is_err(), "{phase}");
             drop(target);
             let reopened = Library::open(&directory.0).unwrap();
             let imported: Vec<_> = reopened.files_in(&project, None).unwrap().into_iter().filter(|file| !before.contains(&file.id)).collect();
@@ -525,7 +540,7 @@ mod tests {
         let (_source, source, source_id) = Temp::new();
         let hash = source.retain_cityos_payload(b"dependency").unwrap();
         source.save_checkpoint(&source_id, &DocumentCheckpoint::new(bound(hash.clone()), History::default())).unwrap();
-        let original: serde_json::Value = serde_json::from_str(&source.export_checkpoint(&source_id).unwrap()).unwrap();
+        let original: serde_json::Value = serde_json::from_str(&source.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source_id).unwrap()).unwrap();
         let (_target_dir, target, target_id) = Temp::new();
         for fault in ["missing", "corrupt", "extra", "future"] {
             let mut value = original.clone();
@@ -535,7 +550,7 @@ mod tests {
                 "extra" => { value["payloads"][payload_digest(b"extra")] = serde_json::json!(b"extra".to_vec()); }
                 _ => value["schemaVersion"] = serde_json::json!("future"),
             }
-            assert!(target.import_checkpoint(&target_id, &value.to_string()).is_err(), "{fault}");
+            assert!(target.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &target_id, &value.to_string()).is_err(), "{fault}");
             assert_eq!(target.load_file(&target_id).unwrap().name, "empty");
             assert!(!target.path("cityos/payloads").exists());
             assert!(!target.checkpoint_path(&target_id).unwrap().exists());
@@ -569,9 +584,9 @@ mod tests {
         library.save_version(&id, &bound(second.clone()), Some("Keep".into()), false).unwrap();
         library.trash_file(&id).unwrap();
         let mut expected = vec![first, second]; expected.sort();
-        assert_eq!(library.cityos_retention_roots().unwrap(), expected);
+        assert_eq!(library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap(), expected);
         std::fs::write(library.checkpoint_path(&id).unwrap(), "{truncated").unwrap();
-        assert!(library.cityos_retention_roots().is_err());
+        assert!(library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).is_err());
     }
 
     #[test]
@@ -634,8 +649,8 @@ mod tests {
             assert_eq!(recovered.to_json().unwrap(), expected);
             assert_eq!(missing, [pin.clone()]);
             assert!(restarted.load_checkpoint(&id).is_err());
-            assert!(restarted.export_checkpoint(&id).is_err());
-            assert!(restarted.cityos_retention_roots().unwrap().contains(pin));
+            assert!(restarted.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &id).is_err());
+            assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(pin));
             assert_eq!(std::fs::read(restarted.checkpoint_path(&id).unwrap()).unwrap(), original_bytes);
             std::fs::write(&path, b"corrupt dependency").unwrap();
             assert!(restarted.load_checkpoint_for_recovery(&id).is_err(), "corruption must not become a missing-only recovery");
@@ -643,12 +658,12 @@ mod tests {
             restarted.put_cityos_payload(pin, bytes).unwrap();
             assert_eq!(restarted.load_checkpoint(&id).unwrap().to_json().unwrap(), expected);
         }
-        let portable = library.export_checkpoint(&id).unwrap();
+        let portable = library.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &id).unwrap();
         let (target_dir, target, target_id) = Temp::new();
-        target.import_checkpoint(&target_id, &portable).unwrap();
+        target.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &target_id, &portable).unwrap();
         let imported = Library::open(&target_dir.0).unwrap();
         assert_eq!(imported.load_checkpoint(&target_id).unwrap().to_json().unwrap(), expected);
-        assert_eq!(imported.cityos_retention_roots().unwrap(), checkpoint.dependency_pins());
+        assert_eq!(imported.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap(), checkpoint.dependency_pins());
         for (pin, bytes) in &payloads { assert_eq!(imported.load_cityos_payload(pin).unwrap(), *bytes); }
     }
 
@@ -659,7 +674,7 @@ mod tests {
         library.save_file(&id, &document).unwrap();
         assert_eq!(library.load_file(&id).unwrap().cityos.unwrap().dependency_pins, ["b".repeat(64)]);
         assert!(library.save_checkpoint(&id, &DocumentCheckpoint::new(document, History::default())).is_err());
-        assert!(library.export_checkpoint(&id).is_err());
+        assert!(library.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &id).is_err());
         assert!(!library.checkpoint_path(&id).unwrap().exists());
     }
 

@@ -525,8 +525,13 @@ impl Library {
     /// Deliberately no API for purging these payloads. Unresolved and accepted-but-
     /// unsynchronized records remain retention roots, including after restart.
     pub fn cityos_retention_roots(&self) -> Result<Vec<String>> {
-        let mut roots = self.local_document_retention_roots()?;
-        roots.extend(self.submission_sync_retention_roots()?);
+        self.retention_roots_with_policy(&crate::UNMANAGED_STORAGE_POLICY)
+    }
+    /// Extension policy supplies checkpoint interpretation. Original submission
+    /// and synchronization journals remain retention roots in every state.
+    pub fn retention_roots_with_policy(&self, policy: &dyn crate::CheckpointStoragePolicy) -> Result<Vec<String>> {
+        let mut roots = self.local_document_retention_roots(policy)?;
+        roots.extend(self.submission_sync_retention_roots(policy)?);
         let folder = self.path("cityos/submissions");
         if !folder.exists() {
             roots.sort();
@@ -540,7 +545,7 @@ impl Library {
                 let stored = self.load_stored_submission(&id)?;
                 roots.extend(stored.record.command.dependency_pins);
                 if let Some(text) = stored.local_file.and_then(|binding| binding.submitted_checkpoint) {
-                    roots.extend(DocumentCheckpoint::from_json(&text)?.dependency_pins());
+                    roots.extend(crate::storage_policy::checked_retention_roots(policy, &DocumentCheckpoint::from_json(&text)?)?);
                 }
             }
         }
@@ -590,7 +595,7 @@ mod tests {
         let reopened = Library::open(&root).unwrap();
         assert_eq!(reopened.load_submission("operation-1").unwrap(), saved);
         assert_eq!(reopened.prepare_submission(c.clone()).unwrap().request_digest, saved.request_digest);
-        assert_eq!(reopened.cityos_retention_roots().unwrap(), vec![payload]);
+        assert_eq!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap(), vec![payload]);
         c.submitted_snapshot = serde_json::json!({"different":true});
         assert!(reopened.prepare_submission(c).is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -647,15 +652,15 @@ mod tests {
         let checkpoint = f.library.load_checkpoint(&f.file).unwrap();
         let project = f.library.file(&f.file).unwrap().project;
         let alias = f.library.create_file_checkpoint(&project, None, "Same draft alias", &checkpoint).unwrap();
-        let portable = f.library.export_checkpoint(&f.file).unwrap();
+        let portable = f.library.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap();
         let original = f.library.prepare_submission_for_file(&f.file, f.command.clone()).unwrap();
         for file in [&f.file, &alias.id] {
-            assert!(f.library.export_checkpoint(file).is_err(), "A portable draft must not drop its frozen submission identity");
-            assert!(f.library.import_checkpoint(file, &portable).is_err(), "An earlier export cannot bypass the original frozen journal");
+            assert!(f.library.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, file).is_err(), "A portable draft must not drop its frozen submission identity");
+            assert!(f.library.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, file, &portable).is_err(), "An earlier export cannot bypass the original frozen journal");
         }
         let before = f.library.files_in(&project, None).unwrap().len();
-        let verified = crate::VerifiedPortableCheckpoint::parse(&portable).unwrap();
-        assert!(f.library.import_checkpoint_as_new(&project, None, verified).is_err());
+        let verified = crate::VerifiedPortableCheckpoint::parse_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &portable).unwrap();
+        assert!(f.library.import_checkpoint_as_new_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &project, None, verified).is_err());
         assert_eq!(f.library.files_in(&project, None).unwrap().len(), before);
         assert_eq!(f.library.load_submission(&original.command.operation_id).unwrap(), original);
         assert!(f.library.load_checkpoint(&f.file).is_ok());
@@ -690,7 +695,7 @@ mod tests {
                 _ => SubmissionState::Pending,
             });
             assert_eq!(reopened.prepare_submission_for_file(&f.file, f.command.clone()).unwrap(), records[0]);
-            assert!(reopened.cityos_retention_roots().unwrap().contains(&f.command.dependency_pins[0]));
+            assert!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.command.dependency_pins[0]));
             let wire: Value = serde_json::from_slice(&std::fs::read(reopened.submission_path("operation-1").unwrap()).unwrap()).unwrap();
             assert_eq!(wire["local_file"]["file_id"], f.file);
             assert!(!reopened.path("cityos/submission-files").exists(), "no sidecar association gap");
@@ -718,7 +723,7 @@ mod tests {
             let restarted = Library::open(&f.root).unwrap();
             assert_eq!(restarted.document_submissions(&f.file).unwrap(), [accepted.clone()]);
             assert_eq!(restarted.load_submission("operation-1").unwrap().outcome, accepted.outcome);
-            assert_eq!(restarted.cityos_retention_roots().unwrap(), f.command.dependency_pins);
+            assert_eq!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap(), f.command.dependency_pins);
         }
     }
 
@@ -875,11 +880,11 @@ mod tests {
         assert!(!rebound.dependency_pins().contains(&pin));
         f.library.save_checkpoint(&f.file, &rebound).unwrap();
         let restarted = Library::open(&f.root).unwrap();
-        assert!(restarted.cityos_retention_roots().unwrap().contains(&pin));
+        assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&pin));
         std::fs::remove_file(restarted.path("cityos/payloads").join(&pin)).unwrap();
         assert_eq!(restarted.document_submissions(&f.file).unwrap(), [original.clone()]);
         assert!(restarted.document_submissions(&f.file).unwrap()[0].frozen());
-        assert!(restarted.cityos_retention_roots().unwrap().contains(&pin));
+        assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&pin));
     }
 
     #[test]
@@ -905,7 +910,7 @@ mod tests {
             std::fs::write(&path, if damage == "truncated" { b"{truncated".to_vec() } else { serde_json::to_vec(&wire).unwrap() }).unwrap();
             assert!(f.library.load_submission("operation-1").is_err(), "{damage}");
             assert!(f.library.document_submissions(&f.file).is_err(), "{damage}");
-            assert!(f.library.cityos_retention_roots().is_err(), "{damage}");
+            assert!(f.library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).is_err(), "{damage}");
             assert!(f.library.prepare_submission_for_file(&f.file, f.command.clone()).is_err(), "{damage}");
         }
         std::fs::write(path, bytes).unwrap();

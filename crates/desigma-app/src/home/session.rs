@@ -480,7 +480,7 @@ impl App {
         let mut ok = 0;
         let mut last_err = None;
         for p in paths {
-            match lib.import_file(p, project, folder) {
+            match lib.import_file_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, p, project, folder) {
                 Ok(e) => {
                     ok += 1;
                     if let Ok(doc) = lib.load_file(&e.id) {

@@ -282,7 +282,7 @@ impl Library {
         self.resume_submission_sync(&accepted.command.operation_id)
     }
 
-    pub(crate) fn submission_sync_retention_roots(&self) -> Result<Vec<String>> {
+    pub(crate) fn submission_sync_retention_roots(&self, policy: &dyn crate::CheckpointStoragePolicy) -> Result<Vec<String>> {
         let entries = match std::fs::read_dir(self.path("cityos/submission-sync")) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -294,7 +294,7 @@ impl Library {
             if entry.path().extension().is_some_and(|extension| extension == "json") {
                 let id = entry.path().file_stem().ok_or_else(|| invalid("Invalid sync intent path"))?.to_string_lossy().into_owned();
                 let intent = self.load_submission_sync(&id)?;
-                roots.extend(intent.checkpoints()?.1.dependency_pins());
+                roots.extend(crate::storage_policy::checked_retention_roots(policy, &intent.checkpoints()?.1)?);
                 roots.extend(intent.accepted.command.dependency_pins);
             }
         }
@@ -507,8 +507,8 @@ mod tests {
         let retry = reopened.resume_submission_sync("operation").unwrap();
         assert_eq!(retry.sync_id, receipt.sync_id);
         assert_eq!(retry.checkpoint.retained.len(), f.original.retained.len() + 1);
-        assert!(reopened.cityos_retention_roots().unwrap().contains(&f.submission_pin));
-        assert!(reopened.cityos_retention_roots().unwrap().contains(&f.accepted_pin));
+        assert!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.submission_pin));
+        assert!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.accepted_pin));
         assert!(reopened.save_file_with_history(&f.file, &f.original.document, &f.original.history).is_err());
         assert!(reopened.save_checkpoint(&f.file, &f.original).is_err());
     }
@@ -535,7 +535,7 @@ mod tests {
             let intent = reopened.load_submission_sync("operation").unwrap();
             assert_eq!(intent.accepted, f.accepted);
             assert_eq!(intent.accepted_checkpoint, f.candidate.to_json().unwrap());
-            assert!(reopened.cityos_retention_roots().unwrap().contains(&f.accepted_pin));
+            assert!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.accepted_pin));
             let result = reopened.resume_submission_sync("operation").unwrap();
             assert_eq!(result.sync_id, intent.sync_id);
             assert_eq!(result.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
@@ -598,7 +598,7 @@ mod tests {
                 assert_eq!(std::fs::read(&checkpoint_path).unwrap(), checkpoint_before, "{root}/{damage}");
                 assert_eq!(restarted.load_submission_sync("operation").unwrap(), intent);
                 assert_eq!(restarted.document_submissions(&f.file).unwrap(), [f.accepted.clone()]);
-                assert!(restarted.cityos_retention_roots().unwrap().contains(&pin));
+                assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&pin));
                 assert!(restarted.put_cityos_payload(&pin, b"wrong repair").is_err());
                 restarted.put_cityos_payload(&pin, bytes).unwrap();
                 let saved = restarted.resume_submission_sync("operation").unwrap();
@@ -701,7 +701,7 @@ mod tests {
             assert_eq!(saved.submission.request_digest, f.accepted.request_digest);
             assert_eq!(saved.checkpoint.retained.len(), f.original.retained.len() + 1);
             assert_eq!(restarted.document_submissions(&f.file).unwrap(), [saved.submission]);
-            assert!(restarted.cityos_retention_roots().unwrap().contains(&f.submission_pin));
+            assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.submission_pin));
             assert!(restarted.save_checkpoint(&f.file, &f.original).is_err());
             let again = Library::open(&f.root).unwrap().resume_submission_sync("operation").unwrap();
             assert_eq!(again.sync_id, intent.sync_id);
@@ -823,7 +823,7 @@ mod tests {
             assert!(matches!(reopened.resume_submission_sync("operation"), Err(LibraryError::CheckpointConflict(_))));
             assert_eq!(reopened.load_checkpoint(&f.file).unwrap().to_json().unwrap(), saved);
             assert_eq!(reopened.load_submission("operation").unwrap(), f.accepted);
-            assert!(reopened.cityos_retention_roots().unwrap().contains(&f.accepted_pin));
+            assert!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.accepted_pin));
         }
     }
 
@@ -909,7 +909,7 @@ mod tests {
         intent.file_id = "other-file".into();
         write_atomic(&f.library.submission_sync_path("operation").unwrap(), &serde_json::to_vec(&intent).unwrap()).unwrap();
         assert!(f.library.resume_submission_sync("operation").is_err());
-        assert!(f.library.cityos_retention_roots().is_err());
+        assert!(f.library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).is_err());
         assert_eq!(f.library.load_submission("operation").unwrap(), f.accepted);
         assert_eq!(f.library.load_checkpoint(&f.file).unwrap().to_json().unwrap(), f.original.to_json().unwrap());
     }

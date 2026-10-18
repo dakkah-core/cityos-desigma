@@ -10,6 +10,7 @@ pub mod projection;
 pub mod draft;
 pub mod editor;
 pub mod history;
+pub mod storage_policy;
 pub mod workspace;
 #[doc(hidden)]
 pub mod workspace_support;

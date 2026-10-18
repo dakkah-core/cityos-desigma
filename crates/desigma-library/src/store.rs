@@ -974,8 +974,11 @@ impl Library {
 
     /// Copies a `.desigma` file, or converts a `.fig` / `.json` / `.svg`, into a project.
     pub fn import_file(&self, path: &Path, project: &str, folder: Option<&str>) -> Result<FileEntry> {
-        if let Some(portable) = crate::VerifiedPortableCheckpoint::read(path)? {
-            return self.import_checkpoint_as_new(project, folder, portable);
+        self.import_file_with_policy(&crate::UNMANAGED_STORAGE_POLICY, path, project, folder)
+    }
+    pub fn import_file_with_policy(&self, policy: &dyn crate::CheckpointStoragePolicy, path: &Path, project: &str, folder: Option<&str>) -> Result<FileEntry> {
+        if let Some(portable) = crate::VerifiedPortableCheckpoint::read_with_policy(policy, path)? {
+            return self.import_checkpoint_as_new_with_policy(policy, project, folder, portable);
         }
         let doc = load_external(path)?;
         let stem = path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty());
@@ -1289,8 +1292,8 @@ mod tests {
             storage_test::busy(library.try_list_projects());
             storage_test::busy(library.try_all_files());
             storage_test::busy(library.try_list_trash());
-            storage_test::busy(library.export_checkpoint(&file.id));
-            storage_test::busy(library.cityos_retention_roots());
+            storage_test::busy(library.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id));
+            storage_test::busy(library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY));
             storage_test::busy(library.try_list_versions(&file.id));
             storage_test::busy(library.load_version(&file.id, version.n));
             storage_test::busy(library.save_version(&file.id, &checkpoint.document, None, false));
@@ -1594,7 +1597,7 @@ mod tests {
                 "payloads":BTreeMap::from([(first.clone(), existing.to_vec()), (second.clone(), incoming.to_vec())])
             });
             SAVE_FAULT.with(|fault| fault.set(Some(phase)));
-            assert!(library.import_checkpoint(&file.id, &portable.to_string()).is_err());
+            assert!(library.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id, &portable.to_string()).is_err());
             let journal = library.project_dir(&project.id).join(".save.pending.json");
             let pending: PendingSave = serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
             assert_eq!(pending.payloads, BTreeMap::from([(second.clone(), incoming.to_vec())]));
@@ -1621,7 +1624,7 @@ mod tests {
         let hash = source.retain_cityos_payload(bytes).unwrap();
         let checkpoint = cas_checkpoint(vec![hash.clone()]);
         let source_file = source.create_file_checkpoint(&source_project.id, None, "F", &checkpoint).unwrap();
-        let portable = source.export_checkpoint(&source_file.id).unwrap();
+        let portable = source.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source_file.id).unwrap();
 
         for phase in ["before-journal", "journal", "payloads"] {
             let (temp, library) = Tmp::new();
@@ -1655,7 +1658,7 @@ mod tests {
                 let mut invalid: serde_json::Value = serde_json::from_str(&portable).unwrap();
                 if fault == "missing" { invalid["payloads"].as_object_mut().unwrap().remove(&hash); }
                 else { invalid["payloads"][&hash] = serde_json::json!([0]); }
-                assert!(library.import_checkpoint(&file.id, &invalid.to_string()).is_err(), "{phase}/{fault}");
+                assert!(library.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id, &invalid.to_string()).is_err(), "{phase}/{fault}");
                 assert_eq!(std::fs::read(&payload_path).unwrap(), b"corrupt local object");
                 assert_eq!(std::fs::read(&document_path).unwrap(), original_document);
                 assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
@@ -1669,10 +1672,10 @@ mod tests {
             assert_eq!(dispatches, 0);
             assert_eq!(library.prepare_submission(command.clone()).unwrap(), original);
             let expected_roots = BTreeSet::from([hash.clone(), submission_only.clone()]);
-            assert_eq!(library.cityos_retention_roots().unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
+            assert_eq!(library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
 
             SAVE_FAULT.with(|fault| fault.set(Some(phase)));
-            assert!(library.import_checkpoint(&file.id, &portable).is_err(), "{phase}");
+            assert!(library.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id, &portable).is_err(), "{phase}");
             assert_eq!(SAVE_FAULT.with(|fault| fault.get()), None, "must reach the {phase} boundary");
             assert_eq!(std::fs::read(&document_path).unwrap(), original_document);
             assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
@@ -1693,7 +1696,7 @@ mod tests {
             let reopened = Library::open(&temp.0).unwrap();
             if phase == "before-journal" {
                 assert_eq!(std::fs::read(&document_path).unwrap(), original_document);
-                reopened.import_checkpoint(&file.id, &portable).unwrap();
+                reopened.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id, &portable).unwrap();
             }
             assert_eq!(reopened.load_checkpoint(&file.id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
             assert_eq!(reopened.load_cityos_payload(&hash).unwrap(), bytes);
@@ -1704,7 +1707,7 @@ mod tests {
             assert_eq!(std::fs::read(&submission_path).unwrap(), original_record);
             assert_eq!(reopened.load_submission(&command.operation_id).unwrap(), original);
             assert!(original.frozen());
-            assert_eq!(reopened.cityos_retention_roots().unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
+            assert_eq!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
             assert!(reopened.load_cityos_payload(&submission_only).is_err());
             assert!(reopened.dispatch_prepared(command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
             assert_eq!(dispatches, 0, "repair must not bypass the still-missing submission dependency");
@@ -2215,17 +2218,17 @@ mod tests {
         let p = lib.create_project("P").unwrap();
         let src = t.0.join("incoming.desigma");
         std::fs::write(&src, doc("From disk", 2).to_json().unwrap()).unwrap();
-        let e = lib.import_file(&src, &p.id, None).unwrap();
+        let e = lib.import_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &src, &p.id, None).unwrap();
         assert_eq!(e.name, "From disk");
         assert_eq!(lib.load_file(&e.id).unwrap().nodes.len(), 3);
         let svg = t.0.join("icon.svg");
         std::fs::write(&svg, r##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#f00"/></svg>"##).unwrap();
-        let s = lib.import_file(&svg, &p.id, None).unwrap();
+        let s = lib.import_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &svg, &p.id, None).unwrap();
         assert_eq!(s.name, "icon");
         assert_eq!(lib.load_file(&s.id).unwrap().pages.len(), 1);
         let bad = t.0.join("bad.desigma");
         std::fs::write(&bad, "nope").unwrap();
-        assert!(lib.import_file(&bad, &p.id, None).is_err());
+        assert!(lib.import_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &bad, &p.id, None).is_err());
         assert_eq!(lib.all_files().len(), 2, "failed imports leave nothing behind");
     }
 

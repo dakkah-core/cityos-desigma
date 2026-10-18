@@ -323,6 +323,55 @@ fn transport(workspace: &mut Workspace<FakeHost>) -> (Receiver<Value>, Sender<Re
 
 fn property_field() -> Value { json!({"nodeId":"root", "property":"elevation"}) }
 
+#[test]
+fn hidden_prepared_preview_has_no_ack_deadline_even_before_a_child_exists() {
+    use std::time::Instant;
+    let mut workspace = ready_workspace();
+    let started = Instant::now();
+    let artifact = json!({"requestId":"prepared-without-child","draftRevision":1});
+    workspace.preview = Some(artifact.clone());
+    workspace.render_started = Some(started);
+    workspace.pending = Some(started);
+    assert!(workspace.host.url.is_none());
+
+    workspace.release_inactive_preview();
+    workspace.expire_render_acknowledgement(started + crate::repaint::RENDER_ACK_TIMEOUT);
+
+    assert_eq!(workspace.preview, Some(artifact));
+    assert_eq!(workspace.pending, Some(started));
+    assert!(workspace.render_started.is_none() && workspace.error.is_none());
+    assert!(!workspace.current);
+}
+
+#[test]
+fn changes_mode_defers_preview_work_and_resumes_the_latest_draft_when_visible() {
+    use std::time::{Duration, Instant};
+    let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+    let mut workspace = ready_workspace();
+    let (requests, _responses) = transport(&mut workspace);
+    workspace.resource.as_mut().unwrap()["actualWebPreview"] = json!(true);
+    workspace.themes_loaded = true;
+    workspace.observed = revision(host.document());
+    workspace.changes_mode = true;
+    let started = Instant::now() - Duration::from_secs(31);
+    workspace.pending = Some(started);
+    workspace.render_started = Some(started);
+
+    workspace.poll(&mut host);
+
+    assert!(requests.try_recv().is_err(), "Changes must not dispatch a hidden renderer job");
+    assert!(workspace.pending.is_some(), "Keep the latest draft pending for Design");
+    assert!(workspace.error.is_none() && workspace.render_started.is_none());
+    assert!(workspace.progress_repaint_delay().is_none(), "Hidden previews must not poll");
+
+    workspace.changes_mode = false;
+    workspace.poll(&mut host);
+    let request = requests.try_recv().expect("Visible Design resumes the pending preview");
+    assert_eq!(request["op"], "Preview");
+    assert_eq!(request["draft"]["draftRevision"], draft(host.document()).unwrap()["draftRevision"]);
+    assert!(workspace.pending.is_none());
+}
+
 fn inert_config() -> crate::bridge::Config {
     crate::bridge::Config {
         node: "fixture-only/not-a-node-executable".into(),

@@ -861,7 +861,7 @@ impl App {
         // Recognition and complete validation must precede even flushing the
         // current editors. Portable checkpoints are new local library files;
         // their document, histories and payloads travel in one create journal.
-        match desigma_library::VerifiedPortableCheckpoint::read(&p) {
+        match desigma_library::VerifiedPortableCheckpoint::read_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &p) {
             Ok(Some(portable)) => {
                 self.open_portable_checkpoint(portable);
                 return;
@@ -948,7 +948,7 @@ impl App {
                     None => (lib.create_project("My project")?.id, None),
                 },
             };
-            lib.import_checkpoint_as_new(&project, folder.as_deref(), portable)
+            lib.import_checkpoint_as_new_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &project, folder.as_deref(), portable)
         })();
         match result {
             Ok(entry) => {

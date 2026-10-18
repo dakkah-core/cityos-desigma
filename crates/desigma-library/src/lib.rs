@@ -24,6 +24,7 @@ mod submission_sync;
 mod checkpoint;
 mod portable;
 mod payloads;
+mod storage_policy;
 #[cfg(test)]
 mod payloads_tests;
 
@@ -35,6 +36,7 @@ pub use submission_sync::*;
 pub use checkpoint::{checkpoint_fingerprint, CheckpointSaveReceipt};
 pub use portable::{VerifiedPortableCheckpoint, MAX_PORTABLE_CHECKPOINT_BYTES};
 pub use payloads::{content_digest, PayloadStore};
+pub use storage_policy::{checkpoint_documents, CheckpointStoragePolicy, UnmanagedStoragePolicy, UNMANAGED_STORAGE_POLICY};
 
 use std::path::{Path, PathBuf};
 

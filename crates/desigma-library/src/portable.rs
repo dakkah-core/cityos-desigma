@@ -1,6 +1,7 @@
 //! Existing portable-checkpoint v1 codec. Parsing grants no owner authority.
-use crate::{payload_digest, LibraryError, Result};
-use desigma_doc::{CityosBase, Document, DocumentCheckpoint};
+use crate::{payload_digest, CheckpointStoragePolicy, LibraryError, Result, UNMANAGED_STORAGE_POLICY};
+use crate::storage_policy::checked_retention_roots;
+use desigma_doc::{Document, DocumentCheckpoint};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -44,19 +45,6 @@ fn read_payloads<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::resu
     deserializer.deserialize_map(Payloads)
 }
 
-pub(crate) fn check_policy(checkpoint: &DocumentCheckpoint) -> Result<()> {
-    let states = std::iter::once((&checkpoint.document, &checkpoint.history))
-        .chain(checkpoint.retained.iter().map(|state| (&state.document, &state.history)));
-    for (document, history) in states {
-        for document in std::iter::once(document).chain(history.retained_documents()) {
-            if document.cityos.as_ref().is_some_and(|binding| matches!(binding.base, CityosBase::NativeOwner { .. })) {
-                return Err(LibraryError::Invalid("Native owner portable retention/export policy is not qualified".into()));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Validated payloads are private so an import cannot replace their bytes after
 /// admission. The native workspace must still validate bindings and owner scope.
 pub struct VerifiedPortableCheckpoint {
@@ -70,18 +58,24 @@ impl std::fmt::Debug for VerifiedPortableCheckpoint {
 }
 impl VerifiedPortableCheckpoint {
     pub fn parse(text: &str) -> Result<Self> {
+        Self::parse_with_policy(&UNMANAGED_STORAGE_POLICY, text)
+    }
+    pub fn parse_with_policy(policy: &dyn CheckpointStoragePolicy, text: &str) -> Result<Self> {
         if text.len() > MAX_PORTABLE_CHECKPOINT_BYTES { return Err(LibraryError::Invalid("Portable checkpoint exceeds the 128 MiB file limit".into())); }
         let wire: PortableWire = serde_json::from_str(text)?;
         if wire.schema_version != "desigma.portable-checkpoint.v1" { return Err(LibraryError::Invalid("Unsupported portable checkpoint version".into())); }
         let checkpoint = DocumentCheckpoint::from_json(&wire.checkpoint)?;
-        let roots: BTreeSet<_> = checkpoint.dependency_pins().into_iter().collect();
+        policy.check_portable(&checkpoint)?;
+        let roots: BTreeSet<_> = checked_retention_roots(policy, &checkpoint)?.into_iter().collect();
         if roots != wire.payloads.keys().cloned().collect() { return Err(LibraryError::Invalid("Portable dependency closure mismatch".into())); }
-        check_policy(&checkpoint)?;
         Ok(Self { checkpoint, payloads: wire.payloads })
     }
     /// JSON inputs are bounded before allocation, including a growing-file race.
     /// Unknown JSON formats remain on their existing native/Figma import path.
     pub fn read(path: &Path) -> Result<Option<Self>> {
+        Self::read_with_policy(&UNMANAGED_STORAGE_POLICY, path)
+    }
+    pub fn read_with_policy(policy: &dyn CheckpointStoragePolicy, path: &Path) -> Result<Option<Self>> {
         if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) { return Ok(None); }
         let file = std::fs::File::open(path)?;
         let metadata = file.metadata()?;
@@ -101,15 +95,31 @@ impl VerifiedPortableCheckpoint {
         struct Header { #[serde(rename = "schemaVersion", default)] schema_version: serde_json::Value }
         let header: Header = serde_json::from_str(&text)?;
         if header.schema_version.as_str().is_some_and(|version| version.starts_with("desigma.portable-checkpoint.")) {
-            Self::parse(&text).map(Some)
+            Self::parse_with_policy(policy, &text).map(Some)
         } else { Ok(None) }
     }
     pub fn document(&self) -> &Document { &self.checkpoint.document }
+    /// Recheck the destination's installed policy at import time. A parsed
+    /// portable value is immutable bytes, never a transferable policy grant.
+    pub(crate) fn check_policy(&self, policy: &dyn CheckpointStoragePolicy) -> Result<()> {
+        policy.check_portable(&self.checkpoint)?;
+        let roots: BTreeSet<_> = checked_retention_roots(policy, &self.checkpoint)?.into_iter().collect();
+        if roots != self.payloads.keys().cloned().collect() {
+            return Err(LibraryError::Invalid("Portable dependency closure mismatch".into()));
+        }
+        Ok(())
+    }
     pub(crate) fn into_parts(self) -> (DocumentCheckpoint, BTreeMap<String, Vec<u8>>) { (self.checkpoint, self.payloads) }
 }
 
+#[cfg(test)]
 pub(crate) fn encode(checkpoint: &DocumentCheckpoint, payloads: BTreeMap<String, Vec<u8>>) -> Result<String> {
-    check_policy(checkpoint)?;
+    encode_with_policy(&UNMANAGED_STORAGE_POLICY, checkpoint, payloads)
+}
+pub(crate) fn encode_with_policy(policy: &dyn CheckpointStoragePolicy, checkpoint: &DocumentCheckpoint, payloads: BTreeMap<String, Vec<u8>>) -> Result<String> {
+    policy.check_portable(checkpoint)?;
+    let roots: BTreeSet<_> = checked_retention_roots(policy, checkpoint)?.into_iter().collect();
+    if roots != payloads.keys().cloned().collect() { return Err(LibraryError::Invalid("Portable dependency closure mismatch".into())); }
     if payloads.len() > MAX_PAYLOADS || payloads.values().any(|bytes| bytes.len() > MAX_PAYLOAD_BYTES)
         || payloads.values().map(Vec::len).sum::<usize>() > MAX_PAYLOAD_TOTAL {
         return Err(LibraryError::Invalid("Portable payload resource limit".into()));

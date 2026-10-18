@@ -136,16 +136,24 @@ pub fn refresh_in_background(lib: Library, file: String, doc: Document) {
     state.bytes+=bytes;state.jobs.push_back(ThumbnailJob{lib,file,doc,bytes,cancel:Default::default()});wake.notify_one();
 }
 
-#[cfg(test)]
-pub(crate) fn finish_library_jobs(root:&std::path::Path) {
+/// Cancel optional work for a library before a bounded headless session exits.
+/// Document/checkpoint saves have already completed independently of thumbnails.
+pub(crate) fn cancel_library_jobs(root:&std::path::Path) -> Result<(), String> {
     let(lock,wake)=&**queue();let mut state=lock.lock().unwrap_or_else(|e|e.into_inner());
     state.jobs.retain(|job|job.lib.root()!=root);state.bytes=state.jobs.iter().map(|job|job.bytes).sum();
     if let Some((active,_,cancel))=&state.active {if active==root {cancel.store(true,std::sync::atomic::Ordering::Release);}}
     let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
     while state.active.as_ref().is_some_and(|(active,_,_)|active==root) {
-        let remaining=deadline.saturating_duration_since(std::time::Instant::now());assert!(!remaining.is_zero(),"Thumbnail worker did not finish");
+        let remaining=deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() { return Err("Thumbnail worker did not stop within three seconds".into()); }
         state=wake.wait_timeout(state,remaining).unwrap_or_else(|e|e.into_inner()).0;
     }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn finish_library_jobs(root:&std::path::Path) {
+    cancel_library_jobs(root).expect("Thumbnail worker did not finish");
 }
 
 /// Which files are boards, read from the documents (each file is probed once, and again after it

@@ -909,6 +909,11 @@ impl<H: EditorHost> Workspace<H> {
             Some("selection") => {
                 if let Some(node) = event["nodeId"].as_str() { self.select(app, node); }
             }
+            Some("focus-editor") if self.open && matches!(event["key"].as_str(), Some("F6" | "Escape")) => {
+                if let Some(url) = self.preview.as_ref().and_then(|preview| preview["url"].as_str()) {
+                    if let Err(error) = self.host.focus_parent(url) { self.error = Some(error); }
+                }
+            }
             Some("shortcut") if !self.preview_only && self.busy.is_none() && !self.recovery_pending => match event["key"].as_str() {
                 Some("s") => { self.host.hide(); app.save(); }
                 Some("z") if event["shift"] != true => app.undo(),
@@ -1084,6 +1089,7 @@ impl<H: EditorHost> Workspace<H> {
             self.handle_preview_event(app, &event);
         }
         self.dispatch_history_request(app);
+        if !self.preview_work_visible() { self.release_inactive_preview(); }
         self.expire_render_acknowledgement(Instant::now());
         let identity = if self.preview_only { self.staged.as_ref().and_then(revision) } else { revision(app.document()) };
         if identity != self.observed {
@@ -1097,7 +1103,7 @@ impl<H: EditorHost> Workspace<H> {
             if let Some(d) = self.active_draft(app) {
                 self.send(json!({"op":"Themes","draft":d}));
             }
-        } else if self.validated && self.actual_preview() && (self.preview_only || self.inline_identity.is_some() || self.layout.view != layout::View::Canvas) && self.pending.is_some_and(|at| at.elapsed() >= Duration::from_millis(250)) && self.busy.is_none() {
+        } else if self.validated && self.actual_preview() && self.preview_work_visible() && self.pending.is_some_and(|at| at.elapsed() >= Duration::from_millis(250)) && self.busy.is_none() {
             self.pending = None;
             self.request_preview(app);
         }
@@ -1140,8 +1146,11 @@ impl<H: EditorHost> Workspace<H> {
     pub fn progress_repaint_delay(&self) -> Option<Duration> {
         self.progress_repaint_delay_at(Instant::now())
     }
+    fn preview_work_visible(&self) -> bool {
+        !self.changes_mode && (self.preview_only || self.inline_identity.is_some() || self.layout.view != layout::View::Canvas)
+    }
     pub fn progress_repaint_delay_at(&self, now: Instant) -> Option<Duration> {
-        let visible_pending = !self.harness && self.pending.is_some() && (self.preview_only || self.layout.view != layout::View::Canvas);
+        let visible_pending = !self.harness && self.pending.is_some() && self.preview_work_visible();
         repaint::progress_delay(now, self.busy.is_some(), visible_pending, self.render_started)
     }
     pub fn expire_render_acknowledgement(&mut self, now: Instant) {
@@ -1164,12 +1173,12 @@ impl<H: EditorHost> Workspace<H> {
         }
     }
     pub fn release_inactive_preview(&mut self) {
-        if self.host.release() {
-            // Keep the semantic draft and immutable prepared artifact. A new
-            // child must acknowledge that exact receipt before becoming current.
-            self.current = false;
-            self.render_started = None;
-        }
+        self.host.release();
+        // A prepared response can arrive before any child exists (for example
+        // reopening on Changes). No hidden receipt can await a renderer ACK.
+        // Retain the artifact and pending draft for its next visible activation.
+        self.current = false;
+        self.render_started = None;
     }
     pub fn performance_state(&self) -> [bool; 5] {
         [self.busy.is_some(), self.pending.is_some(), self.render_started.is_some(), self.current, self.progress_repaint_delay().is_some()]
@@ -1585,6 +1594,7 @@ impl<H: EditorHost> Workspace<H> {
                 ui.label("Waiting for preview");
             }
             ui.small(if self.harness { "Inert embedded-host diagnostic · no repository code" } else { "Registered CityOS renderer · deterministic fixture · owner actions disabled" });
+            if !self.harness { ui.small("F6 returns to the editor · Escape after closing preview controls"); }
             let old = (self.locale.clone(), self.theme.clone(), self.theme_id.clone(), self.interactive);
             if self.harness {
                 ui.small("Keyboard, clipboard and focus controls are inside the diagnostic page.");

@@ -18,6 +18,14 @@ fn physical_bounds(rect: egui::Rect, scale: f32) -> Result<[i32; 4], String> {
     Ok([values[0].round() as i32, values[1].round() as i32,
         values[2].round().max(1.) as i32, values[3].round().max(1.) as i32])
 }
+/// A delayed presentation event cannot focus a hidden or replaced child view.
+#[cfg(any(windows, test))]
+fn focus_current_preview(current_url: Option<&str>, visible: bool, expected_url: &str,
+    focus: impl FnOnce() -> Result<(), String>) -> Result<bool, String> {
+    if !visible || current_url != Some(expected_url) { return Ok(false); }
+    focus()?;
+    Ok(true)
+}
 #[derive(Default)]
 pub struct Host {
     #[cfg(windows)]
@@ -80,6 +88,17 @@ impl Host {
     }
     pub fn poll(&mut self) -> Vec<Value> {
         self.messages.as_ref().map(|rx| rx.try_iter().take(16).collect()).unwrap_or_default()
+    }
+    /// Return keyboard focus without hiding the renderer or changing draft state.
+    /// The workspace must validate the complete event identity before calling.
+    pub fn focus_parent(&self, expected_url: &str) -> Result<bool, String> {
+        #[cfg(windows)]
+        if let Some(view) = &self.view {
+            return focus_current_preview(self.url.as_deref(), self.visible.get(), expected_url,
+                || view.focus_parent().map_err(|error| format!("Cannot return focus to the editor: {error}")));
+        }
+        let _ = expected_url;
+        Ok(false)
     }
     pub fn show(&mut self, frame: &eframe::Frame, url: &str, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> Result<(), String> {
         #[cfg(windows)]
@@ -165,6 +184,19 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn focus_return_requires_the_same_visible_child_and_propagates_platform_failure() {
+        let previous = "http://127.0.0.1:1/previous";
+        let current = "http://127.0.0.1:1/current";
+        for (url, visible, expected) in [(None, true, current), (Some(current), false, current),
+            (Some(current), true, previous)] {
+            assert!(!focus_current_preview(url, visible, expected, || panic!("Obsolete or hidden focus request")).unwrap());
+        }
+        let called = Cell::new(false);
+        assert!(focus_current_preview(Some(current), true, current, || { called.set(true); Ok(()) }).unwrap());
+        assert!(called.get());
+        assert!(focus_current_preview(Some(current), true, current, || Err("platform focus failure".into())).is_err());
+    }
     #[test]
     fn releasing_an_inactive_renderer_fences_old_ipc_and_retains_its_cache_location() {
         let mut host = Host::default();

@@ -82,7 +82,7 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     if ask(json!({"op":"Export","draft":draft(&app.doc)}))?["operationCount"] != 0 {
         return Err("Undo manufactured edits".into());
     }
-    crate::home::thumb::finish_library_jobs(library.root());
+    crate::home::thumb::cancel_library_jobs(library.root())?;
     Ok(
         json!({"nativeRoundtrip":true,"nativeApplicationHost":true,"checkpointHistoryRestored":true,"unchangedOperationCount":0,"editedOperationCount":1,"undoOperationCount":0,"canonicalBase":bundle["draft"]["base"],"embeddedRendererObserved":false}),
     )

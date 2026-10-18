@@ -39,7 +39,7 @@ impl Temp {
         source.save_checkpoint(&file.id, &checkpoint).unwrap();
         // Export precedes prepare: an unresolved matching submission must gate
         // later exports. Its local record cannot travel in this earlier copy.
-        let portable = source.export_checkpoint(&file.id).unwrap();
+        let portable = source.export_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).unwrap();
         let binding = checkpoint.document.cityos.as_ref().unwrap();
         source.prepare_submission(SubmissionCommand {
             intent_id: "portable-intent".into(), operation_id: "portable-operation".into(), predecessor: None,
