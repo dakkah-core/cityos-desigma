@@ -66,6 +66,18 @@ impl Library {
         self.load_checkpoint_locked(id)
     }
 
+    /// The installed extension interprets the complete dependency closure.
+    /// No portability grant is required for a local read. Legacy payload paths,
+    /// document/history bytes and recovery locking remain unchanged.
+    pub fn load_checkpoint_with_policy(&self, policy: &dyn CheckpointStoragePolicy, id: &str) -> Result<DocumentCheckpoint> {
+        let _guard = crate::store::write_lock(self)?;
+        let checkpoint = self.load_checkpoint_state_locked(id)?;
+        let roots = checked_retention_roots(policy, &checkpoint)?;
+        let payloads = self.payloads("cityos")?;
+        for hash in roots { payloads.verify(&hash)?; }
+        Ok(checkpoint)
+    }
+
     pub(crate) fn load_checkpoint_locked(&self, id: &str) -> Result<DocumentCheckpoint> {
         let checkpoint = self.load_checkpoint_state_locked(id)?;
         for hash in checkpoint.dependency_pins() { self.verify_cityos_payload(&hash)?; }
@@ -85,6 +97,26 @@ impl Library {
                 Ok(_) => {}
                 Err(LibraryError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => missing.push(hash),
                 Err(e) => return Err(e),
+            }
+        }
+        Ok((checkpoint, missing))
+    }
+
+    /// Preserve the complete checkpoint when declared dependencies are missing.
+    /// Invalid extension declarations and corrupt payloads fail; neither becomes
+    /// an empty closure or a missing-only result. The caller keeps it protected
+    /// until all returned pins have been verified and materialized.
+    pub fn load_checkpoint_for_recovery_with_policy(&self, policy: &dyn CheckpointStoragePolicy, id: &str) -> Result<(DocumentCheckpoint, Vec<String>)> {
+        let _guard = crate::store::write_lock(self)?;
+        let checkpoint = self.load_checkpoint_state_locked(id)?;
+        let roots = checked_retention_roots(policy, &checkpoint)?;
+        let payloads = self.payloads("cityos")?;
+        let mut missing = Vec::new();
+        for hash in roots {
+            match payloads.verify(&hash) {
+                Ok(()) => {}
+                Err(LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => missing.push(hash),
+                Err(error) => return Err(error),
             }
         }
         Ok((checkpoint, missing))
@@ -641,6 +673,9 @@ mod tests {
         library.save_checkpoint(&id, &checkpoint).unwrap();
         let expected = checkpoint.to_json().unwrap();
         let original_bytes = std::fs::read(library.checkpoint_path(&id).unwrap()).unwrap();
+        let policy = &crate::storage_policy::tests::BOUND_FIXTURE_POLICY;
+        assert!(library.load_checkpoint_with_policy(&UNMANAGED_STORAGE_POLICY, &id).is_err());
+        assert!(library.load_checkpoint_for_recovery_with_policy(&UNMANAGED_STORAGE_POLICY, &id).is_err());
         for (pin, bytes) in &payloads {
             let path = library.path("cityos/payloads").join(pin);
             std::fs::remove_file(&path).unwrap();
@@ -648,15 +683,22 @@ mod tests {
             let (recovered, missing) = restarted.load_checkpoint_for_recovery(&id).unwrap();
             assert_eq!(recovered.to_json().unwrap(), expected);
             assert_eq!(missing, [pin.clone()]);
+            let (policy_recovered, policy_missing) = restarted.load_checkpoint_for_recovery_with_policy(policy, &id).unwrap();
+            assert_eq!(policy_recovered.to_json().unwrap(), expected);
+            assert_eq!(policy_missing, missing);
+            assert!(restarted.load_checkpoint_with_policy(policy, &id).is_err());
             assert!(restarted.load_checkpoint(&id).is_err());
             assert!(restarted.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &id).is_err());
             assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(pin));
             assert_eq!(std::fs::read(restarted.checkpoint_path(&id).unwrap()).unwrap(), original_bytes);
             std::fs::write(&path, b"corrupt dependency").unwrap();
             assert!(restarted.load_checkpoint_for_recovery(&id).is_err(), "corruption must not become a missing-only recovery");
+            assert!(restarted.load_checkpoint_for_recovery_with_policy(policy, &id).is_err());
+            assert!(restarted.load_checkpoint_with_policy(policy, &id).is_err());
             assert!(restarted.put_cityos_payload(pin, b"wrong bytes").is_err());
             restarted.put_cityos_payload(pin, bytes).unwrap();
             assert_eq!(restarted.load_checkpoint(&id).unwrap().to_json().unwrap(), expected);
+            assert_eq!(restarted.load_checkpoint_with_policy(policy, &id).unwrap().to_json().unwrap(), expected);
         }
         let portable = library.export_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &id).unwrap();
         let (target_dir, target, target_id) = Temp::new();

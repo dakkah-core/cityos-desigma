@@ -228,7 +228,7 @@ impl EditorHost for App {
             .map(Ok).unwrap_or_else(|| library.create_project("CityOS drafts")).map_err(|error| error.to_string())?;
         let file = library.create_file_with_history(&project.id, None, &self.doc.name, &self.doc, &self.hist)
             .map_err(|error| error.to_string())?;
-        let checkpoint = library.load_checkpoint(&file.id).map_err(|error| error.to_string())?;
+        let checkpoint = library.load_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).map_err(|error| error.to_string())?;
         let autosave = crate::home::Autosave::created_library_checkpoint(self.canvas.tiles.rev(), &self.doc, &self.hist, checkpoint)?;
         self.lib_file = Some(crate::home::LibFile {
             id: file.id, project_id: project.id, project: project.name, name: file.name,
@@ -341,7 +341,7 @@ impl EditorHost for App {
         let file = self.lib_file.as_ref().ok_or("Save this draft to the library before applying incoming changes")?;
         let recovery = identity(&file.id, &document)?;
         let fingerprint = self.autosave.saved_checkpoint_fingerprint.as_deref().ok_or("This library file has no observed checkpoint; reopen it before applying incoming changes")?;
-        let mut checkpoint = library.load_checkpoint(&file.id).map_err(|error| error.to_string())?;
+        let mut checkpoint = library.load_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).map_err(|error| error.to_string())?;
         if desigma_library::checkpoint_fingerprint(&checkpoint).map_err(|error| error.to_string())? != fingerprint {
             return Err("The durable checkpoint changed; current draft retained. Review/reconcile it before applying incoming changes".into());
         }
@@ -364,7 +364,7 @@ impl EditorHost for App {
             }
             // A journal may have committed despite the reported I/O failure.
             // Both document AND history must be known before retrying a save.
-            match library.load_checkpoint_for_recovery(&file.id) {
+            match library.load_checkpoint_for_recovery_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id) {
                 Ok((recovered, missing)) if missing.is_empty() => {
                     let saved = recovered.to_json().map_err(|error| error.to_string());
                     if saved.as_ref().is_ok_and(|saved| saved == &expected) {
@@ -399,7 +399,7 @@ impl EditorHost for App {
             return Err("Recovery identity no longer matches the active original draft".into());
         }
         let library = self.lib.as_ref().ok_or("Draft library unavailable")?;
-        let (checkpoint, missing) = library.load_checkpoint_for_recovery(&recovery.file_id).map_err(|error| error.to_string())?;
+        let (checkpoint, missing) = library.load_checkpoint_for_recovery_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &recovery.file_id).map_err(|error| error.to_string())?;
         if !missing.is_empty() { return Err("Recovery dependencies remain unavailable".into()); }
         if identity(&recovery.file_id, &checkpoint.document)? == *recovery {
             // A reviewed baseline must retain the exact original state and seal
@@ -432,7 +432,7 @@ impl EditorHost for App {
     fn validate_history_dependencies(&self) -> Result<(), String> {
         let library = self.lib.as_ref().ok_or("The draft library is unavailable")?;
         if let Some(file) = &self.lib_file {
-            library.load_checkpoint(&file.id).map_err(|error| format!(
+            library.load_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).map_err(|error| format!(
                 "Retained history dependencies are unavailable; restore a portable checkpoint before editing: {error}"
             ))?;
         }
@@ -491,7 +491,7 @@ impl EditorHost for App {
         if stored != *record || stored.state != SubmissionState::AcceptedSyncPending {
             return Err("Original accepted outcome changed; refresh recovery".into());
         }
-        let mut checkpoint = library.load_checkpoint(&file_id).map_err(|error| error.to_string())?;
+        let mut checkpoint = library.load_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file_id).map_err(|error| error.to_string())?;
         if checkpoint.document.to_json().map_err(|error| error.to_string())? != self.doc.to_json().map_err(|error| error.to_string())? {
             return Err("Frozen submitted document changed; reload its durable generation".into());
         }

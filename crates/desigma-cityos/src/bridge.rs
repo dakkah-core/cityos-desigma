@@ -16,6 +16,21 @@ pub struct Config {
     pub repository: PathBuf,
     pub cache: PathBuf,
 }
+impl Config {
+    /// Resolve packaged paths without constructing the catalog or scheduling a
+    /// repository scan. Headless document operations share the desktop bridge.
+    pub fn from_reader_options(repository: Option<PathBuf>, reader: Option<PathBuf>, node: Option<PathBuf>, cache: Option<PathBuf>) -> Self {
+        Self {
+            repository: repository.unwrap_or_default(),
+            bridge: Self::reader_path(reader).with_file_name("workspace.mjs"),
+            node: node.unwrap_or_else(|| "node".into()),
+            cache: cache.unwrap_or_else(|| std::env::temp_dir().join("desigma-cityos-cache")),
+        }
+    }
+    pub(crate) fn reader_path(reader: Option<PathBuf>) -> PathBuf {
+        reader.or_else(|| std::env::current_exe().ok().map(|p| p.with_file_name("cityos-reader").join("reader.mjs"))).unwrap_or_default()
+    }
+}
 pub struct Bridge {
     pub jobs: SyncSender<Value>,
     pub replies: Receiver<Result<Value, String>>,
@@ -223,6 +238,22 @@ fn compatible(hello: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configuration_resolution_does_not_read_create_or_execute_repository_or_cache_paths() {
+        let root=std::env::temp_dir().join(format!("desigma-config-uncreated-{}",uuid::Uuid::new_v4()));
+        let repository=root.join("unselected-repository");
+        let reader=root.join("uninstalled-reader/reader.mjs");
+        let node=root.join("uninstalled-node.exe");
+        let cache=root.join("uncreated-cache");
+        let config=Config::from_reader_options(Some(repository.clone()),Some(reader.clone()),Some(node.clone()),Some(cache.clone()));
+        assert!(!root.exists(),"Path resolution must not start a catalog, child, cache or capture");
+        assert_eq!(config.repository,repository);assert_eq!(config.bridge,reader.with_file_name("workspace.mjs"));
+        assert_eq!(config.node,node);assert_eq!(config.cache,cache);
+        let defaults=Config::from_reader_options(None,None,None,None);
+        assert!(defaults.repository.as_os_str().is_empty());
+        assert_eq!(defaults.bridge,Config::reader_path(None).with_file_name("workspace.mjs"));
+        assert_eq!(defaults.cache,std::env::temp_dir().join("desigma-cityos-cache"));
+    }
     #[test]
     fn a_stalled_stdin_write_does_not_block_cancellation_or_the_request_deadline() {
         struct BlockedWriter {entered:mpsc::Sender<()>,release:Receiver<()>}

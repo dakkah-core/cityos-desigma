@@ -229,7 +229,7 @@ impl App {
             if !self.flush_autosave() { return; }
         }
         let loaded = lib.file(id).and_then(|e| {
-            let (checkpoint, missing) = lib.load_checkpoint_for_recovery(id)?;
+            let (checkpoint, missing) = lib.load_checkpoint_for_recovery_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, id)?;
             let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint)?;
             Ok((e, checkpoint.document, checkpoint.history, missing, fingerprint))
         });
@@ -455,7 +455,7 @@ impl App {
         match lib.create_file_with_history(project, folder, name, &doc, &self.hist) {
             Ok(e) => {
                 doc.name = e.name.clone();
-                let autosave = lib.load_checkpoint(&e.id).map_err(|error| error.to_string())
+                let autosave = lib.load_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &e.id).map_err(|error| error.to_string())
                     .and_then(|checkpoint| Autosave::created_library_checkpoint(self.canvas.tiles.rev(), &doc, &self.hist, checkpoint));
                 let autosave = match autosave {
                     Ok(autosave) => autosave,

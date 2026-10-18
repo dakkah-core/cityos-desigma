@@ -25,12 +25,20 @@ pub type Workspace = desigma_cityos::workspace::Workspace<App>;
 #[cfg(test)] use repaint::RENDER_ACK_TIMEOUT;
 /// Headless delivery check through the same native document and trusted bridge paths.
 pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<Value, String> {
+    let started = Instant::now();
+    let mut phase = Instant::now();
+    let mut timings_ms = BTreeMap::new();
+    let mut record = |name: &str| {
+        timings_ms.insert(name.to_owned(), phase.elapsed().as_secs_f64() * 1000.);
+        phase = Instant::now();
+    };
     let bundle: Value =
         serde_json::from_slice(&std::fs::read(directory.join("canonical-bundle.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let bridge = bridge::Bridge::spawn(config.clone());
     let mut document = binding(bundle["draft"].clone(), &bundle["projection"])?;
     let path = crate::io::save_path(&document, &directory.join("native-flat.desigma"))?;
     document = crate::io::load_path(&path)?;
+    record("bindAndStandaloneRoundtrip");
     let ask = |request: Value| -> Result<Value, String> {
         bridge.jobs.send(request).map_err(|e| e.to_string())?;
         bridge.replies.recv_timeout(Duration::from_secs(30)).map_err(|e| e.to_string())?
@@ -38,21 +46,27 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     if ask(json!({"op":"Export","draft":draft(&document)}))?["operationCount"] != 0 {
         return Err("Initial roundtrip manufactured edits".into());
     }
+    record("initialBridgeExport");
     let d = draft(&document).ok_or("Missing binding")?.clone();
     let result = ask(
         json!({"op":"Command","draft":d,"command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],"operationId":"native-roundtrip","operation":"set-property","nodeId":"material","property":"elevation","value":"resting"}}),
     )?;
+    record("semanticCommand");
     // Exercise the same native host and conditional checkpoint save used by the
     // desktop, including exact retained dependencies and reopened Undo/Redo.
     let library = desigma_library::Library::open(directory.join("draft-library")).map_err(|e| e.to_string())?;
     let retained = ask(json!({"op":"Dependencies","draft":draft(&document)}))?;
     dependencies::retain(&config.cache, &library, draft(&document).ok_or("Missing binding")?, &retained)?;
+    record("dependencyRetention");
     let mut app = App::new(document);
     app.lib = Some(library.clone()); app.home = None;
     <App as desigma_cityos::editor::EditorHost>::save_to_draft_library(&mut app)?;
+    record("initialLibrarySave");
     <App as desigma_cityos::editor::EditorHost>::install_edit(&mut app, binding(result["draft"].clone(), &result["projection"])?)?;
     if !dependencies::complete(&library, &app.doc) { return Err("Edited dependency closure is incomplete".into()); }
+    record("installEdit");
     app.save_library_file()?;
+    record("editedLibrarySave");
     let file = app.lib_file.as_ref().ok_or("Missing saved draft")?.id.clone();
     fn reopen(library: &desigma_library::Library, file: &str) -> Result<App, String> {
         let mut reopened = App::new(desigma_doc::Document::new("Unopened checkpoint"));
@@ -65,9 +79,11 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     }
     app = reopen(&library, &file)?;
     if !app.hist.can_undo() { return Err("Reopening lost the saved undo history".into()); }
+    record("editedLibraryReopen");
     document = app.doc.clone();
     let path = crate::io::save_path(&document, &directory.join("native-resting.desigma"))?;
     let reopened = crate::io::load_path(&path)?;
+    record("editedStandaloneRoundtrip");
     let exported = ask(json!({"op":"Export","draft":draft(&reopened)}))?;
     if exported["operationCount"] != 1
         || exported["changeset"]["changes"][0]["field"] != "elevation"
@@ -75,16 +91,20 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     {
         return Err("Unexpected semantic export".into());
     }
+    record("editedBridgeExport");
     app.hist.undo(&mut app.doc).map_err(|e| e.to_string())?;
     app.save_library_file()?;
     app = reopen(&library, &file)?;
     if !app.hist.can_redo() { return Err("Reopening lost the saved redo history".into()); }
+    record("undoSaveAndReopen");
     if ask(json!({"op":"Export","draft":draft(&app.doc)}))?["operationCount"] != 0 {
         return Err("Undo manufactured edits".into());
     }
+    record("undoBridgeExport");
     crate::home::thumb::cancel_library_jobs(library.root())?;
+    record("thumbnailCleanup");
     Ok(
-        json!({"nativeRoundtrip":true,"nativeApplicationHost":true,"checkpointHistoryRestored":true,"unchangedOperationCount":0,"editedOperationCount":1,"undoOperationCount":0,"canonicalBase":bundle["draft"]["base"],"embeddedRendererObserved":false}),
+        json!({"nativeRoundtrip":true,"nativeApplicationHost":true,"checkpointHistoryRestored":true,"unchangedOperationCount":0,"editedOperationCount":1,"undoOperationCount":0,"canonicalBase":bundle["draft"]["base"],"timingsMs":timings_ms,"elapsedMs":started.elapsed().as_secs_f64()*1000.,"embeddedRendererObserved":false}),
     )
 }
 #[cfg(test)]

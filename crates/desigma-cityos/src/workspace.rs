@@ -169,6 +169,7 @@ pub struct Workspace<H: EditorHost> {
     $visibility resource_diagnostics: Vec<Value>,
     $visibility picker_open: bool,
     $visibility resource_search: String,
+    $visibility coverage: crate::workspace_support::coverage::Coverage,
     $visibility requested_source: Option<String>,
     $visibility open_after_preview: bool,
     $visibility temporary_canvas: Option<H::Canvas>,
@@ -239,6 +240,7 @@ impl<H: EditorHost> Default for Workspace<H> {
             resource_diagnostics: vec![],
             picker_open: false,
             resource_search: String::new(),
+            coverage: Default::default(),
             requested_source: None,
             open_after_preview: false,
             temporary_canvas: None,
@@ -317,6 +319,7 @@ impl<H: EditorHost> Workspace<H> {
         self.requested_source = source;
         self.picker_open = self.requested_source.is_none();
         self.resources.clear();
+        self.coverage = Default::default();
         self.resource = None;
         self.resource_diagnostics.clear();
         self.temporary_canvas = None;
@@ -561,6 +564,7 @@ impl<H: EditorHost> Workspace<H> {
             return;
         }
         self.host.configure_storage(&config.cache);
+        self.coverage = Default::default();
         self.invalidate_specimen_request();
         self.resource = None;
         self.host.reset();
@@ -585,6 +589,7 @@ impl<H: EditorHost> Workspace<H> {
             return;
         }
         self.selected=document_selection(app.document(),&self.selected);
+        self.coverage = Default::default();
         self.host.configure_storage(&config.cache);
         self.invalidate_specimen_request();
         self.resume_document=None;
@@ -742,7 +747,7 @@ impl<H: EditorHost> Workspace<H> {
             && matches!(value["op"].as_str(),Some("Command"|"Reconcile")) {
             self.error=Some("The immutable submitted draft stays frozen until its original owner outcome is resolved.".into());return;
         }
-        if self.is_specimen() && !matches!(value["op"].as_str(), Some("FixturePreview" | "Fixtures" | "Resources")) {
+        if self.is_specimen() && !matches!(value["op"].as_str(), Some("FixturePreview" | "Fixtures" | "Resources" | "SemanticCoverage")) {
             self.error = Some(SPECIMEN_CANVAS_REASON.into());
             return;
         }
@@ -928,6 +933,10 @@ impl<H: EditorHost> Workspace<H> {
         let result = self.bridge.as_ref().and_then(|b| b.replies.try_recv().ok());
         if let Some(result) = result {
             let op = self.busy.take().unwrap_or_default();
+            if op == "SemanticCoverage" {
+                self.coverage.receive(result);
+                return;
+            }
             let presentation = self.sent_presentation.take();
             let history_command = if op == "Command" { self.history_command.take() } else { None };
             match result {
@@ -1013,6 +1022,18 @@ impl<H: EditorHost> Workspace<H> {
                                 if !self.preview_only { let selected=document_selection(app.document(),&self.selected); self.select(app,&selected); }
                                 self.observed = None;
                                 self.pending = Some(Instant::now());
+                                if op == "Command" {
+                                    // Undo/redo can run while Changes is visible.
+                                    // An export belongs to the preceding revision;
+                                    // retire it atomically with the installed edit.
+                                    self.compare = None;
+                                    self.compare_open = false;
+                                    if self.changes_mode {
+                                        if let Some(draft) = self.active_draft(app) {
+                                            self.send(json!({"op":"Export","draft":draft}));
+                                        }
+                                    }
+                                }
                             }
                           }
                         },
@@ -1135,6 +1156,11 @@ impl<H: EditorHost> Workspace<H> {
             resource["previewNotice"] = json!(registered_availability_reason(selection));
             self.resources.push(resource);
         }
+    }
+    pub fn request_coverage(&mut self, refresh: bool) {
+        self.coverage.open = true;
+        if self.busy.is_some() || self.recovery_pending || (!refresh && self.coverage.report.is_some()) { return; }
+        self.send(json!({"op":"SemanticCoverage","summaryOnly":true,"locale":self.locale}));
     }
     pub fn choose_design_file(&mut self) {
         self.picker_open = self.changes_mode || !self.picker_open;
@@ -1262,6 +1288,10 @@ impl<H: EditorHost> Workspace<H> {
                 H::workspace_tools(ui);
                 if ui.add_enabled(self.busy.is_none()&&!self.recovery_pending, egui::Button::new("Choose design file…")).clicked() {
                     self.choose_design_file();
+                }
+                if ui.add_enabled(self.busy.is_none()&&!self.recovery_pending, egui::Button::new("L0–L9 coverage"))
+                    .on_hover_text("Inspect installed preview, canvas and editing support at every level").clicked() {
+                    self.request_coverage(false);
                 }
                 if self.preview_only && !self.harness {
                     if ui
@@ -1437,7 +1467,7 @@ impl<H: EditorHost> Workspace<H> {
                             }}
                             ui.collapsing("Complete semantic export",|ui|{ui.monospace(compare);});
                         } else {ui.monospace(compare);}
-                    } else {ui.label("Choose Compare local edits.");}
+                    } else {ui.label(if self.busy.as_deref() == Some("Export") { "Comparing current draft…" } else { "Choose Compare local edits." });}
                 });
                 if apply_incoming {if let (Some(draft),Some(incoming))=(self.active_draft(app),self.incoming.clone()){
                     let resolutions:Vec<_>=self.resolutions.iter().filter(|(_,value)|!value.is_empty()).map(|(pointer,value)|json!({"sourcePointer":pointer,"resolution":value})).collect();
@@ -1681,7 +1711,10 @@ impl<H: EditorHost> Workspace<H> {
         if (!show_side_preview && !show_full_preview) || !self.open {
             self.release_inactive_preview();
         }
-        if self.compare_open {
+        if self.coverage.open {
+            self.host.hide();
+            if self.coverage.show(&ctx, self.busy.is_some() || self.recovery_pending) { self.request_coverage(true); }
+        } else if self.compare_open {
             self.host.hide();
             egui::Window::new("Semantic changes · local export").open(&mut self.compare_open).default_size([720., 520.]).show(&ctx, |ui| {
                 if let Some(text) = &self.compare {

@@ -324,6 +324,96 @@ fn transport(workspace: &mut Workspace<FakeHost>) -> (Receiver<Value>, Sender<Re
 fn property_field() -> Value { json!({"nodeId":"root", "property":"elevation"}) }
 
 #[test]
+fn coverage_is_explicit_coalesced_read_only_and_keeps_draft_and_preview_state() {
+    let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+    let before = host.active.snapshot();
+    let mut workspace = ready_workspace();
+    workspace.current = true;
+    workspace.preview = Some(json!({"requestId":"current-preview"}));
+    let preview = workspace.preview.clone();
+    let resource = workspace.resource.clone();
+    let (requests, responses) = transport(&mut workspace);
+    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    workspace.request_coverage(false);
+    assert_eq!(requests.try_recv().unwrap(), json!({"op":"SemanticCoverage","summaryOnly":true,"locale":"ar"}));
+    workspace.request_coverage(false);
+    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    let report = json!({"installedCoverage":{"schemaVersion":"cityos.design-workspace.installed-coverage.v1",
+        "packageIdentity":"test-package","ownerWrites":false,"qualification":"unqualified",
+        "levels":(0..10).map(|level|json!({"level":format!("L{level}"),"status":"unscanned"})).collect::<Vec<_>>()}});
+    responses.send(Ok(report.clone())).unwrap();
+    workspace.poll(&mut host);
+    assert_eq!(workspace.coverage.report, Some(report["installedCoverage"].clone()));
+    assert!(workspace.coverage.error.is_none());
+    workspace.request_coverage(false); // Opening a loaded view is not background polling.
+    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    workspace.request_coverage(true);
+    assert_eq!(requests.try_recv().unwrap()["op"], "SemanticCoverage");
+    responses.send(Err("Incompatible old helper".into())).unwrap();
+    workspace.poll(&mut host);
+    assert_eq!(workspace.coverage.error.as_deref(), Some("Incompatible old helper"));
+    assert_eq!(workspace.coverage.report, Some(report["installedCoverage"].clone()));
+    assert!(workspace.error.is_none());
+    assert!(workspace.current);
+    assert_eq!(workspace.preview, preview);
+    assert_eq!(workspace.resource, resource);
+    assert_eq!(host.active.snapshot(), before);
+    assert!(host.calls.is_empty());
+}
+
+#[test]
+fn coverage_cannot_overlap_commands_or_bypass_recovery_and_is_available_for_temporary_specimens() {
+    let mut workspace = ready_workspace();
+    let (requests, _) = transport(&mut workspace);
+    workspace.busy = Some("Command".into());
+    workspace.request_coverage(true);
+    assert_eq!(workspace.busy.as_deref(), Some("Command"));
+    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    workspace.busy = None;
+    workspace.recovery_pending = true;
+    workspace.request_coverage(true);
+    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    workspace.recovery_pending = false;
+    workspace.preview_only = true;
+    workspace.resource = Some(json!({"kind":"registered-specimen"}));
+    workspace.request_coverage(true);
+    assert_eq!(requests.try_recv().unwrap()["op"], "SemanticCoverage");
+    assert!(workspace.error.is_none());
+    assert!(workspace.staged.is_none());
+    assert!(workspace.temporary_canvas.is_none());
+}
+
+#[test]
+fn installed_commands_retire_previous_comparison_and_refresh_changes_for_the_new_revision() {
+    for changes_mode in [false, true] {
+        let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+        let mut workspace = ready_workspace();
+        workspace.changes_mode = changes_mode;
+        workspace.compare = Some(json!({"operationCount":1}).to_string());
+        workspace.compare_open = true;
+        let (requests, responses) = transport(&mut workspace);
+        workspace.send_property_command(&host, &property_field(), json!("flat"));
+        assert_eq!(requests.try_recv().unwrap()["op"], "Command");
+        let next_revision = revision(host.document()).unwrap().1 + 1;
+        let next = fixture_bundle("active", next_revision, "flat");
+        responses.send(Ok(next.clone())).unwrap();
+        workspace.poll(&mut host);
+        assert_eq!(draft(host.document()), Some(&next["draft"]));
+        assert!(workspace.compare.is_none(), "a prior export cannot describe the installed revision");
+        assert!(!workspace.compare_open);
+        if changes_mode {
+            let request = requests.try_recv().expect("Changes should compare the installed revision automatically");
+            assert_eq!(request, json!({"op":"Export","draft":next["draft"]}));
+            responses.send(Ok(json!({"operationCount":0}))).unwrap();
+            workspace.poll(&mut host);
+            assert_eq!(serde_json::from_str::<Value>(workspace.compare.as_ref().unwrap()).unwrap()["operationCount"], 0);
+            assert!(!workspace.compare_open);
+        }
+        assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    }
+}
+
+#[test]
 fn hidden_prepared_preview_has_no_ack_deadline_even_before_a_child_exists() {
     use std::time::Instant;
     let mut workspace = ready_workspace();

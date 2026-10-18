@@ -280,10 +280,10 @@ impl AtlasTools {
             ui.separator();
             ui.add(egui::Label::new(RichText::new(PRIVATE_ACCESS).small().color(theme.text_secondary)).wrap());
             let guide = ui.collapsing("Prepare fixes for Codex", |ui| {
-                ui.add(egui::Label::new("In Atlas Reports, use a completed report's Download Codex batches action. The ZIP contains README.md, numbered batches of up to 25 tasks, and the original full report.").wrap());
+                ui.add(egui::Label::new("For small reports in Atlas Reports, use a completed report's Download Codex batches action. The ZIP contains README.md, numbered batches of up to 25 tasks, and the original full report.").wrap());
                 ui.add(egui::Label::new("Open Codex in C:/Dakkah-CityOS/dakkah-cityos-cms. Load README.md plus one downloaded .codex.md batch at a time. Run batches serially by default.").wrap());
                 ui.add(egui::Label::new("Before changing code, match the report's exact source pin to the CMS checkout. These links follow the latest accepted analysis; choose and pin the intended run in Atlas.").wrap());
-                ui.add(egui::Label::new("Optional CLI fallback: scripts/atlas-codex-pack.mjs in the Atlas repository.").wrap());
+                ui.add(egui::Label::new("For large reports, choose Save full report, then use scripts/atlas-codex-pack.mjs in the Atlas repository to create local batches from the saved report.").wrap());
             });
             services.record(ui, "catalog-atlas-guide", guide.header_response.rect);
         });

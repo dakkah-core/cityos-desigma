@@ -615,8 +615,25 @@ impl Browser {
             if !actions.preview_choices.is_empty() {
                 if let Some(request) = preview_choices_menu(ui, services, &actions.preview_choices) { self.workspace_request = Some(request); }
             }
-            let unavailable = actions.workspace_reason.as_deref().or_else(|| (!actions.editable).then_some(actions.edit_reason.as_str()));
-            if action_button(ui, services, "catalog-edit-action", if self.mode == "local" { "Open canonical draft" } else { "Open on canvas" }, unavailable) {
+            let snapshot = self.summary.as_ref().map(|summary| &summary["snapshot"]).unwrap_or(&Value::Null);
+            // A protected composition can use the existing canonical canvas route
+            // without granting editable fields or adopting a temporary/local view.
+            let protected_canvas = !actions.editable && actions.workspace_reason.is_none()
+                && self.mode == "committed" && snapshot["mode"] == "committed"
+                && entry.kind == "authored-composition" && entry.classification_status == "classified"
+                && actions.source.as_deref() == Some(entry.source_path.as_str())
+                && entry.source_digest.len() == 64 && entry.source_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && snapshot["canonicalCommit"].as_str().is_some_and(|commit| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                && snapshot["observations"].as_array().is_some_and(|observations| observations.iter().any(|observation|
+                    observation["id"] == entry.observation_id && observation["kind"] == "git"
+                        && observation["revision"] == snapshot["canonicalCommit"]))
+                && self.specimen.as_ref().is_some_and(|specimen| support::matches(&entry, specimen)
+                    && specimen["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1"
+                    && specimen["workspaceProfile"]["kind"] != "registered-specimen");
+            let unavailable = actions.workspace_reason.as_deref().or_else(|| (!actions.editable && !protected_canvas).then_some(actions.edit_reason.as_str()));
+            let label = if self.mode == "local" { "Open canonical draft" }
+                else if protected_canvas { "Open protected canvas" } else { "Open on canvas" };
+            if action_button(ui, services, "catalog-edit-action", label, unavailable) {
                 if let Some(source) = &actions.source {
                     self.workspace_request = Some(super::WorkspaceRequest::selected(source, false));
                 }

@@ -68,8 +68,8 @@ fn main() {
         return;
     }
     if let Some(directory)=&opts.cityos_verify_workspace {
-        let browser=cityos_catalog::Browser::new(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone(),opts.cityos_canonical_ref.clone());
-        match design_workspace::verify_roundtrip(browser.workspace_config(),directory){Ok(report)=>println!("{report}"),Err(error)=>{eprintln!("Native workspace verification failed: {error}");std::process::exit(1);}}
+        let config=design_workspace::Config::from_reader_options(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone());
+        match design_workspace::verify_roundtrip(config,directory){Ok(report)=>println!("{report}"),Err(error)=>{eprintln!("Native workspace verification failed: {error}");std::process::exit(1);}}
         return;
     }
     if let Some(dir) = &opts.seed_library {

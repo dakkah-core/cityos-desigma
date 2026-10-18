@@ -464,6 +464,79 @@ fn clicking_preview_before_materialization_requests_the_selected_resource() {
     assert!(browser.specimen.is_none());
 }
 
+fn protected_canvas_browser() -> Browser {
+    let (mut browser, _, _) = fixture();
+    let mut selected = entry("protected-composition");
+    selected.kind = "authored-composition".into();
+    selected.family = "composition".into();
+    selected.level = Some("L9".into());
+    selected.semantic_id = "fixture.protected-composition".into();
+    selected.source_path = "config/experience/another-page.input.json".into();
+    selected.source_digest = "b".repeat(64);
+    browser.summary = Some(profile_summary());
+    browser.summary.as_mut().unwrap()["snapshot"]["observations"] = json!([
+        {"id":selected.observation_id,"kind":"git","revision":"a".repeat(40)}
+    ]);
+    browser.select(selected.clone());
+    browser.pending_selection = false;
+    browser.has_bound_draft = true;
+    browser.specimen = Some(json!({"entry":selected,"digest":selected.source_digest,
+        "data":{"composition":{"schemaVersion":"cityos.experience-composition.v1","id":selected.semantic_id,
+            "revision":"1","root":{"kind":"component","id":"root","component":{"id":"fixture.protected","version":"1"},"props":{},"slots":{}}}},
+        "workspaceSelection":{"status":"unavailable","reason":"No renderer binding."}}));
+    browser
+}
+
+#[test]
+fn protected_canvas_opens_the_exact_canonical_composition_without_editing_or_renderer_authority() {
+    let ctx = egui::Context::default();
+    let mut browser = protected_canvas_browser();
+    let selected = browser.selected.clone().unwrap();
+    let output = catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1000.), vec![]);
+    let mut text = String::new();
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.contains("Open protected canvas"));
+    assert!(!text.contains("Open actual preview"));
+    click_catalog(&mut browser, &ctx, egui::vec2(1600., 1000.), "catalog-edit-action");
+    let request = browser.workspace_request.take().expect("Protected canonical structure should open directly");
+    assert_eq!(request.source_path.as_deref(), Some(selected.source_path.as_str()));
+    assert!(!request.preview_only && !request.resume);
+    assert!(request.resource_pin.is_none(), "Pinned requests use the preview-only route");
+    let actions = support::actions(&selected, browser.specimen.as_ref(), browser.summary.as_ref(), "committed");
+    assert!(!actions.editable && !actions.actual_preview);
+    assert!(!selected.editable && !selected.persistent_draft && !selected.renderer_qualified);
+}
+
+#[test]
+fn protected_canvas_preserves_local_native_identity_selection_and_temporary_barriers() {
+    for barrier in ["local-mode", "local-snapshot", "native", "revision", "no-observation", "unclassified",
+        "stale-entry", "stale-digest", "unloaded", "ambiguous", "mismatched-profile", "temporary"] {
+        let ctx = egui::Context::default();
+        let mut browser = protected_canvas_browser();
+        match barrier {
+            "local-mode" => browser.mode = "local".into(),
+            "local-snapshot" => browser.summary.as_mut().unwrap()["snapshot"]["mode"] = json!("local"),
+            "native" => browser.summary.as_mut().unwrap()["snapshot"]["observations"][0]["kind"] = json!("native"),
+            "revision" => browser.summary.as_mut().unwrap()["snapshot"]["observations"][0]["revision"] = json!("c".repeat(40)),
+            "no-observation" => browser.summary.as_mut().unwrap()["snapshot"]["observations"] = json!([]),
+            "unclassified" => browser.selected.as_mut().unwrap().classification_status = "conflicting".into(),
+            "stale-entry" => browser.specimen.as_mut().unwrap()["entry"]["id"] = json!("another-selection"),
+            "stale-digest" => browser.specimen.as_mut().unwrap()["digest"] = json!("c".repeat(64)),
+            "unloaded" => browser.specimen = None,
+            "ambiguous" => browser.specimen.as_mut().unwrap()["workspaceSelection"]["status"] = json!("ambiguous"),
+            "mismatched-profile" => {
+                let specimen = browser.specimen.as_mut().unwrap();
+                specimen["workspaceSelection"]["status"] = json!("selected");
+                specimen["workspaceProfile"] = json!({"kind":"composition","sourcePath":"config/experience/unrelated.input.json"});
+            }
+            "temporary" => browser.specimen.as_mut().unwrap()["workspaceProfile"] = json!({"kind":"registered-specimen"}),
+            _ => unreachable!(),
+        }
+        click_catalog(&mut browser, &ctx, egui::vec2(1600., 1000.), "catalog-edit-action");
+        assert!(browser.workspace_request.is_none(), "Protected canvas bypassed {barrier}");
+    }
+}
+
 #[test]
 fn compact_results_return_keeps_selection_and_loaded_specimen() {
     let ctx = egui::Context::default();

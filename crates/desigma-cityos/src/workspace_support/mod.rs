@@ -2,3 +2,4 @@
 pub mod presentation;
 pub mod history_commands;
 pub mod submission_recovery;
+pub mod coverage;

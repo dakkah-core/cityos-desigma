@@ -190,12 +190,14 @@ fn disconnected_result_is_failure_and_does_not_leave_stale_pending_state() {
 }
 
 #[test]
-fn expanded_shared_guide_retains_real_zip_source_pin_and_serial_workflow() {
+fn expanded_shared_guide_routes_small_and_large_reports_and_retains_source_pin() {
     let ctx=egui::Context::default();ctx.all_styles_mut(|style|style.animation_time=0.);
     frame(&ctx,true,vec![]);frame(&ctx,true,vec![]);click(&ctx,true,"catalog-atlas-menu");
     frame(&ctx,true,vec![]);frame(&ctx,true,vec![]);click(&ctx,true,"catalog-atlas-guide");
     frame(&ctx,true,vec![]);let output=frame(&ctx,true,vec![]);let text=text(&output);
-    for expected in ["Download Codex batches","README.md","25 tasks","one downloaded .codex.md batch","serially","exact source pin",PRIVATE_ACCESS] {
+    // Rendered guide only; this does not prove a browser save or local packaging.
+    for expected in ["For small reports in Atlas Reports, use a completed report's Download Codex batches action.","The ZIP contains README.md","25 tasks","For large reports, choose Save full report, then use scripts/atlas-codex-pack.mjs","local batches from the saved report","one downloaded .codex.md batch","serially","exact source pin",PRIVATE_ACCESS] {
         assert!(text.contains(expected),"shared guide omitted {expected}");
     }
+    assert!(!text.contains("Optional CLI fallback"),"local packaging is the large-report workflow");
 }

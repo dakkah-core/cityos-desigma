@@ -198,12 +198,8 @@ impl WorkspaceRequest {
 
 impl Browser {
     pub fn workspace_config(&self) -> crate::bridge::Config {
-        crate::bridge::Config {
-            node: PathBuf::from(&self.node),
-            bridge: PathBuf::from(&self.reader).with_file_name("workspace.mjs"),
-            repository: PathBuf::from(&self.repository),
-            cache: self.cache.clone().unwrap_or_else(|| std::env::temp_dir().join("desigma-cityos-cache")),
-        }
+        crate::bridge::Config::from_reader_options(Some(self.repository.clone().into()),Some(self.reader.clone().into()),
+            Some(self.node.clone().into()),self.cache.clone())
     }
     pub fn new(repository: Option<PathBuf>, reader: Option<PathBuf>, node: Option<PathBuf>, cache: Option<PathBuf>, canonical_ref: Option<String>, services: CatalogUiServices) -> Self {
         let (jobs, requests) = mpsc::channel();
@@ -313,7 +309,7 @@ impl Browser {
             }
         });
         let open = repository.is_some();
-        let reader = reader.or_else(|| std::env::current_exe().ok().map(|p| p.with_file_name("cityos-reader").join("reader.mjs")));
+        let reader = Some(crate::bridge::Config::reader_path(reader));
         let mut browser = Self {
             services,
             open,

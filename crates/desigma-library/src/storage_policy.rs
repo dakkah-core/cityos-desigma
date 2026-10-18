@@ -196,6 +196,8 @@ pub(crate) mod tests {
         assert!(VerifiedPortableCheckpoint::parse_with_policy(&InvalidRoots, &portable).is_err());
         assert!(library.import_checkpoint_with_policy(&InvalidRoots, &file.id, &portable).is_err());
         assert!(library.retention_roots_with_policy(&InvalidRoots).is_err());
+        assert!(library.load_checkpoint_with_policy(&InvalidRoots, &file.id).is_err());
+        assert!(library.load_checkpoint_for_recovery_with_policy(&InvalidRoots, &file.id).is_err());
         assert_eq!(files(library.root()), before);
     }
 }
