@@ -8,4 +8,10 @@ pub mod repaint;
 pub mod dependencies;
 pub mod projection;
 pub mod draft;
+pub mod editor;
+pub mod workspace;
+#[doc(hidden)]
+pub mod workspace_support;
 pub mod catalog;
+#[cfg(test)]
+mod workspace_tests;

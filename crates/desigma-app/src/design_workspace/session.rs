@@ -4,10 +4,18 @@ use crate::home::{Autosave, LibFile};
 use desigma_doc::{Document, History, NodeId};
 use std::path::PathBuf;
 
-pub(super) struct EditorSession {
+pub struct EditorSession {
     document: Document,
     path: Option<PathBuf>,
     state: SessionState,
+}
+
+impl desigma_cityos::editor::EditorSession for EditorSession {
+    fn name(&self) -> &str { &self.document.name }
+
+    fn file_id(&self) -> Option<&str> {
+        self.state.file.as_ref().map(|file| file.id.as_str())
+    }
 }
 
 struct SessionState {

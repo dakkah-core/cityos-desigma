@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 #[derive(Default)]
-pub(super) struct AutoFit {
+pub struct AutoFit {
     draft_id: String,
     bounds: [f32; 6],
     view: [f32; 3],
@@ -33,24 +33,7 @@ pub(super) fn fit_canvas(state: &mut Option<AutoFit>, app: &mut App) {
     }
 }
 
-pub(super) fn key(draft: &Value, presentation: &Value) -> Value {
-    json!({"draftId":draft["draftId"],"draftRevision":draft["draftRevision"],
-        "semanticDigest":draft["semanticDigest"],"presentation":presentation})
-}
-
-pub(super) fn scene_matches(projection: &Value, sent: Option<&Value>) -> bool {
-    let Some(sent) = sent else { return false; };
-    let scene = &projection["scene"];
-    scene.is_object() && sent["themeId"] == ""
-        && ["locale", "theme", "viewport"].iter().all(|field| scene[*field] == sent[*field])
-}
-
-pub(super) fn scene_resource(resource: &Value) -> bool {
-    matches!(resource["fixture"].as_str(), Some("cityos-accordion" | "cityos-web-frame"))
-        || resource["fixture"] == "cityos-lower-level"
-            && resource["nativeSceneAdapter"] == "cityos.living-canvas-lower-level.native-scene.v1"
-}
-
+pub use desigma_cityos::workspace_support::presentation::{key,scene_matches,scene_resource};
 pub(super) fn install(app: &mut App, projection: Document) -> Result<(), String> {
     let mut current = serde_json::to_value(&app.doc).map_err(|e| e.to_string())?;
     let derived = serde_json::to_value(&projection).map_err(|e| e.to_string())?;
@@ -77,38 +60,6 @@ pub(super) fn install(app: &mut App, projection: Document) -> Result<(), String>
     // No changed(), history operation, saved-hash reset or tile revision bump.
     app.canvas.tiles.invalidate_all();
     Ok(())
-}
-
-impl Workspace {
-    pub(super) fn presentation(&self) -> Value {
-        // Named repository themes are qualified for the actual renderer only.
-        // Keep the native default-theme projection distinct and explicitly labelled.
-        json!({"locale":self.locale,"theme":self.theme,"themeId":"",
-            "viewport":{"width":self.viewport.0,"height":self.viewport.1}})
-    }
-    pub(super) fn native_theme_notice(&self) -> Option<&'static str> {
-        (self.has_native_scene() && !self.theme_id.is_empty()).then_some(
-            "Native canvas uses the renderer default theme. The selected theme applies to the actual web preview.")
-    }
-    pub(super) fn has_native_scene(&self) -> bool {
-        !self.is_specimen() && self.resource.as_ref().is_some_and(scene_resource)
-    }
-    pub(super) fn native_presentation_current(&self, app: &App) -> bool {
-        self.active_draft(app).is_some_and(|draft| self.canvas_presentation.as_ref() == Some(&key(&draft, &self.presentation())))
-    }
-    pub(super) fn project_response_current(&self, app: &App, value: &Value, sent: Option<&Value>) -> bool {
-        sent.is_some_and(|sent| *sent == self.presentation())
-            && self.active_draft(app).as_ref() == Some(&value["draft"])
-    }
-    pub(super) fn refresh_native_presentation(&mut self, app: &App) -> bool {
-        if !self.has_native_scene() || self.busy.is_some() || self.recovery_pending
-            || !self.pending.is_some_and(|at| at.elapsed() >= Duration::from_millis(250)) { return false; }
-        let Some(draft) = self.active_draft(app) else { return false; };
-        let key = key(&draft, &self.presentation());
-        if self.projection_attempted.as_ref() == Some(&key) { return false; }
-        self.send(json!({"op":"Project","draft":draft}));
-        self.busy.as_deref() == Some("Project")
-    }
 }
 
 #[cfg(test)]
@@ -242,11 +193,14 @@ mod tests {
         let (bridge,requests,responses)=super::super::bridge::Bridge::test_transport();
         let mut workspace=Workspace::default(); workspace.bridge=Some(bridge); workspace.validated=true; workspace.themes_loaded=true;
         workspace.resource=Some(json!({"fixture":"cityos-accordion","actualWebPreview":true}));
-        workspace.send(json!({"op":"Command","draft":draft(&app.doc)}));
+        workspace.send(json!({"op":"Command","draft":draft(&app.doc),"command":{
+            "draftId":"draft","expectedRevision":0,"operationId":"locale-race-edit",
+            "operation":"set-property","nodeId":"accordion","property":"allowMultiple","value":true}}));
         let command=requests.recv().unwrap(); assert_eq!(command["presentation"]["locale"],"ar");
         workspace.locale="en".into();
         let mut edited=draft(&app.doc).unwrap().clone(); edited["draftRevision"]=json!(1); edited["semanticDigest"]=json!("changed");
         edited["semanticDraft"]["root"]["props"]["allowMultiple"]=json!(true);
+        edited["commandReceipts"]=json!([{"operationId":command["command"]["operationId"],"requestDigest":"a".repeat(64),"revision":1}]);
         responses.send(Ok(reply(edited,&command["presentation"]))).unwrap(); workspace.poll(&mut app);
         assert_eq!(draft(&app.doc).unwrap()["draftRevision"],1);
         assert_eq!(draft(&app.doc).unwrap()["semanticDraft"]["root"]["props"]["allowMultiple"],true);

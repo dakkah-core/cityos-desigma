@@ -3,7 +3,6 @@ use crate::{write_atomic, Library, LibraryError, Result};
 use desigma_doc::{CityosBase, DocumentCheckpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -27,7 +26,7 @@ fn submission_phase(_phase: &str) -> Result<()> {
     Ok(())
 }
 pub fn payload_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::content_digest(bytes)
 }
 fn identity(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 160 || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
@@ -185,60 +184,23 @@ impl Library {
         identity(id)?;
         Ok(self.path("cityos/submissions").join(format!("{id}.json")))
     }
-    fn payload_path(&self, hash: &str) -> Result<PathBuf> {
-        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(LibraryError::Invalid("Invalid payload digest".into()));
-        }
-        Ok(self.path("cityos/payloads").join(hash))
-    }
     pub fn retain_cityos_payload(&self, bytes: &[u8]) -> Result<String> {
-        let hash = payload_digest(bytes);
-        self.put_cityos_payload(&hash, bytes)?;
-        Ok(hash)
+        self.payloads("cityos")?.retain(bytes)
     }
 
     /// Materialize a pinned payload from the trusted bridge's artifact cache.
     /// Hash the exact bytes; JSON reformatting changes identity. This is local
     /// content retention and grants no owner admission or execution authority.
     pub fn put_cityos_payload(&self, expected_digest: &str, bytes: &[u8]) -> Result<()> {
-        let path = self.payload_path(expected_digest)?;
-        if payload_digest(bytes) != expected_digest {
-            return Err(LibraryError::Invalid("Dependency digest mismatch".into()));
-        }
-        match self.verify_cityos_payload(expected_digest) {
-            Ok(()) => return Ok(()),
-            Err(LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-            // A caller supplying the verified canonical bytes may still repair
-            // a damaged object, as before. Verified immutable objects are a no-op.
-            Err(LibraryError::Invalid(_)) => {}
-            Err(error) => return Err(error),
-        }
-        write_atomic(&path, bytes)?;
-        self.verify_cityos_payload(expected_digest)
+        self.payloads("cityos")?.put(expected_digest, bytes)
     }
 
     /// Verify a durable CAS reference without allocating the entire payload.
     pub(crate) fn verify_cityos_payload(&self, hash: &str) -> Result<()> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(self.payload_path(hash)?)?;
-        let mut digest = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 { break; }
-            digest.update(&buffer[..read]);
-        }
-        if format!("{:x}", digest.finalize()) != hash {
-            return Err(LibraryError::Invalid("Dependency digest mismatch".into()));
-        }
-        Ok(())
+        self.payloads("cityos")?.verify(hash)
     }
     pub fn load_cityos_payload(&self, hash: &str) -> Result<Vec<u8>> {
-        let bytes = std::fs::read(self.payload_path(hash)?)?;
-        if payload_digest(&bytes) != hash {
-            return Err(LibraryError::Invalid("Dependency digest mismatch".into()));
-        }
-        Ok(bytes)
+        self.payloads("cityos")?.load(hash)
     }
     fn load_stored_submission(&self, id: &str) -> Result<StoredSubmission> {
         let bytes = std::fs::read(self.submission_path(id)?)?;
