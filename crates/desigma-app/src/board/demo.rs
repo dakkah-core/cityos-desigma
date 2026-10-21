@@ -36,13 +36,10 @@ pub fn document() -> Document {
     let page = d.pages[0];
 
     let sid = d.alloc_id();
-    let mut section = Node::new(sid, NodeKind::Section);
-    section.name = "Went well".into();
-    section.transform = Affine::translate(80.0, 80.0);
-    section.size = Vec2::new(1060.0, 700.0);
-    section.fills = vec![Paint::solid(Color::WHITE)];
-    section.stroke.paints = vec![Paint::solid(Color::rgb(0xCF, 0xCF, 0xCF))];
-    section.stroke.weight = 1.0;
+    let mut section = Node::board_section(sid, Rect::new(80.0, 80.0, 1060.0, 700.0), "Went well");
+    if let NodeKind::BoardSection(s) = &mut section.kind {
+        s.color = SectionColor::LightGray;
+    }
     let section = d.insert(page, section).unwrap();
 
     let a = sticky(&mut d, section, "Sticky 1", (40.0, 60.0), 0xFFE58F, "Shipped the board mode");

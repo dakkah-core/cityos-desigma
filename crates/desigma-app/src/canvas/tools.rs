@@ -28,8 +28,12 @@ pub enum Tool {
     BoardShape,
     Connector,
     Stamp,
+    Table,
+    Code,
     Marker,
     Highlighter,
+    Washi,
+    Eraser,
 }
 
 impl Tool {
@@ -57,8 +61,12 @@ impl Tool {
             Tool::BoardShape => "Shape",
             Tool::Connector => "Connector",
             Tool::Stamp => "Stamp",
+            Tool::Table => "Table",
+            Tool::Code => "Code block",
             Tool::Marker => "Marker",
             Tool::Highlighter => "Highlighter",
+            Tool::Washi => "Washi tape",
+            Tool::Eraser => "Eraser",
         }
     }
 
@@ -86,8 +94,12 @@ impl Tool {
             Tool::BoardShape => "R",
             Tool::Connector => "X",
             Tool::Stamp => "E",
-            Tool::Marker => "P",
-            Tool::Highlighter => "Shift+P",
+            Tool::Table => "Shift+T",
+            Tool::Marker => "M",
+            Tool::Highlighter => "Shift+M",
+            Tool::Washi => "Shift+W",
+            Tool::Eraser => "Shift+E",
+            Tool::Code => "Shift+C",
         }
     }
 
@@ -114,21 +126,26 @@ impl Tool {
         })
     }
 
-    /// Shortcut keys of a board file (no modifiers except shift): V move, H hand, P marker,
-    /// Shift+P highlighter, S sticky note, R shape, X connector, T text, Shift+S section, E stamp.
+    /// Shortcut keys of a board file (no modifiers except shift): V move, H hand, M marker,
+    /// Shift+M highlighter, Shift+W washi tape, Shift+E / Shift+Backspace eraser, S sticky note, R shape, X connector, T text,
+    /// Shift+S section, Shift+T table, E stamp.
     pub fn from_key_board(key: egui::Key, shift: bool) -> Option<Tool> {
         use egui::Key::*;
         Some(match (key, shift) {
             (V, false) => Tool::Move,
             (H, false) => Tool::Hand,
-            (P, false) => Tool::Marker,
-            (P, true) => Tool::Highlighter,
+            (M, false) | (P, false) => Tool::Marker,
+            (M, true) | (P, true) => Tool::Highlighter,
+            (W, true) => Tool::Washi,
+            (E, true) => Tool::Eraser,
             (S, false) => Tool::Sticky,
             (S, true) => Tool::Section,
+            (T, true) => Tool::Table,
             (R, false) => Tool::BoardShape,
             (X, false) => Tool::Connector,
             (T, false) => Tool::Text,
             (E, false) => Tool::Stamp,
+            (C, true) => Tool::Code,
             _ => return None,
         })
     }
@@ -149,12 +166,20 @@ impl Tool {
                 | Tool::Sticky
                 | Tool::BoardShape
                 | Tool::Stamp
+                | Tool::Table
+                | Tool::Code
         )
     }
 
-    /// Freehand tools of a board: marker strokes are pencil strokes with a thick round pen.
+    /// Tools of a board that lay down a stroke: marker strokes are pencil strokes with a thick
+    /// round pen, washi tape is a straight patterned strip.
     pub fn is_brush(self) -> bool {
-        matches!(self, Tool::Marker | Tool::Highlighter)
+        matches!(self, Tool::Marker | Tool::Highlighter | Tool::Washi)
+    }
+
+    /// The drawing tray's tools: brushes and the eraser.
+    pub fn is_drawing(self) -> bool {
+        self.is_brush() || self == Tool::Eraser
     }
 }
 
@@ -195,6 +220,8 @@ pub enum PressAction {
     /// Brush over regions with the shape builder.
     Build,
     PenPoint,
+    /// Wipe strokes away with the eraser.
+    Erase,
     /// Drag a connector out of a node (or from empty canvas).
     Connect,
     TextCreate,
@@ -215,7 +242,8 @@ pub fn press_action(tool: Tool, target: PressTarget, space_held: bool, middle: b
             PressTarget::Empty => PressAction::Marquee,
         },
         Tool::ShapeBuilder => PressAction::Build,
-        Tool::Pen | Tool::Pencil | Tool::Marker | Tool::Highlighter => PressAction::PenPoint,
+        Tool::Pen | Tool::Pencil | Tool::Marker | Tool::Highlighter | Tool::Washi => PressAction::PenPoint,
+        Tool::Eraser => PressAction::Erase,
         Tool::Connector => PressAction::Connect,
         Tool::Text => PressAction::TextCreate,
         Tool::Comment | Tool::Image => PressAction::Nothing,

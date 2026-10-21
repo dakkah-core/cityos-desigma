@@ -35,6 +35,7 @@ mod styles;
 mod textedit;
 mod textmeasure;
 mod theme;
+mod updater;
 mod util;
 mod variables;
 mod vecfixture;
@@ -44,6 +45,14 @@ mod widgets;
 mod window_geometry;
 
 use std::sync::atomic::Ordering;
+
+/// The running version: the release tag that CI stamps in as `DESIGMA_VERSION`, else the crate version.
+pub const VERSION: &str = match option_env!("DESIGMA_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+/// Only release builds carry a stamped version; builds from source never look for updates.
+pub const RELEASE_BUILD: bool = option_env!("DESIGMA_VERSION").is_some();
 
 /// The app icon (256 px PNG embedded at build time) for the taskbar, Dock and alt-tab. Every window
 /// desigma opens (including Present and "open in new window" processes) starts through `main`, so
@@ -65,6 +74,10 @@ fn main() {
     };
     if opts.help {
         println!("{}", cli::USAGE);
+        return;
+    }
+    if opts.version {
+        println!("desigma {VERSION}");
         return;
     }
     if let Some(directory)=&opts.cityos_verify_workspace {

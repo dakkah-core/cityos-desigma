@@ -10,8 +10,8 @@
 use crate::text::text_geometry;
 use desigma_doc as d;
 use desigma_doc::{
-    Affine, ArcData, Color, ConnectorCap, Document, Effect, Node, NodeId, NodeKind, Paint, Path, PathCmd, Rect, ShapeKind, StampLayer, StickyProps,
-    StrokeAlign, StrokeCap, StrokeJoin, TextAlignH, TextAlignV, TextAutoResize, TextProps, Vec2,
+    Affine, ArcData, Color, ConnectorCap, Document, Effect, Node, NodeId, NodeKind, Paint, Path, PathCmd, Rect, SectionProps, ShapeKind, StampLayer,
+    StickyProps, StrokeAlign, StrokeCap, StrokeJoin, TableProps, TextAlignH, TextAlignV, TextAutoResize, TextProps, Vec2,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -41,6 +41,15 @@ pub fn get(doc: &Document, id: NodeId) -> Option<Cow<'_, Node>> {
     } else {
         doc.get(id).map(Cow::Borrowed)
     }
+}
+
+/// Whether `n` is drawn as its lowered form: a board item, a text layer with a highlight
+/// background (its own fill) on a board, or any item that has votes.
+pub fn lowers(doc: &Document, n: &Node) -> bool {
+    n.kind.is_board_item()
+        || (doc.kind == d::DocumentKind::Board
+            && matches!(n.kind, NodeKind::Text(_))
+            && (n.fills.iter().any(|p| p.visible) || doc.board_session.vote.as_ref().is_some_and(|v| v.count(n.id) > 0)))
 }
 
 /// Largest extent (local units) the shadow of a sticky note reaches past its box.
@@ -165,8 +174,33 @@ pub fn text_frame(doc: &Document, n: &Node) -> Option<TextFrame> {
             let route = local_route(doc, n)?;
             Some(label_frame(route.midpoint(), label).1)
         }
+        NodeKind::TableCell(c) => Some(fit_into(&c.text, cell_text_box(n.size), c.text.style.font_size, d::STICKY_FONT_MIN)),
+        NodeKind::CodeBlock(c) => Some(TextFrame { rect: c.layout(n.size).text_box, props: c.styled_text() }),
         _ => None,
     }
+}
+
+/// The text box inside a table cell of `size`.
+fn cell_text_box(size: Vec2) -> Rect {
+    let p = d::TABLE_CELL_PAD;
+    Rect::new(p, p, (size.x - 2.0 * p).max(1.0), (size.y - 2.0 * p).max(1.0))
+}
+
+/// The title pill of a section, in the section's local space (above its top left corner).
+/// The pill hugs the title, within the section's width.
+pub fn section_title_rect(n: &Node) -> Rect {
+    let props = section_title_props(&n.name);
+    let tw = if n.name.is_empty() { 0.0 } else { text_geometry(&props, Vec2::ZERO).width.max(1.0) };
+    let w = (tw + 2.0 * d::SECTION_PILL_PAD).max(48.0).min(n.size.x.max(48.0));
+    Rect::new(0.0, -(d::SECTION_PILL_H + d::SECTION_PILL_GAP), w, d::SECTION_PILL_H)
+}
+
+fn section_title_props(title: &str) -> TextProps {
+    let mut t = d::board_text(d::SECTION_TITLE_SIZE, TextAlignH::Left, TextAlignV::Center);
+    t.content = title.to_string();
+    t.style.font_weight = 600;
+    t.auto_resize = TextAutoResize::WidthAndHeight;
+    t
 }
 
 /// Lowers `n` (a board item) to a body node with synthetic children, or `None` for other kinds.
@@ -214,10 +248,28 @@ pub fn lower(doc: &Document, n: &Node) -> Option<Node> {
                 extras.push(stamp_layer(n, 6 + i as u64, &l, w, h));
             }
         }
+        NodeKind::CodeBlock(c) => lower_code(n, c, &mut body, &mut extras),
         NodeKind::Connector(_) => lower_connector(doc, n, &mut body, &mut extras)?,
+        NodeKind::BoardSection(s) => lower_section(n, s, &mut body, &mut extras),
+        NodeKind::Table(t) => lower_table(doc, n, t, &mut body, &mut extras),
+        NodeKind::Text(t) if lowers(doc, n) => {
+            // a highlight background: the text layer's own fill behind its text
+            body.kind = NodeKind::Rectangle;
+            body.corner_radii = [(t.style.font_size * 0.2).min(n.size.y / 2.0).max(0.0); 4];
+            body.stroke.weight = 0.0;
+            body.stroke.paints.clear();
+            extras.push(child(n, 0, NodeKind::Text(t.clone()), Rect::new(0.0, 0.0, n.size.x, n.size.y)));
+        }
         _ => return None,
     }
-    body.children = extras.iter().map(|e| e.id).collect();
+    if !matches!(n.kind, NodeKind::Connector(_)) {
+        if let Some(count) = doc.board_session.vote.as_ref().map(|v| v.count(n.id)).filter(|c| *c > 0) {
+            vote_badge(n, count, &mut extras);
+        }
+    }
+    // a section keeps its real (visible) children under the title pill
+    body.children = if matches!(n.kind, NodeKind::BoardSection(_)) { d::section_visible_children(n).to_vec() } else { Vec::new() };
+    body.children.extend(extras.iter().map(|e| e.id));
     SYNTH.with(|s| {
         let mut s = s.borrow_mut();
         // ids of deleted items are never reused: forget their children when the table gets big
@@ -235,7 +287,7 @@ pub fn lower(doc: &Document, n: &Node) -> Option<Node> {
 /// plus its synthetic children as real nodes), for exporters that walk the node tree
 /// themselves. `None` when the document has no board items.
 pub fn lowered_document(doc: &Document) -> Option<Document> {
-    let items: Vec<NodeId> = doc.nodes.values().filter(|n| n.kind.is_board_item()).map(|n| n.id).collect();
+    let items: Vec<NodeId> = doc.nodes.values().filter(|n| lowers(doc, n)).map(|n| n.id).collect();
     if items.is_empty() {
         return None;
     }
@@ -243,7 +295,7 @@ pub fn lowered_document(doc: &Document) -> Option<Document> {
     for id in items {
         let Some(n) = doc.get(id) else { continue };
         let Some(body) = lower(doc, n) else { continue };
-        for c in &body.children {
+        for c in body.children.iter().filter(|c| is_synthetic(**c)) {
             if let Some(k) = get(doc, *c) {
                 out.nodes.insert(*c, k.into_owned());
             }
@@ -291,6 +343,134 @@ fn lower_sticky(n: &Node, s: &StickyProps, body: &mut Node, extras: &mut Vec<Nod
         t.style.font_weight = 400;
         t.style.fills = solid(Color { a: 0.55, ..Color::rgb(0x1E, 0x1E, 0x1E) });
         extras.push(child(n, 1, NodeKind::Text(t), bx));
+    }
+}
+
+fn lower_section(n: &Node, s: &SectionProps, body: &mut Node, extras: &mut Vec<Node>) {
+    body.kind = NodeKind::Rectangle;
+    body.corner_radii = [d::SECTION_RADIUS; 4];
+    body.corner_smoothing = 0.0;
+    body.fills = solid(s.color.fill());
+    body.stroke.paints.clear();
+    body.stroke.weight = 0.0;
+    // the title pill sits on the top left corner, outside the box
+    let pill = section_title_rect(n);
+    let mut bg = child(n, 0, NodeKind::Rectangle, pill);
+    bg.fills = solid(s.color.color());
+    bg.corner_radii = [pill.h / 2.0; 4];
+    bg.stroke.weight = 0.0;
+    extras.push(bg);
+    if !n.name.is_empty() {
+        let mut t = section_title_props(&n.name);
+        t.auto_resize = TextAutoResize::Truncate;
+        t.max_lines = Some(1);
+        let bx = Rect::new(pill.x + d::SECTION_PILL_PAD, pill.y, (pill.w - 2.0 * d::SECTION_PILL_PAD).max(1.0), pill.h);
+        extras.push(child(n, 1, NodeKind::Text(t), bx));
+    }
+}
+
+fn lower_table(doc: &Document, n: &Node, t: &TableProps, body: &mut Node, extras: &mut Vec<Node>) {
+    body.kind = NodeKind::Rectangle;
+    body.corner_radii = [0.0; 4];
+    body.fills = solid(Color::WHITE);
+    body.stroke.paints = solid(d::TABLE_LINE);
+    body.stroke.weight = 1.0;
+    body.stroke.align = StrokeAlign::Inside;
+    let size = t.size();
+    body.size = size;
+    // cell fills first, then the grid, then the text
+    let mut texts = Vec::new();
+    for (i, cid) in n.children.iter().enumerate() {
+        let Some(cell) = doc.get(*cid) else { continue };
+        let NodeKind::TableCell(c) = &cell.kind else { continue };
+        let (r, col) = t.cell_pos(i);
+        let rect = t.cell_rect(r, col);
+        if let Some(fill) = c.fill {
+            let mut f = child(cell, 1, NodeKind::Rectangle, rect);
+            f.parent = Some(n.id);
+            f.fills = solid(fill);
+            f.stroke.weight = 0.0;
+            extras.push(f);
+        }
+        if let Some(mut tx) = fitted_text(cell, 0, fit_into(&c.text, cell_text_box(Vec2::new(rect.w, rect.h)), c.text.style.font_size, d::STICKY_FONT_MIN)) {
+            tx.parent = Some(n.id);
+            tx.transform = Affine::translate(rect.x + tx.transform.tx, rect.y + tx.transform.ty);
+            texts.push(tx);
+        }
+    }
+    let mut cmds = Vec::new();
+    for c in 1..t.cols() {
+        let x = t.col_x(c);
+        cmds.push(PathCmd::MoveTo(Vec2::new(x, 0.0)));
+        cmds.push(PathCmd::LineTo(Vec2::new(x, size.y)));
+    }
+    for r in 1..t.rows() {
+        let y = t.row_y(r);
+        cmds.push(PathCmd::MoveTo(Vec2::new(0.0, y)));
+        cmds.push(PathCmd::LineTo(Vec2::new(size.x, y)));
+    }
+    if !cmds.is_empty() {
+        let mut g = child(n, 0, vector(vec![Path { cmds, fill_rule: d::FillRule::NonZero }]), Rect::new(0.0, 0.0, size.x, size.y));
+        g.fills.clear();
+        g.stroke.paints = solid(d::TABLE_LINE);
+        g.stroke.weight = 1.0;
+        g.stroke.align = StrokeAlign::Center;
+        extras.push(g);
+    }
+    extras.extend(texts);
+}
+
+/// Colour of vote dots.
+pub const VOTE_COLOR: Color = Color { r: 0.592, g: 0.278, b: 1.0, a: 1.0 };
+
+/// The vote dot in the top right corner of `n` with the number of votes on it.
+fn vote_badge(n: &Node, count: u32, extras: &mut Vec<Node>) {
+    let r = (n.size.x.min(n.size.y) * 0.09).clamp(10.0, 16.0);
+    let c = Vec2::new((n.size.x - r - 4.0).max(r), r + 4.0);
+    let bx = Rect::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r);
+    let mut dot = child(n, 14, NodeKind::Ellipse(ArcData::default()), bx);
+    dot.fills = solid(VOTE_COLOR);
+    dot.stroke.paints = solid(Color::WHITE);
+    dot.stroke.weight = 1.5;
+    dot.stroke.align = StrokeAlign::Center;
+    extras.push(dot);
+    let mut t = d::board_text(r * 1.15, TextAlignH::Center, TextAlignV::Center);
+    t.content = count.to_string();
+    t.style.font_weight = 700;
+    t.style.fills = solid(Color::WHITE);
+    extras.push(child(n, 15, NodeKind::Text(t), bx));
+}
+
+/// A code block: a clipping rounded frame in the theme's colours, the line numbers and the code.
+fn lower_code(n: &Node, c: &d::CodeBlockProps, body: &mut Node, extras: &mut Vec<Node>) {
+    let lay = c.layout(n.size);
+    body.kind = NodeKind::Frame(d::FrameProps { clips_content: true, ..Default::default() });
+    body.corner_radii = [lay.corner; 4];
+    body.fills = solid(c.theme.background());
+    if c.theme == d::CodeTheme::Light {
+        body.stroke.paints = solid(Color { a: 0.12, ..Color::BLACK });
+        body.stroke.weight = 1.0;
+        body.stroke.align = StrokeAlign::Inside;
+    } else {
+        body.stroke.paints.clear();
+        body.stroke.weight = 0.0;
+    }
+    body.effects = vec![Effect::DropShadow {
+        color: Color { a: 0.16, ..Color::BLACK },
+        offset: Vec2::new(0.0, 2.0),
+        radius: 6.0,
+        spread: 0.0,
+        visible: true,
+        show_behind: false,
+    }];
+    body.effects.extend(n.effects.iter().cloned());
+    if !c.text.content.is_empty() {
+        extras.push(child(n, 0, NodeKind::Text(c.styled_text()), lay.text_box));
+    }
+    if let Some(g) = lay.gutter {
+        let mut t = c.gutter_text();
+        t.auto_resize = TextAutoResize::None;
+        extras.push(child(n, 1, NodeKind::Text(t), g));
     }
 }
 

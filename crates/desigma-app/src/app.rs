@@ -171,6 +171,8 @@ pub struct App {
     /// Board (whiteboard) mode: tool settings, magnet dots and popovers.
     pub board: crate::board::BoardState,
     pub decks: crate::decks::DecksState,
+    /// Update notifications (banner, dialog, background checks).
+    pub updater: crate::updater::UpdaterState,
 }
 
 impl App {
@@ -218,6 +220,7 @@ impl App {
             dev: Default::default(),
             board: Default::default(),
             decks: Default::default(),
+            updater: Default::default(),
         }
     }
 

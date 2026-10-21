@@ -80,6 +80,10 @@ pub(crate) fn node_margin(n: &Node) -> f32 {
     if matches!(n.kind, NodeKind::Sticky(_)) {
         m = m.max(crate::board::sticky_shadow_reach(n.size));
     }
+    if matches!(n.kind, NodeKind::BoardSection(_)) {
+        // the title pill above the box
+        m = m.max(desigma_doc::SECTION_TITLE_REACH);
+    }
     m
 }
 

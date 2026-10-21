@@ -90,6 +90,9 @@ pub fn snap_targets(app: &App, exclude: &[NodeId]) -> Vec<Rect> {
     let mut out = Vec::new();
     fn rec(doc: &Document, id: NodeId, exclude: &[NodeId], view: &Rect, out: &mut Vec<Rect>) {
         let Some(n) = doc.get(id) else { return };
+        if matches!(n.kind, NodeKind::Table(_)) {
+            return;
+        }
         for c in &n.children {
             if exclude.contains(c) || out.len() > 4000 {
                 continue;
@@ -250,10 +253,24 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
             ts::press_at(app, page, inp.mods.shift);
             return;
         }
+        // clicking another cell of the table being typed in moves the typing there
+        let in_table = desigma_doc::table_of_cell(&app.doc, id).map(|(t, ..)| t);
+        let other_cell = in_table.and_then(|t| {
+            let on_divider = crate::board::table::divider_at(app, rect.min, t, pos).is_some();
+            (app.tool == Tool::Move && !inp.space && !on_divider).then(|| crate::board::table::cell_at(app, t, page)).flatten()
+        });
         finish_text(app, true);
+        if let Some((cell, ..)) = other_cell {
+            begin_text_edit(app, cell);
+            return;
+        }
     }
     let mid = inp.mid_pressed && !inp.pressed;
     if app.canvas.vedit.is_some() && !mid && !inp.space && vector::press(app, rect, pos, inp.mods) {
+        return;
+    }
+    // board: the + buttons and dividers of a table
+    if app.is_board() && !mid && !inp.space && crate::board::table::press(app, rect.min, pos, page) {
         return;
     }
     // board: a magnet dot starts a connector
@@ -261,6 +278,15 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
         if let Some((node, magnet)) = crate::board::connect::dot_hit(app, rect, pos) {
             crate::board::connect::start(app, Some((node, magnet)), page);
             return;
+        }
+    }
+    // board: while a vote is open a click on an item adds a vote (Alt takes one back)
+    if app.is_board() && !mid && !inp.space && app.tool == Tool::Move && app.doc.board_session.voting() {
+        if let Some(id) = hit_under(app, page, true) {
+            if crate::board::session::votable(&app.doc, id) {
+                crate::board::session::vote(app, id, !inp.mods.alt);
+                return;
+            }
         }
     }
     let deep = inp.mods.command;
@@ -305,6 +331,7 @@ fn on_press(app: &mut App, rect: ERect, inp: &Inp) {
         PressAction::Draw(tool) => start_draw(app, tool, page),
         PressAction::Build => builder::press(app, page, inp.mods.alt),
         PressAction::PenPoint => pen_press(app, rect, pos, page, inp.mods),
+        PressAction::Erase => crate::board::erase::press(app, page),
         PressAction::Connect => {
             let from = hit_under(app, page, true)
                 .filter(|id| app.doc.get(*id).is_some_and(|n| crate::board::connectable(&n.kind)))
@@ -389,11 +416,18 @@ fn start_draw(app: &mut App, tool: Tool, page: DV) {
         if snapped_on(&sr.guides, snap::GuideAxis::Y) { start.y } else { px(app, start.y) },
     );
     let parent = create::container_at(&app.doc, app.page, start, &[]);
-    let node = create::new_shape(app, tool);
-    let id = node.id;
+    // a table is its grid node plus one node per cell
+    let nodes = if tool == Tool::Table {
+        let mut ns = desigma_doc::table_nodes(&mut app.doc, DV::ZERO, desigma_doc::TABLE_DEFAULT_COLS, desigma_doc::TABLE_DEFAULT_ROWS);
+        ns[0].name = app.unique_name("Table");
+        ns
+    } else {
+        vec![create::new_shape(app, tool)]
+    };
+    let id = nodes[0].id;
     let mut tx = Tx::new();
     let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
-    if tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes: vec![node] }).is_err() {
+    if tx.cmd(&mut app.doc, Command::Insert { parent, index, nodes }).is_err() {
         return;
     }
     app.selection = vec![id];
@@ -427,6 +461,7 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
         Interaction::Move(m) => update_move(app, m, cur, inp),
         Interaction::Guide(g) => rulers::drag(app, g, rect, pos),
         Interaction::Connect(c) => crate::board::connect::drag(app, c, cur),
+        Interaction::Table(d) => crate::board::table::drag(app, d, cur),
         Interaction::Marquee { start, cur: c, base } => {
             *c = cur;
             let r = rect_from_points(*start, cur);
@@ -478,15 +513,23 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
             if dist(d.start, c) * zoom > theme::DRAG_THRESHOLD_PX {
                 d.dragged = true;
             }
-            let g = create::draw_geom(d.tool, d.start, c, inp.mods.shift || crate::board::create::keeps_square(d.tool), inp.mods.alt);
+            let g = create::draw_geom(d.tool, d.start, c, inp.mods.shift || crate::board::create::keeps_square(d.tool, app.board.wide), inp.mods.alt);
             create::apply_geom(&mut app.doc, &mut d.tx, d.id, d.parent, &g);
             app.changed();
         }
         Interaction::Pencil(pts) => {
-            if pts.last().map(|l| dist(*l, cur) * zoom > 1.5).unwrap_or(true) {
+            let brush = app.tool.is_brush();
+            if brush && (inp.mods.shift || app.tool == Tool::Washi) && !pts.is_empty() {
+                // Shift (and washi tape always) draws a straight line; Shift also snaps it to 45 degrees
+                let first = pts[0];
+                let end = if inp.mods.shift { create::snap_to_45(first, cur) } else { cur };
+                pts.truncate(1);
+                pts.push(end);
+            } else if pts.last().map(|l| dist(*l, cur) * zoom > 1.5).unwrap_or(true) {
                 pts.push(cur);
             }
         }
+        Interaction::Erase(e) => crate::board::erase::drag(app, e, cur),
         Interaction::VectorDrag => vector::drag(app, cur, inp.mods),
         Interaction::Builder => builder::drag(app, cur),
         Interaction::PenDrag => {
@@ -682,11 +725,16 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
                     app.selection.retain(|s| *s != p.node);
                 } else {
                     app.select_only(p.node);
+                    // a click on a cell of the table that was already selected makes it the active cell
+                    if matches!(app.doc.get(p.node).map(|n| &n.kind), Some(NodeKind::Table(_))) {
+                        crate::board::table::pick_cell(app, p.node, cur);
+                    }
                 }
             }
         }
         Interaction::Guide(g) => rulers::release(app, g),
         Interaction::Connect(c) => crate::board::connect::release(app, c),
+        Interaction::Table(d) => crate::board::table::release(app, d),
         Interaction::Move(mut m) => {
             if m.moved && !m.ids.is_empty() {
                 reparent_after_move(app, &mut m, cur);
@@ -700,9 +748,9 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
             app.run_tx(r.tx);
         }
         Interaction::Draw(mut d) => {
-            if !d.dragged && (crate::board::create::types_into(d.tool) || d.tool == Tool::Stamp) {
+            if !d.dragged && crate::board::create::click_places(d.tool, app.is_board()) {
                 // a click places a board item at its default size, centred on the pointer
-                let r = crate::board::create::click_rect(d.tool, d.start);
+                let r = crate::board::create::click_rect(d.tool, d.start, app.board.wide);
                 create::apply_geom(&mut app.doc, &mut d.tx, d.id, d.parent, &create::DrawGeom { rect: r, line: None });
             } else if !d.dragged {
                 let (w, h) = (theme::DEFAULT_SHAPE_SIZE, theme::DEFAULT_SHAPE_SIZE);
@@ -714,9 +762,19 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
                 create::apply_geom(&mut app.doc, &mut d.tx, d.id, d.parent, &g);
             }
             let id = d.id;
+            // a section drawn around notes takes them in
+            if matches!(app.doc.get(id).map(|n| &n.kind), Some(NodeKind::BoardSection(_))) {
+                crate::board::section::adopt_inside(app, &mut d.tx, id);
+            }
             app.run_tx(d.tx);
             app.selection = vec![id];
             app.tool = if app.keep_tool { d.tool } else { Tool::Move };
+            // a new table takes text in its first cell right away
+            if d.tool == Tool::Table {
+                if let Some(c) = desigma_doc::table_cell_node(&app.doc, id, 0, 0) {
+                    crate::board::table::edit_cell(app, c);
+                }
+            }
             // a new sticky or shape takes text right away
             if crate::board::create::types_into(d.tool) {
                 begin_text_edit(app, id);
@@ -724,15 +782,16 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
         }
         Interaction::Pencil(pts) => {
             // the stroke is smoothed into a few bezier anchors; ending on its start closes the shape
-            let (dec, closed) = create::smooth_stroke(&pts, app.view.zoom);
+            let straight = app.tool.is_brush() && pts.len() == 2;
+            let (dec, closed) = if straight { (pts.iter().map(|p| PenPoint::new(*p)).collect(), false) } else { create::smooth_stroke(&pts, app.view.zoom) };
             let brush = app.tool.is_brush().then_some(app.tool);
             let mut tx = Tx::new();
             if let Some(id) = create::commit_pen(app, &mut tx, &dec, closed && brush.is_none()) {
                 if let Some(tool) = brush {
                     // marker and highlighter strokes stay open, thick and round
-                    let ink = app.board.ink;
+                    let (ink, size, pattern) = (app.board.ink, app.board.size, app.board.pattern);
                     if let Some(n) = tx.ed.node(&mut app.doc, id) {
-                        crate::board::create::brush_style(n, tool, ink);
+                        crate::board::create::brush_style(n, tool, ink, size, pattern);
                     }
                 }
                 app.run_tx(tx);
@@ -742,6 +801,7 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
                 }
             }
         }
+        Interaction::Erase(e) => crate::board::erase::release(app, e),
         Interaction::VectorDrag => vector::release(app),
         Interaction::Builder => builder::release(app),
         Interaction::PenDrag | Interaction::Pan | Interaction::Marquee { .. } | Interaction::None => {}
@@ -811,9 +871,16 @@ fn on_double_click(app: &mut App, rect: ERect, inp: &Inp) {
         let board_kind = app.doc.get(id).map(|n| &n.kind);
         if is_text {
             begin_text_edit(app, id);
-        } else if matches!(board_kind, Some(NodeKind::Sticky(_) | NodeKind::ShapeWithText(_))) {
+        } else if matches!(board_kind, Some(NodeKind::Sticky(_) | NodeKind::ShapeWithText(_) | NodeKind::CodeBlock(_))) {
             // stickies and shapes take their text on double-click
             begin_text_edit(app, id);
+        } else if matches!(board_kind, Some(NodeKind::Table(_))) {
+            // a table takes the text of the cell under the pointer
+            app.select_only(id);
+            crate::board::table::edit_at(app, id, page);
+        } else if matches!(board_kind, Some(NodeKind::BoardSection(_))) {
+            app.select_only(id);
+            crate::board::section::begin_rename(app, id);
         } else if matches!(board_kind, Some(NodeKind::Connector(_))) {
             crate::board::create::edit_label(app, id);
         } else if vector::is_vector(app, id) && (app.is_selected(id) || matches!(app.doc.get(id).map(|n| &n.kind), Some(NodeKind::Vector { .. }))) {
@@ -1044,6 +1111,7 @@ fn update_hover_and_cursor(app: &mut App, rect: ERect, inp: &Inp, hovered: bool)
     // board: magnet dots follow the pointer
     let board_page = (hovered && app.canvas.text.is_none()).then(|| inp.pos.map(|p| app.view.to_page(rect.min, p))).flatten();
     crate::board::connect::update_hover(app, board_page);
+    crate::board::table::update_hover(app, rect.min, board_page);
     let over_dot = idle && hovered && inp.pos.is_some_and(|p| crate::board::connect::dot_hit(app, rect, p).is_some());
     if idle && hovered && app.canvas.text.is_none() {
         let page = inp.pos.map(|p| app.view.to_page(rect.min, p));
@@ -1073,13 +1141,25 @@ fn update_hover_and_cursor(app: &mut App, rect: ERect, inp: &Inp, hovered: bool)
         if over_dot {
             cursor = egui::CursorIcon::Crosshair;
         }
+        if let Some(c) = inp.pos.and_then(|p| crate::board::table::cursor_at(app, rect.min, p)) {
+            cursor = c;
+        }
         app.canvas.cursor = Some(cursor);
     } else if !idle {
         cursor = match &app.canvas.inter {
             Interaction::Pan => egui::CursorIcon::Grabbing,
             Interaction::Resize(r) => r.handle.cursor(),
             Interaction::Rotate(_) => egui::CursorIcon::Alias,
-            Interaction::Draw(_) | Interaction::Pencil(_) | Interaction::PenDrag | Interaction::Connect(_) => egui::CursorIcon::Crosshair,
+            Interaction::Draw(_) | Interaction::Pencil(_) | Interaction::Erase(_) | Interaction::PenDrag | Interaction::Connect(_) => {
+                egui::CursorIcon::Crosshair
+            }
+            Interaction::Table(d) => {
+                if d.axis == crate::board::table::Axis::Col {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::ResizeVertical
+                }
+            }
             Interaction::Guide(g) => {
                 if g.axis == snap::GuideAxis::X {
                     egui::CursorIcon::ResizeHorizontal

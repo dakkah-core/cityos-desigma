@@ -1,4 +1,4 @@
-//! The "Your name" app setting, stored in `settings.json` in the library root.
+//! App settings ("Your name", GPU, update checks), stored in `settings.json` in the library root.
 //!
 //! The app had no settings store, so this is a small JSON object; keys it does not
 //! know are preserved so other settings can live beside `author`.
@@ -38,8 +38,18 @@ pub fn load_flag(root: &Path, key: &str) -> Option<bool> {
 pub fn save_flag(root: &Path, key: &str, value: bool) -> Result<(), String> {
     let mut map = read(root);
     map.insert(key.into(), value.into());
-    let text = serde_json::to_string_pretty(&serde_json::Value::Object(map)).map_err(|e| e.to_string())?;
-    desigma_library::write_atomic(&root.join(FILE), text.as_bytes()).map_err(|e| format!("Cannot save settings: {e}"))
+    write(root, map)
+}
+
+/// A string app setting (empty when missing).
+pub fn load_string(root: &Path, key: &str) -> Option<String> {
+    read(root).get(key).and_then(|v| v.as_str()).map(str::to_string).filter(|s| !s.is_empty())
+}
+
+pub fn save_string(root: &Path, key: &str, value: &str) -> Result<(), String> {
+    let mut map = read(root);
+    map.insert(key.into(), value.into());
+    write(root, map)
 }
 
 /// Saves the author name (an empty name resets to the OS user name).
@@ -51,6 +61,10 @@ pub fn save_author(root: &Path, name: &str) -> Result<(), String> {
     } else {
         map.insert("author".into(), name.into());
     }
+    write(root, map)
+}
+
+fn write(root: &Path, map: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&serde_json::Value::Object(map)).map_err(|e| e.to_string())?;
     desigma_library::write_atomic(&root.join(FILE), text.as_bytes()).map_err(|e| format!("Cannot save settings: {e}"))
 }
@@ -78,6 +92,17 @@ mod tests {
         assert_eq!(v["theme"], "dark");
         save_author(&d, "").unwrap();
         assert_eq!(load_author(&d), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn string_roundtrip_keeps_other_keys() {
+        let d = tmp("s");
+        assert_eq!(load_string(&d, "skip_update"), None);
+        save_flag(&d, "use_gpu", false).unwrap();
+        save_string(&d, "skip_update", "0.1.0-alpha.8").unwrap();
+        assert_eq!(load_string(&d, "skip_update").as_deref(), Some("0.1.0-alpha.8"));
+        assert_eq!(load_flag(&d, "use_gpu"), Some(false));
         let _ = std::fs::remove_dir_all(&d);
     }
 

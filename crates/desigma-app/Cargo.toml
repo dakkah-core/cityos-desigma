@@ -41,6 +41,7 @@ unicode-segmentation = "1"
 serde_json.workspace = true
 serde.workspace = true
 ureq = "2"
+semver = "1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 roxmltree = "0.20"

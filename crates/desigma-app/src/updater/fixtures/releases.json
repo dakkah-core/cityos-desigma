@@ -1,0 +1,240 @@
+[
+ {
+  "tag_name": "v0.1.0-alpha.7",
+  "html_url": "https://github.com/deepfounder-ai/desigma/releases/tag/v0.1.0-alpha.7",
+  "draft": false,
+  "prerelease": true,
+  "body": "### Installing\n\nDownload the file for your platform below. These builds are **not code-signed yet**, so the first launch shows a warning:\n\n- **macOS (Apple Silicon and Intel):** download `desigma-<version>-macos.dmg`, open it and drag **desigma** to **Applications**. The first time, open it from Applications, then go to **System Settings \u2192 Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/desigma.app`.\n- **Windows:** unzip `desigma-<version>-x86_64-pc-windows-msvc.zip` and run `desigma.exe`. In the SmartScreen dialog, click **More info \u2192 Run anyway**.\n- **Linux:** unpack `desigma-<version>-x86_64-unknown-linux-gnu.tar.gz`, then run `./install.sh` (no sudo) or just `./desigma`.\n\nFull instructions: [docs/install.md](https://github.com/deepfounder-ai/desigma/blob/main/docs/install.md). Check downloads against `SHA256SUMS`.\n\n\n## What's Changed\n* fig: nested instance swaps and variable-bound paints in instance overrides by @MrAndrewMal in https://github.com/deepfounder-ai/desigma/pull/3\n\n## New Contributors\n* @MrAndrewMal made their first contribution in https://github.com/deepfounder-ai/desigma/pull/3\n\n**Full Changelog**: https://github.com/deepfounder-ai/desigma/compare/v0.1.0-alpha.6...v0.1.0-alpha.7",
+  "assets": [
+   {
+    "name": "desigma-0.1.0-alpha.7-macos-universal.tar.gz",
+    "size": 35121312,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.7/desigma-0.1.0-alpha.7-macos-universal.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.7-macos.dmg",
+    "size": 40024161,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.7/desigma-0.1.0-alpha.7-macos.dmg"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.7-x86_64-pc-windows-msvc.zip",
+    "size": 16021537,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.7/desigma-0.1.0-alpha.7-x86_64-pc-windows-msvc.zip"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.7-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 21201664,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.7/desigma-0.1.0-alpha.7-x86_64-unknown-linux-gnu.tar.gz"
+   },
+   {
+    "name": "SHA256SUMS",
+    "size": 444,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.7/SHA256SUMS"
+   }
+  ]
+ },
+ {
+  "tag_name": "v0.1.0-alpha.6",
+  "html_url": "https://github.com/deepfounder-ai/desigma/releases/tag/v0.1.0-alpha.6",
+  "draft": false,
+  "prerelease": true,
+  "body": "### Installing\n\nDownload the file for your platform below. These builds are **not code-signed yet**, so the first launch shows a warning:\n\n- **macOS (Apple Silicon and Intel):** download `desigma-<version>-macos.dmg`, open it and drag **desigma** to **Applications**. The first time, open it from Applications, then go to **System Settings \u2192 Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/desigma.app`.\n- **Windows:** unzip `desigma-<version>-x86_64-pc-windows-msvc.zip` and run `desigma.exe`. In the SmartScreen dialog, click **More info \u2192 Run anyway**.\n- **Linux:** unpack `desigma-<version>-x86_64-unknown-linux-gnu.tar.gz`, then run `./install.sh` (no sudo) or just `./desigma`.\n\nFull instructions: [docs/install.md](https://github.com/deepfounder-ai/desigma/blob/main/docs/install.md). Check downloads against `SHA256SUMS`.\n\n\n## What's Changed\n* Extract shared editing logic into desigma-engine by @NagaSaiRakshith2905 in https://github.com/deepfounder-ai/desigma/pull/2\n\n## New Contributors\n* @NagaSaiRakshith2905 made their first contribution in https://github.com/deepfounder-ai/desigma/pull/2\n\n**Full Changelog**: https://github.com/deepfounder-ai/desigma/compare/v0.1.0-alpha.5...v0.1.0-alpha.6",
+  "assets": [
+   {
+    "name": "desigma-0.1.0-alpha.6-macos-universal.tar.gz",
+    "size": 35130675,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.6/desigma-0.1.0-alpha.6-macos-universal.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.6-macos.dmg",
+    "size": 40031676,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.6/desigma-0.1.0-alpha.6-macos.dmg"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.6-x86_64-pc-windows-msvc.zip",
+    "size": 16019401,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.6/desigma-0.1.0-alpha.6-x86_64-pc-windows-msvc.zip"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.6-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 21199520,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.6/desigma-0.1.0-alpha.6-x86_64-unknown-linux-gnu.tar.gz"
+   },
+   {
+    "name": "SHA256SUMS",
+    "size": 444,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.6/SHA256SUMS"
+   }
+  ]
+ },
+ {
+  "tag_name": "v0.1.0-alpha.5",
+  "html_url": "https://github.com/deepfounder-ai/desigma/releases/tag/v0.1.0-alpha.5",
+  "draft": false,
+  "prerelease": true,
+  "body": "### Installing\n\nDownload the file for your platform below. These builds are **not code-signed yet**, so the first launch shows a warning:\n\n- **macOS (Apple Silicon and Intel):** download `desigma-<version>-macos.dmg`, open it and drag **desigma** to **Applications**. The first time, open it from Applications, then go to **System Settings \u2192 Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/desigma.app`.\n- **Windows:** unzip `desigma-<version>-x86_64-pc-windows-msvc.zip` and run `desigma.exe`. In the SmartScreen dialog, click **More info \u2192 Run anyway**.\n- **Linux:** unpack `desigma-<version>-x86_64-unknown-linux-gnu.tar.gz`, then run `./install.sh` (no sudo) or just `./desigma`.\n\nFull instructions: [docs/install.md](https://github.com/deepfounder-ai/desigma/blob/main/docs/install.md). Check downloads against `SHA256SUMS`.\n\n\n**Full Changelog**: https://github.com/deepfounder-ai/desigma/compare/v0.1.0-alpha.4...v0.1.0-alpha.5",
+  "assets": [
+   {
+    "name": "desigma-0.1.0-alpha.5-macos-universal.tar.gz",
+    "size": 34562222,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.5/desigma-0.1.0-alpha.5-macos-universal.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.5-macos.dmg",
+    "size": 39522301,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.5/desigma-0.1.0-alpha.5-macos.dmg"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.5-x86_64-pc-windows-msvc.zip",
+    "size": 15769202,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.5/desigma-0.1.0-alpha.5-x86_64-pc-windows-msvc.zip"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.5-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 20911547,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.5/desigma-0.1.0-alpha.5-x86_64-unknown-linux-gnu.tar.gz"
+   },
+   {
+    "name": "SHA256SUMS",
+    "size": 444,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.5/SHA256SUMS"
+   }
+  ]
+ },
+ {
+  "tag_name": "v0.1.0-alpha.4",
+  "html_url": "https://github.com/deepfounder-ai/desigma/releases/tag/v0.1.0-alpha.4",
+  "draft": false,
+  "prerelease": true,
+  "body": "### Installing\n\nDownload the file for your platform below. These builds are **not code-signed yet**, so the first launch shows a warning:\n\n- **macOS (Apple Silicon and Intel):** download `desigma-<version>-macos.dmg`, open it and drag **desigma** to **Applications**. The first time, open it from Applications, then go to **System Settings \u2192 Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/desigma.app`.\n- **Windows:** unzip `desigma-<version>-x86_64-pc-windows-msvc.zip` and run `desigma.exe`. In the SmartScreen dialog, click **More info \u2192 Run anyway**.\n- **Linux:** unpack `desigma-<version>-x86_64-unknown-linux-gnu.tar.gz`, then run `./install.sh` (no sudo) or just `./desigma`.\n\nFull instructions: [docs/install.md](https://github.com/deepfounder-ai/desigma/blob/main/docs/install.md). Check downloads against `SHA256SUMS`.\n\n\n**Full Changelog**: https://github.com/deepfounder-ai/desigma/compare/v0.1.0-alpha.3...v0.1.0-alpha.4",
+  "assets": [
+   {
+    "name": "desigma-0.1.0-alpha.4-macos-universal.tar.gz",
+    "size": 34193138,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.4/desigma-0.1.0-alpha.4-macos-universal.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.4-macos.dmg",
+    "size": 39006885,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.4/desigma-0.1.0-alpha.4-macos.dmg"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.4-x86_64-pc-windows-msvc.zip",
+    "size": 15590555,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.4/desigma-0.1.0-alpha.4-x86_64-pc-windows-msvc.zip"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.4-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 20702444,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.4/desigma-0.1.0-alpha.4-x86_64-unknown-linux-gnu.tar.gz"
+   },
+   {
+    "name": "SHA256SUMS",
+    "size": 444,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.4/SHA256SUMS"
+   }
+  ]
+ },
+ {
+  "tag_name": "v0.1.0-alpha.3",
+  "html_url": "https://github.com/deepfounder-ai/desigma/releases/tag/v0.1.0-alpha.3",
+  "draft": false,
+  "prerelease": true,
+  "body": "**Full Changelog**: https://github.com/deepfounder-ai/desigma/compare/v0.1.0-alpha.2...v0.1.0-alpha.3",
+  "assets": [
+   {
+    "name": "desigma-0.1.0-alpha.3-aarch64-apple-darwin.tar.gz",
+    "size": 16316554,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.3/desigma-0.1.0-alpha.3-aarch64-apple-darwin.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.3-x86_64-apple-darwin.tar.gz",
+    "size": 17341349,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.3/desigma-0.1.0-alpha.3-x86_64-apple-darwin.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.3-x86_64-pc-windows-msvc.zip",
+    "size": 15487724,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.3/desigma-0.1.0-alpha.3-x86_64-pc-windows-msvc.zip"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 20592648,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.3/desigma-0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz"
+   },
+   {
+    "name": "SHA256SUMS",
+    "size": 466,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.3/SHA256SUMS"
+   }
+  ]
+ },
+ {
+  "tag_name": "v0.1.0-alpha.2",
+  "html_url": "https://github.com/deepfounder-ai/desigma/releases/tag/v0.1.0-alpha.2",
+  "draft": false,
+  "prerelease": true,
+  "body": "**Full Changelog**: https://github.com/deepfounder-ai/desigma/compare/v0.1.0-alpha.1...v0.1.0-alpha.2",
+  "assets": [
+   {
+    "name": "desigma-0.1.0-alpha.2-aarch64-apple-darwin.tar.gz",
+    "size": 15097248,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.2/desigma-0.1.0-alpha.2-aarch64-apple-darwin.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.2-x86_64-apple-darwin.tar.gz",
+    "size": 16038541,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.2/desigma-0.1.0-alpha.2-x86_64-apple-darwin.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.2-x86_64-pc-windows-msvc.zip",
+    "size": 14322662,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.2/desigma-0.1.0-alpha.2-x86_64-pc-windows-msvc.zip"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.2-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 19266519,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.2/desigma-0.1.0-alpha.2-x86_64-unknown-linux-gnu.tar.gz"
+   },
+   {
+    "name": "SHA256SUMS",
+    "size": 466,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.2/SHA256SUMS"
+   }
+  ]
+ },
+ {
+  "tag_name": "v0.1.0-alpha.1",
+  "html_url": "https://github.com/deepfounder-ai/desigma/releases/tag/v0.1.0-alpha.1",
+  "draft": false,
+  "prerelease": true,
+  "body": "**Full Changelog**: https://github.com/deepfounder-ai/desigma/commits/v0.1.0-alpha.1",
+  "assets": [
+   {
+    "name": "desigma-0.1.0-alpha.1-aarch64-apple-darwin.tar.gz",
+    "size": 13422615,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.1/desigma-0.1.0-alpha.1-aarch64-apple-darwin.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.1-x86_64-apple-darwin.tar.gz",
+    "size": 14242149,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.1/desigma-0.1.0-alpha.1-x86_64-apple-darwin.tar.gz"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.1-x86_64-pc-windows-msvc.zip",
+    "size": 12715089,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.1/desigma-0.1.0-alpha.1-x86_64-pc-windows-msvc.zip"
+   },
+   {
+    "name": "desigma-0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 17397642,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.1/desigma-0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz"
+   },
+   {
+    "name": "SHA256SUMS",
+    "size": 466,
+    "browser_download_url": "https://github.com/deepfounder-ai/desigma/releases/download/v0.1.0-alpha.1/SHA256SUMS"
+   }
+  ]
+ }
+]

@@ -102,6 +102,18 @@ The canvas draws with the GPU (Vulkan, Metal, DirectX 12 or OpenGL) and falls
 back to the CPU renderer when no suitable adapter is found. If you see drawing
 problems, turn off **Preferences → Use GPU rendering**.
 
+## Updates
+
+A few seconds after launch, and then once a day while it runs, desigma asks GitHub's
+release list (one request to `api.github.com`, with the user agent `desigma/<version>`)
+whether a newer version is out. If there is one, a banner offers the release notes and a
+**Download** button that opens the release page; nothing is downloaded or installed on its
+own. **Skip this version** stops the reminders until the next release.
+
+Turn the automatic check off with **Preferences → Check for updates automatically**, or set
+`DESIGMA_NO_UPDATE_CHECK=1`. **Help → Check for updates…** still works. Builds from source
+never check.
+
 ## Building from source
 
 ```sh

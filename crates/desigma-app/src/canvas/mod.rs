@@ -94,6 +94,8 @@ pub enum Interaction {
     Rotate(RotateState),
     Draw(DrawState),
     Pencil(Vec<DV>),
+    /// Wiping strokes away with the eraser: they go when the button is released.
+    Erase(EraseState),
     PenDrag,
     /// Dragging a vertex/handle in vector edit mode (state lives in `CanvasState::vedit`).
     VectorDrag,
@@ -103,6 +105,15 @@ pub enum Interaction {
     Guide(rulers::GuideDrag),
     /// Dragging a connector out of a board node (or from empty canvas).
     Connect(crate::board::connect::ConnectDrag),
+    /// Dragging the divider between two table columns or rows.
+    Table(crate::board::table::TableDrag),
+}
+
+/// Strokes the eraser has touched so far and where it was last.
+#[derive(Default)]
+pub struct EraseState {
+    pub hits: Vec<NodeId>,
+    pub last: DV,
 }
 
 pub use textsession::TextSession;
@@ -162,6 +173,7 @@ impl App {
                 c.tx.cancel(&mut self.doc);
                 self.board.target = None;
             }
+            Interaction::Table(d) => d.tx.cancel(&mut self.doc),
             Interaction::VectorDrag => {
                 if let Some(v) = self.canvas.vedit.as_mut() {
                     v.marquee = None;
@@ -195,6 +207,10 @@ impl App {
         self.cancel_interaction();
         builder::finish(self);
         self.tool = tool;
+        if tool.is_drawing() {
+            // the toolbar button and tray show the drawing tool last used
+            self.board.brush = tool;
+        }
         if tool == tools::Tool::ShapeBuilder && !builder::start(self) {
             self.tool = tools::Tool::Move;
         }

@@ -1,0 +1,206 @@
+{
+  "schemaVersion": "cityos.upstream-integration.v1",
+  "upstream": {
+    "repository": "https://github.com/deepfounder-ai/desigma",
+    "branch": "main",
+    "commit": "bb09ba87b1b7e7246b5dfbf916d75e3f12abe870"
+  },
+  "baselineForkCommit": "e100f08545d7081b2f32e062d85e96b224e9f038",
+  "ownedDirectories": [
+    "crates/desigma-cityos",
+    "crates/desigma-cityos-catalog",
+    "config/upstream",
+    "scripts/upstream"
+  ],
+  "publicEntries": [
+    "desigma_cityos::editor::EditorHost",
+    "desigma_cityos::workspace::Workspace",
+    "desigma_cityos::storage_policy"
+  ],
+  "toolchain": "rust-toolchain.toml; Node verification uses the consuming CMS catalog",
+  "consumerProvenance": "Native packaged artifact receipts; historical receipts do not qualify current source",
+  "requiredChecks": [
+    "source-boundary",
+    "locked-rust",
+    "packaged-native",
+    "persistence-recovery"
+  ],
+  "changes": [
+    {
+      "id": "native-host",
+      "purpose": "Compose the native CityOS EditorHost, session/save/history adapters and plugin protections.",
+      "invariant": "Failed or uncertain writes cannot replace sessions or grant ordinary editing.",
+      "paths": [
+        "crates/desigma-app/Cargo.toml",
+        "crates/desigma-app/assets/plugins/icon-browser/index.html",
+        "crates/desigma-app/assets/plugins/icon-browser/main.js",
+        "crates/desigma-app/assets/plugins/icon-browser/manifest.json",
+        "crates/desigma-app/assets/plugins/icon-browser/style.css",
+        "crates/desigma-app/src/app.rs",
+        "crates/desigma-app/src/board/connect.rs",
+        "crates/desigma-app/src/cityos_catalog/canvas.rs",
+        "crates/desigma-app/src/cityos_catalog/mod.rs",
+        "crates/desigma-app/src/cityos_catalog/style.rs",
+        "crates/desigma-app/src/cityos_catalog/tests.rs",
+        "crates/desigma-app/src/cityos_jobs.rs",
+        "crates/desigma-app/src/cli.rs",
+        "crates/desigma-app/src/decks/mod.rs",
+        "crates/desigma-app/src/design_workspace/atlas_tests.rs",
+        "crates/desigma-app/src/design_workspace/bridge.rs",
+        "crates/desigma-app/src/design_workspace/dependencies.rs",
+        "crates/desigma-app/src/design_workspace/editor_host.rs",
+        "crates/desigma-app/src/design_workspace/history_commands.rs",
+        "crates/desigma-app/src/design_workspace/horizon_tests.rs",
+        "crates/desigma-app/src/design_workspace/host.rs",
+        "crates/desigma-app/src/design_workspace/layout.rs",
+        "crates/desigma-app/src/design_workspace/material_tests.rs",
+        "crates/desigma-app/src/design_workspace/mod.rs",
+        "crates/desigma-app/src/design_workspace/native_projection.rs",
+        "crates/desigma-app/src/design_workspace/presentation.rs",
+        "crates/desigma-app/src/design_workspace/repaint.rs",
+        "crates/desigma-app/src/design_workspace/session.rs",
+        "crates/desigma-app/src/design_workspace/submission_recovery.rs",
+        "crates/desigma-app/src/edit.rs",
+        "crates/desigma-app/src/history/mod.rs",
+        "crates/desigma-app/src/history/session.rs",
+        "crates/desigma-app/src/history/tests.rs",
+        "crates/desigma-app/src/home/mod.rs",
+        "crates/desigma-app/src/home/session.rs",
+        "crates/desigma-app/src/home/sidebar.rs",
+        "crates/desigma-app/src/home/thumb.rs",
+        "crates/desigma-app/src/io.rs",
+        "crates/desigma-app/src/layout.rs",
+        "crates/desigma-app/src/libraries/mod.rs",
+        "crates/desigma-app/src/libraries/modal.rs",
+        "crates/desigma-app/src/main.rs",
+        "crates/desigma-app/src/ops.rs",
+        "crates/desigma-app/src/panels/export.rs",
+        "crates/desigma-app/src/panels/rail.rs",
+        "crates/desigma-app/src/plugins/bundled.rs",
+        "crates/desigma-app/src/plugins/mod.rs",
+        "crates/desigma-app/src/plugins/runtime.rs",
+        "crates/desigma-app/src/plugins/store.rs",
+        "crates/desigma-app/src/plugins/ui.rs",
+        "crates/desigma-app/src/portable_import_tests.rs",
+        "crates/desigma-app/src/shell.rs",
+        "crates/desigma-app/src/shell/performance.rs",
+        "crates/desigma-app/src/shell/tests/home.rs",
+        "crates/desigma-app/src/shell/tests/libraries.rs",
+        "crates/desigma-app/src/shell/tests/plugins.rs",
+        "crates/desigma-app/src/shell/tests/variables.rs",
+        "crates/desigma-app/src/textmeasure.rs",
+        "crates/desigma-app/src/theme.rs",
+        "crates/desigma-app/src/variables/collection.rs",
+        "crates/desigma-app/src/variables/mod.rs",
+        "crates/desigma-app/src/variables/view.rs",
+        "crates/desigma-app/src/window_geometry.rs"
+      ],
+      "tests": [
+        "crates/desigma-app/src/design_workspace/session.rs",
+        "scripts/cityos-boundary.test.mjs"
+      ]
+    },
+    {
+      "id": "document-codec-history",
+      "purpose": "Preserve existing serialized CityOS bindings and generic validated document/history transitions.",
+      "invariant": "Container versions and process-local history fences remain compatible; no new on-disk format.",
+      "paths": [
+        "crates/desigma-doc/src/cityos.rs",
+        "crates/desigma-doc/src/components.rs",
+        "crates/desigma-doc/src/history.rs",
+        "crates/desigma-doc/src/lib.rs",
+        "crates/desigma-doc/src/persistence.rs"
+      ],
+      "tests": [
+        "crates/desigma-doc/src/persistence.rs",
+        "crates/desigma-doc/src/history.rs"
+      ]
+    },
+    {
+      "id": "durable-storage-port",
+      "purpose": "Keep generic checkpoint, payload, journal and transaction primitives with an explicit extension-owned semantic policy.",
+      "invariant": "Unknown bindings are preserved and held; durable uncertainty requires exact readback.",
+      "paths": [
+        "crates/desigma-library/Cargo.toml",
+        "crates/desigma-library/src/checkpoint.rs",
+        "crates/desigma-library/src/lib.rs",
+        "crates/desigma-library/src/payloads.rs",
+        "crates/desigma-library/src/payloads_tests.rs",
+        "crates/desigma-library/src/portable.rs",
+        "crates/desigma-library/src/publish.rs",
+        "crates/desigma-library/src/storage_policy.rs",
+        "crates/desigma-library/src/store.rs",
+        "crates/desigma-library/src/submission_policy.rs",
+        "crates/desigma-library/src/submission_sync.rs",
+        "crates/desigma-library/src/submissions.rs",
+        "crates/desigma-library/src/versions.rs",
+        "crates/desigma-library/tests/published_index_restart.rs"
+      ],
+      "tests": [
+        "crates/desigma-library/src/payloads_tests.rs",
+        "crates/desigma-library/tests/published_index_restart.rs",
+        "scripts/cityos-boundary.test.mjs"
+      ]
+    },
+    {
+      "id": "managed-engine",
+      "purpose": "Retain generic managed-document mutation guards and complete restore fences in the upstream engine owners.",
+      "invariant": "Managed editing cannot allocate or mutate through ordinary transactions, variables, table or component synchronization.",
+      "paths": [
+        "crates/desigma-engine/src/components.rs",
+        "crates/desigma-engine/src/edit.rs",
+        "crates/desigma-engine/src/lib.rs",
+        "crates/desigma-engine/src/table.rs",
+        "crates/desigma-engine/src/variables.rs"
+      ],
+      "tests": [
+        "crates/desigma-engine/src/lib.rs",
+        "crates/desigma-engine/src/components.rs"
+      ]
+    },
+    {
+      "id": "gpu-compatibility",
+      "purpose": "Retain GL-compatible uniform layout, attachment resolve scissor and platform diagnostics.",
+      "invariant": "CPU uploads match the actual WGSL layout and native rendering retains previous attachment contents.",
+      "paths": [
+        "crates/desigma-gpu/src/exec.rs",
+        "crates/desigma-gpu/src/pipelines.rs",
+        "crates/desigma-gpu/src/shaders/fx.wgsl",
+        "crates/desigma-gpu/tests/adapter.rs",
+        "crates/desigma-gpu/tests/common/mod.rs",
+        "crates/desigma-gpu/tests/fidelity.rs"
+      ],
+      "tests": [
+        "crates/desigma-gpu/src/pipelines.rs",
+        "crates/desigma-gpu/tests/fidelity.rs",
+        "crates/desigma-gpu/tests/adapter.rs"
+      ]
+    },
+    {
+      "id": "maintenance",
+      "purpose": "Preserve fork toolchain, platform integration, documentation and source-boundary qualification.",
+      "invariant": "The pinned Rust toolchain and maintained native extension are preserved across ordinary upstream merges.",
+      "paths": [
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        ".impeccable.md",
+        "Cargo.lock",
+        "Cargo.toml",
+        "README.md",
+        "crates/desigma-fig/src/export.rs",
+        "crates/desigma-render/src/geom.rs",
+        "scripts/cityos-boundary.test.mjs",
+        "scripts/upstream-audit.mjs",
+        "scripts/upstream-audit.test.mjs"
+      ],
+      "tests": [
+        "scripts/cityos-boundary.test.mjs",
+        "scripts/upstream-audit.test.mjs"
+      ]
+    }
+  ],
+  "nonClaims": [
+    "Rust source checking and local tests do not qualify the installed Windows executable, WebView or GPU.",
+    "Historical receipts remain immutable and scoped to their original source."
+  ]
+}

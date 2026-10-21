@@ -216,17 +216,17 @@ pub fn overlays(app: &App, ui: &Ui, rect: ERect) {
     if let Interaction::Pencil(pts) = &app.canvas.inter {
         let line: Vec<Pos2> = pts.iter().map(|q| to_s(*q)).collect();
         if app.tool.is_brush() {
-            // a marker stroke is previewed in its own ink and thickness
-            let (w, a) = if app.tool == tools::Tool::Highlighter {
-                (theme::BOARD_HIGHLIGHTER_WIDTH, theme::BOARD_HIGHLIGHTER_ALPHA)
-            } else {
-                (theme::BOARD_MARKER_WIDTH, 1.0)
-            };
+            // a stroke is previewed in its own ink and thickness
+            let w = crate::board::create::brush_width(app.tool, app.board.size);
+            let a = crate::board::create::brush_alpha(app.tool);
             let ink = crate::board::color32(app.board.ink).gamma_multiply(a);
             p.add(egui::Shape::line(line, Stroke::new(w * app.view.zoom, ink)));
         } else {
             p.add(egui::Shape::line(line, Stroke::new(theme::PEN_LINE_WIDTH, theme::CANVAS_SELECTION)));
         }
+    }
+    if app.is_board() {
+        crate::board::erase::overlay(app, &p, rect);
     }
     crate::board::canvas::overlay(app, &p, rect);
 

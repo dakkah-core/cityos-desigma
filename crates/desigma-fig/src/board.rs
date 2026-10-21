@@ -1,6 +1,7 @@
 //! FigJam (board) node types in REST JSON: `STICKY`, `SHAPE_WITH_TEXT`, `CONNECTOR`,
-//! `STAMP` and the `editorType: "figjam"` file marker, mapped to and from the board
-//! kinds of the document model. `SECTION` needs no special handling.
+//! `STAMP`, `SECTION`, `TABLE` and `TABLE_CELL` and the `editorType: "figjam"` file marker,
+//! mapped to and from the board kinds of the document model. In a design file `SECTION` stays
+//! the plain design section.
 
 use crate::export::{n, paints, v2};
 use crate::rest_import::{farr, fbool, fnum, fstr, parse_paints, vec2};
@@ -160,6 +161,23 @@ pub(crate) fn kind_from_json(ty: &str, v: &Value, origin: Vec2) -> Option<NodeKi
             NodeKind::ShapeWithText(p)
         }
         "STAMP" => NodeKind::Stamp { kind: stamp_kind(v) },
+        "SECTION" => {
+            let color = parse_paints(v.get("fills")).iter().find_map(|f| match &f.kind {
+                PaintKind::Solid(c) if f.visible => Some(SectionColor::nearest(*c)),
+                _ => None,
+            });
+            NodeKind::BoardSection(SectionProps { color: color.unwrap_or_default(), contents_hidden: fbool(v, "sectionContentsHidden").unwrap_or(false) })
+        }
+        "TABLE" => NodeKind::Table(table_props(v)),
+        "TABLE_CELL" => {
+            let fill = parse_paints(v.get("fills")).iter().find_map(|f| match &f.kind {
+                PaintKind::Solid(c) if f.visible => Some(*c),
+                _ => None,
+            });
+            let mut p = TableCellProps { fill: fill.filter(|c| c.a > 0.0), ..Default::default() };
+            p.text = board_text_props(v, p.text);
+            NodeKind::TableCell(p)
+        }
         "CONNECTOR" => {
             let end = |key: &str| -> ConnectorEnd {
                 let e = v.get(key);
@@ -193,6 +211,61 @@ pub(crate) fn kind_from_json(ty: &str, v: &Value, origin: Vec2) -> Option<NodeKi
     })
 }
 
+fn node_size(v: &Value) -> Option<Vec2> {
+    v.get("size").and_then(vec2).or_else(|| v.get("absoluteBoundingBox").and_then(|b| Some(Vec2::new(fnum(b, "width")?, fnum(b, "height")?))))
+}
+
+fn index_of(v: &Value, key: &str) -> Option<usize> {
+    fnum(v, key).filter(|f| *f >= 0.0).map(|f| f as usize)
+}
+
+/// The cells of a REST `TABLE` in row-major order (by `rowIndex` / `columnIndex` when they are given).
+pub(crate) fn table_children(v: &Value) -> Vec<&Value> {
+    let mut cells: Vec<&Value> = farr(v, "children").iter().collect();
+    if cells.iter().all(|c| index_of(c, "rowIndex").is_some() && index_of(c, "columnIndex").is_some()) {
+        cells.sort_by_key(|c| (index_of(c, "rowIndex"), index_of(c, "columnIndex")));
+    }
+    cells
+}
+
+/// Grid of a REST `TABLE`: its size in rows and columns, and the cell sizes where given.
+fn table_props(v: &Value) -> TableProps {
+    let cells = table_children(v);
+    let max_idx = |key: &str| cells.iter().filter_map(|c| index_of(c, key)).max().map(|m| m + 1);
+    let cols = index_of(v, "numColumns").or_else(|| max_idx("columnIndex")).unwrap_or(1).max(1);
+    let rows = index_of(v, "numRows").or_else(|| max_idx("rowIndex")).unwrap_or_else(|| cells.len().div_ceil(cols)).max(1);
+    let mut p = TableProps::new(cols, rows);
+    for (i, c) in cells.iter().enumerate() {
+        let (r, col) = (index_of(c, "rowIndex").unwrap_or(i / cols), index_of(c, "columnIndex").unwrap_or(i % cols));
+        if let Some(s) = node_size(c).filter(|s| s.x > 0.0 && s.y > 0.0) {
+            if col < cols && r < rows {
+                if r == 0 {
+                    p.col_widths[col] = s.x.max(TABLE_MIN_COL_W);
+                }
+                if col == 0 {
+                    p.row_heights[r] = s.y.max(TABLE_MIN_ROW_H);
+                }
+            }
+        }
+    }
+    p
+}
+
+/// After the cells of a table were imported: pads missing cells, drops extras and puts every
+/// cell on the grid.
+pub(crate) fn finish_table(doc: &mut Document, id: NodeId) {
+    let Some(want) = doc.get(id).and_then(|n| if let NodeKind::Table(t) = &n.kind { Some(t.rows() * t.cols()) } else { None }) else { return };
+    let have = doc.get(id).map(|n| n.children.len()).unwrap_or(0);
+    for extra in doc.get(id).map(|n| n.children.iter().skip(want).copied().collect::<Vec<_>>()).unwrap_or_default() {
+        let _ = doc.remove(extra);
+    }
+    for _ in have..want {
+        let cid = doc.alloc_id();
+        let _ = doc.insert(id, Node::table_cell(cid));
+    }
+    sync_table(doc, id);
+}
+
 /// Fix-ups after the generic node fields were parsed.
 pub(crate) fn finish_node(n: &mut Node) {
     match &mut n.kind {
@@ -212,6 +285,12 @@ pub(crate) fn finish_node(n: &mut Node) {
             n.stroke.align = StrokeAlign::Center;
             n.stroke.join = StrokeJoin::Round;
             n.stroke.cap = StrokeCap::Round;
+        }
+        NodeKind::BoardSection(_) | NodeKind::TableCell(_) | NodeKind::Table(_) => {
+            // the colour lives in the props
+            n.fills.clear();
+            n.stroke.paints.clear();
+            n.stroke.weight = 0.0;
         }
         NodeKind::ShapeWithText(_) => {
             if n.stroke.paints.is_empty() {
@@ -257,6 +336,10 @@ pub(crate) fn type_name(k: &NodeKind) -> Option<&'static str> {
         NodeKind::Connector(_) => Some("CONNECTOR"),
         NodeKind::ShapeWithText(_) => Some("SHAPE_WITH_TEXT"),
         NodeKind::Stamp { .. } => Some("STAMP"),
+        NodeKind::BoardSection(_) => Some("SECTION"),
+        NodeKind::Table(_) => Some("TABLE"),
+        NodeKind::TableCell(_) => Some("TABLE_CELL"),
+        NodeKind::CodeBlock(_) => Some("CODE_BLOCK"),
         _ => None,
     }
 }
@@ -294,6 +377,22 @@ pub(crate) fn export_fields(node: &Node, origin: Vec2, m: &mut Map<String, Value
         }
         NodeKind::Stamp { kind } => {
             m.insert("stampType".into(), kind.clone().into());
+        }
+        NodeKind::BoardSection(s) => {
+            m.insert("fills".into(), paints(&[Paint::solid(s.color.color())]));
+            m.insert("sectionContentsHidden".into(), s.contents_hidden.into());
+        }
+        NodeKind::Table(t) => {
+            m.insert("numRows".into(), t.rows().into());
+            m.insert("numColumns".into(), t.cols().into());
+        }
+        NodeKind::TableCell(c) => {
+            m.insert("fills".into(), paints(&c.fill.map(Paint::solid).into_iter().collect::<Vec<_>>()));
+            text_fields(m, &c.text);
+        }
+        NodeKind::CodeBlock(c) => {
+            m.insert("code".into(), c.text.content.clone().into());
+            m.insert("codeLanguage".into(), c.lang.label().into());
         }
         NodeKind::Connector(c) => {
             let end = |e: &ConnectorEnd| {

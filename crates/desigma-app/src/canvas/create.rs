@@ -62,7 +62,8 @@ pub fn container_at(doc: &Document, page: NodeId, p: Vec2, exclude: &[NodeId]) -
             let Some(inv) = world.invert() else { continue };
             let l = inv.apply(p);
             let inside = l.x >= 0.0 && l.y >= 0.0 && l.x <= n.size.x && l.y <= n.size.y;
-            let frame_like = matches!(n.kind, NodeKind::Frame(_) | NodeKind::Section | NodeKind::Component(_) | NodeKind::ComponentSet(_));
+            let frame_like =
+                matches!(n.kind, NodeKind::Frame(_) | NodeKind::Section | NodeKind::BoardSection(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_));
             if frame_like && inside {
                 return rec(doc, c, world, p, exclude).or(Some(c));
             }
@@ -95,16 +96,14 @@ pub fn new_shape(app: &mut App, tool: Tool) -> Node {
             f.name = app.unique_name("Frame");
             f
         }
+        Tool::Section if app.is_board() => {
+            let mut s = Node::board_section(id, r, "");
+            s.name = app.unique_name("Section");
+            s
+        }
         Tool::Section => {
             let mut s = Node::new(id, NodeKind::Section);
             s.fills = vec![Paint::solid(Color::rgb(0xF5, 0xF5, 0xF5))];
-            if app.is_board() {
-                // a board section is a white panel with a light outline
-                s.fills = vec![Paint::solid(Color::WHITE)];
-                s.stroke.paints = vec![Paint::solid(Color::rgb(0xCF, 0xCF, 0xCF))];
-                s.stroke.weight = 1.0;
-                s.stroke.align = StrokeAlign::Inside;
-            }
             s.name = app.unique_name("Section");
             s
         }
@@ -167,6 +166,10 @@ pub fn apply_geom(doc: &mut Document, tx: &mut Tx, id: NodeId, parent: NodeId, g
             n.transform = Affine::translate(o.x, o.y);
             n.size = v2(g.rect.w.max(1.0), g.rect.h.max(1.0));
         }
+    }
+    if matches!(tx.ed.node(doc, id).map(|n| &n.kind), Some(NodeKind::Table(_))) {
+        let size = v2(g.rect.w.max(1.0), g.rect.h.max(1.0));
+        desigma_engine::table::scale_table(doc, &mut tx.ed, id, size);
     }
     layout::relayout_up(doc, &mut tx.ed, id);
 }

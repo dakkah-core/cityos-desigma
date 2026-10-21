@@ -53,7 +53,18 @@ pub enum Icon {
     Connector,
     Marker,
     Highlighter,
+    Washi,
+    Eraser,
     Stamp,
+    Table,
+    Code,
+    Timer,
+    Pause,
+    Reset,
+    Vote,
+    Copy,
+    ListNumbers,
+    WideSticky,
     // layer kinds
     Group,
     Vector,
@@ -174,7 +185,18 @@ impl Icon {
         Icon::Connector,
         Icon::Marker,
         Icon::Highlighter,
+        Icon::Washi,
+        Icon::Eraser,
         Icon::Stamp,
+        Icon::Table,
+        Icon::Code,
+        Icon::Timer,
+        Icon::Pause,
+        Icon::Reset,
+        Icon::Vote,
+        Icon::Copy,
+        Icon::ListNumbers,
+        Icon::WideSticky,
         Icon::Group,
         Icon::Vector,
         Icon::Component,
@@ -282,7 +304,18 @@ impl Icon {
             Icon::Connector => "corner-down-right",
             Icon::Marker => "pencil-line",
             Icon::Highlighter => "highlighter",
+            Icon::Washi => "ribbon",
+            Icon::Eraser => "eraser",
             Icon::Stamp => "stamp",
+            Icon::Table => "table",
+            Icon::Code => "braces",
+            Icon::Timer => "timer",
+            Icon::Pause => "pause",
+            Icon::Reset => "rotate-ccw",
+            Icon::Vote => "vote",
+            Icon::Copy => "copy",
+            Icon::ListNumbers => "list-ordered",
+            Icon::WideSticky => "rectangle-horizontal",
             Icon::Group => "group",
             Icon::Vector => "spline",
             Icon::Component => "component",
@@ -399,6 +432,7 @@ lucide!(
     "pencil-line",
     "highlighter",
     "stamp",
+    "table",
     "group",
     "spline",
     "component",
@@ -447,6 +481,16 @@ lucide!(
     "sliders-horizontal",
     "square-dashed-bottom",
     "waves",
+    "eraser",
+    "ribbon",
+    "braces",
+    "timer",
+    "pause",
+    "rotate-ccw",
+    "vote",
+    "copy",
+    "list-ordered",
+    "rectangle-horizontal",
 );
 
 /// SVG source of the Lucide icon behind `icon`.
@@ -554,7 +598,7 @@ mod tests {
         for i in Icon::ALL {
             assert!(seen.insert(*i), "{i:?} listed twice");
         }
-        assert_eq!(seen.len(), 103);
+        assert_eq!(seen.len(), 114);
     }
 
     #[test]

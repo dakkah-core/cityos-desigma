@@ -55,6 +55,7 @@ pub fn overlay(app: &App, p: &Painter, rect: ERect) {
     if !app.is_board() {
         return;
     }
+    super::table::overlay(app, p, rect);
     let pointer = app.canvas.pointer_page;
     let mut nodes: Vec<desigma_doc::NodeId> = Vec::new();
     nodes.extend(app.board.dots);

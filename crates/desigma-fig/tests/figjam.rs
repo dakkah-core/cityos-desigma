@@ -30,7 +30,7 @@ fn sticky_import() {
     assert_eq!(n.size, Vec2::new(240.0, 240.0));
     // it sits inside its section
     let parent = doc.get(n.parent.unwrap()).unwrap();
-    assert_eq!(parent.kind, NodeKind::Section);
+    assert!(matches!(parent.kind, NodeKind::BoardSection(_)));
     assert_eq!(parent.name, "Went well");
 }
 

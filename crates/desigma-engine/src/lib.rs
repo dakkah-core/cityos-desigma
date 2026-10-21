@@ -1,6 +1,6 @@
 //! GUI-independent editing, layout, text measurement, and derived updates.
 //!
-//! Source port: upstream db4a3cdcac0a2445d2d5ee06c79ef5451c2405ab.
+//! Upstream engine integrated from bb09ba87b1b7e7246b5dfbf916d75e3f12abe870.
 //! Local adaptations fence managed documents without interpreting their editing policy.
 pub mod components;
 pub mod connect;

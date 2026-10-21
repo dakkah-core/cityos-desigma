@@ -21,10 +21,26 @@ fn local_hit(kind: &NodeKind, size: Vec2, local: Vec2, tol: f32) -> bool {
     }
 }
 
+/// Whether `local` (section space) is on the title pill or within a border band of the section.
+fn section_hit(n: &desigma_doc::Node, local: Vec2, tol: f32) -> bool {
+    let pill = desigma_render::board::section_title_rect(n);
+    if pill.x - tol <= local.x && local.x <= pill.x + pill.w + tol && pill.y - tol <= local.y && local.y <= pill.y + pill.h + tol {
+        return true;
+    }
+    let band = tol * 5.0;
+    let (w, h) = (n.size.x, n.size.y);
+    let inside_outer = local.x >= -tol && local.y >= -tol && local.x <= w + tol && local.y <= h + tol;
+    let inside_inner = local.x > band && local.y > band && local.x < w - band && local.y < h - band;
+    inside_outer && !inside_inner
+}
+
 /// True if the container kind is "transparent" to clicks: clicking a child
 /// selects the child directly (frames, sections, pages).
 fn selects_through(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Page { .. } | NodeKind::Frame(_) | NodeKind::Section | NodeKind::Component(_) | NodeKind::ComponentSet(_))
+    matches!(
+        kind,
+        NodeKind::Page { .. } | NodeKind::Frame(_) | NodeKind::Section | NodeKind::BoardSection(_) | NodeKind::Component(_) | NodeKind::ComponentSet(_)
+    )
 }
 
 /// Finds the node under `p` (page space).
@@ -62,9 +78,23 @@ fn hit_in(doc: &Document, parent: NodeId, parent_world: Affine, p: Vec2, tol: f3
         let inside = match &n.kind {
             // a connector is its line, not its bounding box
             NodeKind::Connector(_) => parent_world.invert().is_some_and(|pi| connector_hit(doc, cid, pi.apply(p), tol)),
+            // a section is picked by its title pill and its border; its empty inside is the canvas
+            NodeKind::BoardSection(_) => section_hit(n, local, tol),
+            // a drawn stroke is its ink, not its bounding box
+            NodeKind::Vector { .. } if n.brush.is_some() => n.brush_distance(local).is_some_and(|d| d <= tol),
             k => local_hit(k, n.size, local, tol),
         };
-        if n.kind.is_container() {
+        // a table is one object: its cells are edited, not picked
+        let is_container = n.kind.is_container() && !matches!(n.kind, NodeKind::Table(_));
+        if let NodeKind::BoardSection(s) = &n.kind {
+            if s.contents_hidden {
+                if inside {
+                    return Some(cid);
+                }
+                continue;
+            }
+        }
+        if is_container {
             let descend = deep || selects_through(&n.kind) || entered.contains(&cid);
             let clips = n.kind.frame_props().map(|f| f.clips_content).unwrap_or(false);
             if descend && (!clips || inside) {
@@ -102,7 +132,15 @@ fn marquee_in(doc: &Document, parent: NodeId, r: &Rect, out: &mut Vec<NodeId>) {
             continue;
         }
         let contained = bb.x >= r.x && bb.y >= r.y && bb.x + bb.w <= r.x + r.w && bb.y + bb.h <= r.y + r.h;
-        if n.kind.is_container() && selects_through(&n.kind) && !contained && !n.children.is_empty() {
+        let hidden = matches!(&n.kind, NodeKind::BoardSection(s) if s.contents_hidden);
+        // a marquee takes a section only when it encloses it; otherwise it picks what is inside
+        if matches!(n.kind, NodeKind::BoardSection(_)) && !contained {
+            if !hidden {
+                marquee_in(doc, cid, r, out);
+            }
+            continue;
+        }
+        if n.kind.is_container() && selects_through(&n.kind) && !contained && !n.children.is_empty() && !hidden {
             marquee_in(doc, cid, r, out);
         } else {
             out.push(cid);
@@ -195,6 +233,42 @@ mod tests {
         assert_eq!(partial, vec![rect]);
         let all = marquee_select(&d, page, &Rect::new(-10.0, -10.0, 400.0, 400.0));
         assert_eq!(all, vec![frame]);
+    }
+
+    #[test]
+    fn a_table_is_one_hit_even_for_a_deep_click() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let nodes = desigma_doc::table_nodes(&mut d, v2(0.0, 0.0), 2, 2);
+        let id = nodes[0].id;
+        desigma_doc::Command::Insert { parent: page, index: 0, nodes }.apply(&mut d).unwrap();
+        assert_eq!(hit_test(&d, page, v2(10.0, 10.0), 0.0, true, &[]), Some(id), "a cell is not picked on its own");
+        assert_eq!(hit_test(&d, page, v2(300.0, 100.0), 0.0, false, &[]), Some(id));
+        assert_eq!(hit_test(&d, page, v2(900.0, 100.0), 0.0, false, &[]), None);
+    }
+
+    #[test]
+    fn a_section_is_hit_on_its_title_and_border_but_its_children_come_first() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let sid = d.alloc_id();
+        let sec = d.insert(page, Node::board_section(sid, Rect::new(100.0, 100.0, 400.0, 300.0), "Plan")).unwrap();
+        let rid = d.alloc_id();
+        let child = d.insert(sec, Node::rectangle(rid, Rect::new(50.0, 50.0, 80.0, 80.0))).unwrap();
+        // empty inside: the canvas
+        assert_eq!(hit_test(&d, page, v2(400.0, 300.0), 0.0, false, &[]), None);
+        // the title pill above the top left corner
+        assert_eq!(hit_test(&d, page, v2(110.0, 100.0 - 17.0), 0.0, false, &[]), Some(sec));
+        // the border band
+        assert_eq!(hit_test(&d, page, v2(103.0, 300.0), 2.0, false, &[]), Some(sec));
+        // a child inside is picked directly
+        assert_eq!(hit_test(&d, page, v2(170.0, 170.0), 0.0, false, &[]), Some(child));
+        // with the contents hidden the child is out of reach
+        if let Some(NodeKind::BoardSection(s)) = d.get_mut(sec).map(|n| &mut n.kind) {
+            s.contents_hidden = true;
+        }
+        assert_eq!(hit_test(&d, page, v2(170.0, 170.0), 0.0, true, &[]), None);
+        assert_eq!(hit_test(&d, page, v2(103.0, 300.0), 2.0, false, &[]), Some(sec));
     }
 
     #[test]

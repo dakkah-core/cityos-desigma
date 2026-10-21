@@ -36,8 +36,14 @@ pub fn item(app: &mut App, tool: Tool) -> Option<Node> {
             if let NodeKind::Sticky(s) = &mut n.kind {
                 s.color = app.board.color;
                 s.author = Some(author_name());
+                s.wide = app.board.wide;
             }
             n.name = app.unique_name("Sticky note");
+            n
+        }
+        Tool::Code => {
+            let mut n = Node::code_block(id, r, app.board.lang, "");
+            n.name = app.unique_name("Code block");
             n
         }
         Tool::BoardShape => {
@@ -56,36 +62,76 @@ pub fn item(app: &mut App, tool: Tool) -> Option<Node> {
 }
 
 /// Default box of a board item placed by a click at `at` (centred on the point).
-pub fn click_rect(tool: Tool, at: Vec2) -> Rect {
+pub fn click_rect(tool: Tool, at: Vec2, wide: bool) -> Rect {
     let (w, h) = match tool {
+        Tool::Sticky if wide => (STICKY_WIDE_W, STICKY_WIDE_H),
         Tool::Sticky => (STICKY_SIZE, STICKY_SIZE),
+        Tool::Code => (CODE_BLOCK_W, CODE_BLOCK_H),
         Tool::Stamp => (theme::BOARD_STAMP_SIZE, theme::BOARD_STAMP_SIZE),
+        Tool::Table => (TABLE_DEFAULT_COLS as f32 * TABLE_COL_W, TABLE_DEFAULT_ROWS as f32 * TABLE_ROW_H),
+        Tool::Section => (SECTION_DEFAULT_SIZE.x, SECTION_DEFAULT_SIZE.y),
         _ => (theme::BOARD_SHAPE_W, theme::BOARD_SHAPE_H),
     };
     Rect::new((at.x - w / 2.0).round(), (at.y - h / 2.0).round(), w, h)
 }
 
 /// Whether dragging out this tool keeps the box square.
-pub fn keeps_square(tool: Tool) -> bool {
-    matches!(tool, Tool::Sticky | Tool::Stamp)
+pub fn keeps_square(tool: Tool, wide: bool) -> bool {
+    matches!(tool, Tool::Stamp) || (tool == Tool::Sticky && !wide)
+}
+
+/// Whether a plain click with this tool places the item at its default size (rather than a small
+/// default box at the click, which is what the design tools do).
+pub fn click_places(tool: Tool, board: bool) -> bool {
+    types_into(tool) || matches!(tool, Tool::Stamp | Tool::Table) || (board && tool == Tool::Section)
 }
 
 /// Whether a click with this tool starts typing into the new item.
 pub fn types_into(tool: Tool) -> bool {
-    matches!(tool, Tool::Sticky | Tool::BoardShape)
+    matches!(tool, Tool::Sticky | Tool::BoardShape | Tool::Code)
 }
 
-/// Styles a freshly drawn marker or highlighter stroke.
-pub fn brush_style(n: &mut Node, tool: Tool, ink: Color) {
-    let (weight, alpha) =
-        if tool == Tool::Highlighter { (theme::BOARD_HIGHLIGHTER_WIDTH, theme::BOARD_HIGHLIGHTER_ALPHA) } else { (theme::BOARD_MARKER_WIDTH, 1.0) };
-    n.stroke.paints = vec![Paint::solid(ink.with_alpha(alpha))];
-    n.stroke.weight = weight;
-    n.stroke.cap = StrokeCap::Round;
+/// Base width of a brush's stroke (thickness 1.0).
+pub fn brush_base_width(tool: Tool) -> f32 {
+    match tool {
+        Tool::Highlighter => theme::BOARD_HIGHLIGHTER_WIDTH,
+        Tool::Washi => theme::BOARD_WASHI_WIDTH,
+        _ => theme::BOARD_MARKER_WIDTH,
+    }
+}
+
+/// Stroke width of `tool` at thickness choice `size` (an index into [`BRUSH_SIZES`]).
+pub fn brush_width(tool: Tool, size: usize) -> f32 {
+    brush_base_width(tool) * BRUSH_SIZES[size.min(BRUSH_SIZES.len() - 1)]
+}
+
+/// Opacity of the ink of `tool`.
+pub fn brush_alpha(tool: Tool) -> f32 {
+    match tool {
+        Tool::Highlighter => theme::BOARD_HIGHLIGHTER_ALPHA,
+        Tool::Washi => theme::BOARD_WASHI_ALPHA,
+        _ => 1.0,
+    }
+}
+
+/// Styles a freshly drawn marker, highlighter or washi tape stroke. `size` picks the thickness
+/// from [`BRUSH_SIZES`]; `pattern` is only used by washi tape.
+pub fn brush_style(n: &mut Node, tool: Tool, ink: Color, size: usize, pattern: WashiPattern) {
+    n.stroke.paints = vec![Paint::solid(ink.with_alpha(brush_alpha(tool)))];
+    n.stroke.weight = brush_width(tool, size);
+    n.stroke.cap = if tool == Tool::Washi { StrokeCap::None } else { StrokeCap::Round };
     n.stroke.join = StrokeJoin::Round;
     n.stroke.align = StrokeAlign::Center;
     n.fills.clear();
-    n.name = if tool == Tool::Highlighter { "Highlighter".into() } else { "Marker".into() };
+    let (brush, name) = match tool {
+        Tool::Highlighter => (Brush::Highlighter, "Highlighter"),
+        Tool::Washi => (Brush::Washi(pattern), "Washi tape"),
+        _ => (Brush::Marker, "Marker"),
+    };
+    n.brush = Some(brush);
+    // the highlighter darkens what it covers, like ink over print
+    n.blend = if tool == Tool::Highlighter { BlendMode::Multiply } else { BlendMode::PassThrough };
+    n.name = name.into();
 }
 
 /// Creates the sticky note to the right of the selected (or edited) one, same colour, and starts
@@ -95,7 +141,7 @@ pub fn tab_next(app: &mut App) -> bool {
     let Some(cur) = cur else { return false };
     let Some(n) = app.doc.get(cur) else { return false };
     let NodeKind::Sticky(src) = &n.kind else { return false };
-    let (color, tpos, size, parent) = (src.color, n.transform, n.size, n.parent);
+    let (color, tpos, size, parent, wide) = (src.color, n.transform, n.size, n.parent, src.wide);
     let Some(parent) = parent else { return false };
     // commit the text being typed, then add the neighbour in its own undo step
     crate::canvas::interact::finish_text(app, true);
@@ -106,6 +152,7 @@ pub fn tab_next(app: &mut App) -> bool {
     if let NodeKind::Sticky(s) = &mut next.kind {
         s.color = color;
         s.author = Some(author_name());
+        s.wide = wide;
     }
     let index = app.doc.get(parent).map(|p| p.children.len()).unwrap_or(0);
     let mut tx = Tx::new();

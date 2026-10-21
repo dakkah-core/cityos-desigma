@@ -85,6 +85,34 @@ pub struct FxParams {
     pub pad: [f32; 1],
 }
 
+// Must equal WGSL `P` after the GL-compatible scalar tail padding.
+const _: () = assert!(size_of::<FxParams>() == 96);
+
+#[cfg(test)]
+mod uniform_compatibility_tests {
+    use super::FxParams;
+
+    #[test]
+    fn effect_upload_matches_the_actual_shader_layout() {
+        use wgpu::naga::{front::wgsl, valid::{Capabilities, ValidationFlags, Validator}, TypeInner};
+        let shader = wgsl::parse_str(include_str!("shaders/fx.wgsl")).expect("effect shader parses");
+        Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&shader).expect("effect shader validates");
+        let uniform = shader.types.iter().find_map(|(_, ty)| {
+            (ty.name.as_deref() == Some("P")).then_some(&ty.inner)
+        }).expect("effect uniform exists");
+        let TypeInner::Struct { members, span } = uniform else { panic!("effect uniform must be a struct") };
+        assert_eq!(*span as usize, std::mem::size_of::<FxParams>(), "upload and shader binding sizes differ");
+        for (name, offset) in [
+            ("light", std::mem::offset_of!(FxParams, light)),
+            ("out_w", std::mem::offset_of!(FxParams, out_w)),
+            ("out_h", std::mem::offset_of!(FxParams, out_h)),
+            ("p1", std::mem::offset_of!(FxParams, pad)),
+        ] {
+            assert_eq!(members.iter().find(|member| member.name.as_deref() == Some(name)).unwrap().offset as usize, offset, "{name} upload offset differs");
+        }
+    }
+}
+
 pub struct Layouts {
     pub fx: wgpu::BindGroupLayout,
     pub globals: wgpu::BindGroupLayout,

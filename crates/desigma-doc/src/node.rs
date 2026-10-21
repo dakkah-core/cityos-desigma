@@ -60,6 +60,10 @@ pub struct Node {
     /// Presentation metadata; ordinary design nodes omit this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slide: Option<SlideProps>,
+    /// How a board drawing stroke (marker, highlighter, washi tape) is drawn; `None` for
+    /// everything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brush: Option<Brush>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +178,7 @@ impl Node {
             export_settings: Vec::new(),
             dev: DevInfo::default(),
             slide: None,
+            brush: None,
         }
     }
 
@@ -272,10 +277,12 @@ pub enum NodeKind {
     },
     /// Board section: a named, coloured container; see [`SectionProps`].
     BoardSection(SectionProps),
-    /// Board table with row-major [`NodeKind::TableCell`] children.
+    /// Board table: a grid whose cells are its [`NodeKind::TableCell`] children (row-major).
     Table(TableProps),
-    /// One cell of a table, with its box derived from the grid.
+    /// One cell of a [`NodeKind::Table`]; its box is derived from the table's grid.
     TableCell(TableCellProps),
+    /// Board code block: monospace code with syntax highlighting.
+    CodeBlock(CodeBlockProps),
     /// Anything the importer could not map, kept so nothing is silently lost.
     Unknown {
         type_name: String,
@@ -301,7 +308,17 @@ impl NodeKind {
 
     /// Board items that are drawn by lowering to ordinary shapes and text.
     pub fn is_board_item(&self) -> bool {
-        matches!(self, NodeKind::Sticky(_) | NodeKind::Connector(_) | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. } | NodeKind::BoardSection(_) | NodeKind::Table(_) | NodeKind::TableCell(_))
+        matches!(
+            self,
+            NodeKind::Sticky(_)
+                | NodeKind::Connector(_)
+                | NodeKind::ShapeWithText(_)
+                | NodeKind::Stamp { .. }
+                | NodeKind::BoardSection(_)
+                | NodeKind::Table(_)
+                | NodeKind::TableCell(_)
+                | NodeKind::CodeBlock(_)
+        )
     }
 
     /// The text of a board item that has its own text (sticky, shape with text), if any.
@@ -310,6 +327,7 @@ impl NodeKind {
             NodeKind::Sticky(s) => Some(&s.text),
             NodeKind::ShapeWithText(s) => Some(&s.text),
             NodeKind::TableCell(c) => Some(&c.text),
+            NodeKind::CodeBlock(c) => Some(&c.text),
             NodeKind::Connector(c) => c.label.as_ref(),
             _ => None,
         }
@@ -335,6 +353,7 @@ impl NodeKind {
             NodeKind::Sticky(s) => Some(&mut s.text),
             NodeKind::ShapeWithText(s) => Some(&mut s.text),
             NodeKind::TableCell(c) => Some(&mut c.text),
+            NodeKind::CodeBlock(c) => Some(&mut c.text),
             NodeKind::Connector(c) => c.label.as_mut(),
             _ => None,
         }
@@ -380,6 +399,7 @@ impl NodeKind {
             NodeKind::BoardSection(_) => "Section",
             NodeKind::Table(_) => "Table",
             NodeKind::TableCell(_) => "Cell",
+            NodeKind::CodeBlock(_) => "Code block",
             NodeKind::Unknown { .. } => "Layer",
         }
     }

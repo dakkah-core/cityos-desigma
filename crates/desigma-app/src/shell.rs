@@ -46,6 +46,8 @@ impl Shell {
         }
         opts.home = opts.wants_home();
         let screenshot = opts.screenshot.is_some();
+        // "Open in new window" children leave update checks to the first window
+        let launch = !screenshot && opts.open_id.is_none();
         let (gpu_flag, library) = (opts.gpu, opts.library.clone());
         let mut shell = Self::build(&cc.egui_ctx, opts);
         if let Some(rs) = &cc.wgpu_render_state {
@@ -57,6 +59,7 @@ impl Shell {
         // GPU canvas on by default; screenshots stay on the deterministic CPU path unless --gpu
         let saved = library.as_deref().and_then(|l| crate::comments::settings::load_flag(l, "use_gpu"));
         shell.app.canvas.gpu.pref = if screenshot { gpu_flag } else { gpu_flag || saved.unwrap_or(true) };
+        shell.app.updater.start(library.as_deref(), launch);
         shell
     }
 
@@ -231,6 +234,7 @@ impl Shell {
             }
             Some("version-history") => crate::history::preset::apply(&mut app, opts.library.clone()),
             Some(p @ ("dev-annotate" | "dev-compare")) => crate::dev::preset::panel(&mut app, p),
+            Some(p @ ("updater" | "updater-banner")) => crate::updater::preset(&mut app, p),
             Some(panel @ ("variables" | "variables-floating")) => {
                 app.vars.full = panel == "variables";
                 app.open_variables();
@@ -296,7 +300,12 @@ impl Shell {
     }
 
     fn handle_keys(&mut self, ctx: &Context) {
-        if self.app.plugins.open || self.app.dialog.is_some() || self.app.history.save_modal.is_some() || self.app.dev.compare.is_some() {
+        if self.app.plugins.open
+            || self.app.dialog.is_some()
+            || self.app.history.save_modal.is_some()
+            || self.app.dev.compare.is_some()
+            || self.app.updater.dialog
+        {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
@@ -406,6 +415,8 @@ impl Shell {
             return;
         }
         match key {
+            // Shift+Backspace picks the eraser on a board
+            Key::Backspace if m.shift && app.is_board() => app.set_tool(Tool::Eraser),
             Key::Delete | Key::Backspace => menus::run(app, ctx, Action::Delete),
             // an open comment draft or thread takes the Escape itself (egui drops text focus on Escape,
             // so the shortcut handler cannot tell that the key was meant for the text box)
@@ -440,9 +451,13 @@ impl Shell {
                     // A single text or vector layer is entered for editing; anything else selects its children.
                     let id = n.id;
                     if matches!(n.kind, desigma_doc::NodeKind::Text(_))
-                        || matches!(n.kind, desigma_doc::NodeKind::Sticky(_) | desigma_doc::NodeKind::ShapeWithText(_))
+                        || matches!(n.kind, desigma_doc::NodeKind::Sticky(_) | desigma_doc::NodeKind::ShapeWithText(_) | desigma_doc::NodeKind::CodeBlock(_))
                     {
                         interact::begin_text_edit(app, id);
+                    } else if matches!(n.kind, desigma_doc::NodeKind::Table(_)) {
+                        crate::board::table::tab_selected(app, true);
+                    } else if matches!(n.kind, desigma_doc::NodeKind::BoardSection(_)) {
+                        crate::board::section::begin_rename(app, id);
                     } else if matches!(n.kind, desigma_doc::NodeKind::Connector(_)) {
                         crate::board::create::edit_label(app, id);
                     } else if canvas::vector::is_vector(app, id) {
@@ -456,8 +471,12 @@ impl Shell {
                 }
             }
             // board: Tab starts the next sticky note to the right of the selected one
-            Key::Tab if app.is_board() && !m.shift => {
-                crate::board::create::tab_next(app);
+            Key::Tab if app.is_board() => {
+                if m.shift {
+                    crate::board::table::tab_selected(app, false);
+                } else if !crate::board::create::tab_next(app) {
+                    crate::board::table::tab_selected(app, true);
+                }
             }
             Key::Backslash => menus::run(app, ctx, Action::SelectParent),
             Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown => {
@@ -719,6 +738,7 @@ impl Shell {
         let ctx = ui.ctx().clone();
         crate::cityos_jobs::set_background_paused(ctx.input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
         self.app.now = ctx.input(|i| i.time);
+        self.app.poll_updater(&ctx);
         self.drive_screenshot(&ctx);
         if std::mem::take(&mut self.app.ui.cityos_requested) {
             self.cityos.open = true;
@@ -744,6 +764,7 @@ impl Shell {
         if self.app.home.is_some() {
             self.home_frame(ui, &ctx);
             crate::plugins::ui::show(&mut self.app, &ctx);
+            crate::updater::ui::show(&mut self.app, &ctx);
             return;
         }
         self.app.autosave_tick(&ctx);
@@ -807,7 +828,9 @@ impl Shell {
             if board {
                 crate::board::toolbar::show(&mut self.app, ui, canvas_rect_for_toolbar(full));
                 crate::board::bar::show(&mut self.app, ui, canvas_rect);
+                crate::board::section::rename_ui(&mut self.app, ui, canvas_rect);
                 crate::board::canvas::zoom_pill(&mut self.app, ui, canvas_rect);
+                crate::board::session::show(&mut self.app, ui, canvas_rect);
             } else {
                 right::show(&mut self.app, ui, right_rect);
                 toolbar::show(&mut self.app, ui, if deck { canvas_rect } else { canvas_rect_for_toolbar(full) });
@@ -824,6 +847,7 @@ impl Shell {
         crate::dev::compare::show(&mut self.app, &ctx);
         crate::libraries::show(&mut self.app, &ctx);
         crate::plugins::ui::show(&mut self.app, &ctx);
+        crate::updater::ui::show(&mut self.app, &ctx);
         self.toast(ui, full);
 
         self.sync_title(&ctx);

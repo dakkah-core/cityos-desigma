@@ -11,3 +11,4 @@
 
 # Private design files used for local import checks: never committed
 /reference/*.fig
+/.build/

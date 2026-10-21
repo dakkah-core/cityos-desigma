@@ -64,9 +64,13 @@ pub struct Row {
 pub fn flatten(doc: &Document, page: NodeId, expanded: &HashSet<NodeId>) -> Vec<Row> {
     fn rec(doc: &Document, id: NodeId, depth: usize, expanded: &HashSet<NodeId>, out: &mut Vec<Row>) {
         let Some(n) = doc.get(id) else { return };
+        // the cells of a table are edited on the board, not listed as layers
+        if matches!(n.kind, NodeKind::Table(_)) {
+            return;
+        }
         for c in n.children.iter().rev() {
             let Some(cn) = doc.get(*c) else { continue };
-            let has = !cn.children.is_empty();
+            let has = !cn.children.is_empty() && !matches!(cn.kind, NodeKind::Table(_));
             out.push(Row { id: *c, depth, has_children: has });
             if has && expanded.contains(c) {
                 rec(doc, *c, depth + 1, expanded, out);
@@ -153,8 +157,9 @@ pub(crate) fn kind_icon(k: &NodeKind) -> Icon {
         NodeKind::ShapeWithText(_) => Icon::Shapes,
         NodeKind::Stamp { .. } => Icon::Stamp,
         NodeKind::BoardSection(_) => Icon::Section,
-        NodeKind::Table(_) => Icon::Frame,
-        NodeKind::TableCell(_) => Icon::Text,
+        NodeKind::Table(_) => Icon::Table,
+        NodeKind::TableCell(_) => Icon::Rectangle,
+        NodeKind::CodeBlock(_) => Icon::Code,
         NodeKind::Unknown { .. } => Icon::Rectangle,
     }
 }

@@ -556,7 +556,7 @@ fn section_tool_makes_a_section_that_adopts_notes_dropped_into_it() {
     s.drag(s.screen(100.0, 100.0), s.screen(800.0, 600.0));
     s.mods = Modifiers::NONE;
     let sec = s.app().selection[0];
-    assert!(matches!(s.app().doc.get(sec).unwrap().kind, NodeKind::Section));
+    assert!(matches!(s.app().doc.get(sec).unwrap().kind, NodeKind::BoardSection(_)));
     // a sticky placed inside becomes its child
     s.key(Key::S);
     let at = s.screen(300.0, 300.0);
@@ -758,4 +758,325 @@ fn moving_a_free_connector_carries_its_loose_ends() {
     assert!((r1.end().y - r0.end().y - 30.0).abs() < 0.01, "{:?} -> {:?}", r0.end(), r1.end());
     s.cmd_key(Key::Z);
     assert_eq!(connector_route(&s.app().doc, c).unwrap().end(), r0.end());
+}
+
+// ------------------------------------------------------------------ code blocks
+
+fn code_blocks(s: &Sim) -> Vec<NodeId> {
+    let mut v: Vec<NodeId> = s.app().doc.nodes.values().filter(|n| matches!(n.kind, NodeKind::CodeBlock(_))).map(|n| n.id).collect();
+    v.sort();
+    v
+}
+
+fn code_of(s: &Sim, id: NodeId) -> desigma_doc::CodeBlockProps {
+    match &s.app().doc.get(id).unwrap().kind {
+        NodeKind::CodeBlock(c) => c.clone(),
+        k => panic!("{k:?}"),
+    }
+}
+
+fn add_code(s: &mut Sim, x: f32, y: f32, lang: desigma_doc::CodeLang, code: &str) -> NodeId {
+    let id = s.shell.app.doc.alloc_id();
+    let n = Node::code_block(id, DRect::new(x, y, 400.0, 200.0), lang, code);
+    let page = s.app().page;
+    let id = s.shell.app.doc.insert(page, n).unwrap();
+    s.shell.app.changed();
+    s.frame(vec![]);
+    id
+}
+
+fn add_sticky(s: &mut Sim, x: f32, y: f32, text: &str) -> NodeId {
+    let id = s.shell.app.doc.alloc_id();
+    let n = Node::sticky(id, DRect::new(x, y, STICKY_SIZE, STICKY_SIZE), text);
+    let page = s.app().page;
+    let id = s.shell.app.doc.insert(page, n).unwrap();
+    s.shell.app.changed();
+    s.frame(vec![]);
+    id
+}
+
+#[test]
+fn code_tool_places_a_block_and_typing_goes_into_it() {
+    let mut s = board_sim();
+    let tool = s.rect_of("board-tool-Code");
+    s.click(tool.center());
+    assert_eq!(s.app().tool, Tool::Code);
+    let at = s.screen(500.0, 400.0);
+    s.click(at);
+    let blocks = code_blocks(&s);
+    assert_eq!(blocks.len(), 1);
+    let n = s.app().doc.get(blocks[0]).unwrap();
+    assert_eq!(n.size, desigma_doc::Vec2::new(desigma_doc::CODE_BLOCK_W, desigma_doc::CODE_BLOCK_H));
+    assert_eq!(s.app().tool, Tool::Move);
+    assert!(s.app().canvas.text.is_some(), "typing starts in the new block");
+    s.type_text("fn main() {}");
+    s.key(Key::Tab);
+    s.type_text("x");
+    s.key(Key::Escape);
+    let c = code_of(&s, blocks[0]);
+    assert_eq!(c.text.content, "fn main() {}    x", "Tab indents instead of starting a sticky");
+    assert!(stickies(&s).is_empty());
+    assert_eq!(c.lang, desigma_doc::CodeLang::Plain);
+    assert!(c.line_numbers);
+}
+
+#[test]
+fn code_bar_picks_language_theme_line_numbers_and_copies() {
+    let mut s = board_sim();
+    let id = add_code(&mut s, 200.0, 200.0, desigma_doc::CodeLang::Plain, "let a = 1;");
+    s.shell.app.selection = vec![id];
+    s.frame(vec![]);
+    // language picker
+    let lang = s.rect_of("board-lang-btn");
+    s.click(lang.center());
+    let rust = s.rect_of("board-bar-lang-Rust");
+    s.click(rust.center());
+    assert_eq!(code_of(&s, id).lang, desigma_doc::CodeLang::Rust);
+    assert_eq!(s.app().board.lang, desigma_doc::CodeLang::Rust, "the next block starts in the language last picked");
+    // theme
+    assert_eq!(code_of(&s, id).theme, desigma_doc::CodeTheme::Dark);
+    let theme = s.rect_of("board-code-theme");
+    s.click(theme.center());
+    assert_eq!(code_of(&s, id).theme, desigma_doc::CodeTheme::Light);
+    // line numbers
+    let lines = s.rect_of("board-code-lines");
+    s.click(lines.center());
+    assert!(!code_of(&s, id).line_numbers);
+    // copy
+    assert!(s.app().board.copied.is_none());
+    let copy = s.rect_of("board-code-copy");
+    s.click(copy.center());
+    assert_eq!(s.app().board.copied.as_deref(), Some("let a = 1;"));
+    // every change is one undo step
+    s.cmd_key(Key::Z);
+    assert!(code_of(&s, id).line_numbers);
+    s.cmd_key(Key::Z);
+    assert_eq!(code_of(&s, id).theme, desigma_doc::CodeTheme::Dark);
+    s.cmd_key(Key::Z);
+    assert_eq!(code_of(&s, id).lang, desigma_doc::CodeLang::Plain);
+}
+
+#[test]
+fn code_bar_has_text_size_but_no_alignment() {
+    let mut s = board_sim();
+    let id = add_code(&mut s, 200.0, 200.0, desigma_doc::CodeLang::Json, "{}");
+    s.shell.app.selection = vec![id];
+    s.frame(vec![]);
+    let plus = s.rect_of("board-size-plus");
+    s.click(plus.center());
+    assert!(code_of(&s, id).text.style.font_size > desigma_doc::CODE_FONT_SIZE);
+    let aligned = s.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("test-rect", "board-align-center".to_string()))));
+    assert!(aligned.is_none(), "code has no alignment buttons");
+}
+
+// ------------------------------------------------------------------ stickies and text
+
+#[test]
+fn sticky_palette_is_complete_and_wide_notes_come_from_the_menu() {
+    assert_eq!(crate::theme::BOARD_PALETTE.len(), 10);
+    assert!(crate::theme::BOARD_PALETTE.contains(&0xFFFFFF) && crate::theme::BOARD_PALETTE.contains(&0xE6E6E6));
+    let mut s = board_sim();
+    let chev = s.rect_of("board-chevron-Sticky");
+    s.click(chev.center());
+    let wide = s.rect_of("board-sticky-wide");
+    s.click(wide.center());
+    assert_eq!(s.app().tool, Tool::Sticky);
+    assert!(s.app().board.wide);
+    let at = s.screen(400.0, 300.0);
+    s.click(at);
+    s.key(Key::Escape);
+    let id = stickies(&s)[0];
+    let n = s.app().doc.get(id).unwrap();
+    assert_eq!(n.size, desigma_doc::Vec2::new(desigma_doc::STICKY_WIDE_W, desigma_doc::STICKY_WIDE_H));
+    assert!(matches!(&n.kind, NodeKind::Sticky(p) if p.wide));
+    // the bar toggles the shape back, keeping the height
+    s.shell.app.selection = vec![id];
+    s.frame(vec![]);
+    let toggle = s.rect_of("board-wide");
+    s.click(toggle.center());
+    let n = s.app().doc.get(id).unwrap();
+    assert_eq!(n.size, desigma_doc::Vec2::new(desigma_doc::STICKY_WIDE_H, desigma_doc::STICKY_WIDE_H));
+    assert!(matches!(&n.kind, NodeKind::Sticky(p) if !p.wide));
+    assert!(!s.app().board.wide, "the Sticky tool follows the toggle");
+    s.cmd_key(Key::Z);
+    assert_eq!(s.app().doc.get(id).unwrap().size.x, desigma_doc::STICKY_WIDE_W);
+    // white is in the palette now
+    let white = s.rect_of("board-swatch-9");
+    s.click(white.center());
+    assert!(matches!(&s.app().doc.get(id).unwrap().kind, NodeKind::Sticky(p) if p.color == desigma_doc::Color::WHITE));
+}
+
+#[test]
+fn text_layers_can_be_highlighted_from_the_bar() {
+    let mut s = board_sim();
+    let id = s.shell.app.doc.alloc_id();
+    let page = s.app().page;
+    let style = desigma_doc::TextStyle { font_size: 24.0, ..Default::default() };
+    s.shell.app.doc.insert(page, Node::text(id, DRect::new(300.0, 300.0, 200.0, 40.0), "Important", style)).unwrap();
+    s.shell.app.changed();
+    s.shell.app.selection = vec![id];
+    s.frame(vec![]);
+    let hl = |s: &Sim| s.app().doc.get(id).unwrap().fills.first().and_then(crate::board::create::solid_rgb);
+    assert_eq!(hl(&s), None);
+    let btn = s.rect_of("board-highlight");
+    s.click(btn.center());
+    assert_eq!(hl(&s), Some(crate::board::rgb_of(s.app().board.color)), "highlight starts in the note colour");
+    // a colour for the background
+    let sw = s.rect_of("board-hl-swatch-5");
+    s.click(sw.center());
+    assert_eq!(hl(&s), Some(crate::theme::BOARD_PALETTE[5]));
+    // the highlight is drawn behind the text by the renderer
+    assert!(desigma_render::board::lowers(&s.app().doc, s.app().doc.get(id).unwrap()));
+    let btn = s.rect_of("board-highlight");
+    s.click(btn.center());
+    assert_eq!(hl(&s), None);
+    s.cmd_key(Key::Z);
+    assert_eq!(hl(&s), Some(crate::theme::BOARD_PALETTE[5]));
+}
+
+#[test]
+fn the_stamp_picker_offers_the_full_set() {
+    let mut s = board_sim();
+    let chev = s.rect_of("board-chevron-Stamp");
+    s.click(chev.center());
+    for k in desigma_doc::STAMP_KINDS {
+        let cell = s.rect_of(&format!("board-stamp-{k}"));
+        assert!(cell.width() > 20.0, "{k}");
+    }
+    let cell = s.rect_of("board-stamp-fire");
+    s.click(cell.center());
+    let at = s.screen(500.0, 400.0);
+    s.click(at);
+    let id = s.app().selection[0];
+    assert_eq!(s.app().doc.get(id).unwrap().kind, NodeKind::Stamp { kind: "fire".into() });
+}
+
+// ------------------------------------------------------------------ timer and voting
+
+fn session(s: &Sim) -> desigma_doc::BoardSession {
+    s.app().doc.board_session.clone()
+}
+
+#[test]
+fn timer_starts_counts_adds_minutes_resets_and_undoes() {
+    let mut s = board_sim();
+    assert!(session(&s).timer.is_none());
+    let start = s.rect_of("board-timer-start");
+    s.click(start.center());
+    let t = session(&s).timer.unwrap();
+    assert!(!t.running());
+    assert_eq!(t.total_secs, 300.0);
+    assert_eq!(t.clock(0.0), "5:00");
+    // play
+    let play = s.rect_of("board-timer-play");
+    s.click(play.center());
+    assert!(session(&s).timer.unwrap().running());
+    // one more minute
+    let add = s.rect_of("board-timer-add");
+    s.click(add.center());
+    let left = session(&s).timer.unwrap().remaining(crate::board::session::now());
+    assert!(left > 355.0 && left <= 360.0, "{left}");
+    // pause holds the time
+    let play = s.rect_of("board-timer-play");
+    s.click(play.center());
+    let t = session(&s).timer.unwrap();
+    assert!(!t.running());
+    assert!(t.left_secs > 355.0 && t.left_secs <= 360.0);
+    // reset goes back to the set length
+    let reset = s.rect_of("board-timer-reset");
+    s.click(reset.center());
+    let t = session(&s).timer.unwrap();
+    assert_eq!(t.left_secs, t.total_secs);
+    // close removes it, and undo brings it back
+    let close = s.rect_of("board-timer-close");
+    s.click(close.center());
+    assert!(session(&s).timer.is_none());
+    s.cmd_key(Key::Z);
+    assert!(session(&s).timer.is_some());
+    // it is saved with the file
+    let back = desigma_doc::Document::from_json(&s.app().doc.to_json().unwrap()).unwrap();
+    assert_eq!(back.board_session, session(&s));
+}
+
+#[test]
+fn a_running_timer_that_ran_out_shows_zero() {
+    let mut s = board_sim();
+    let now = crate::board::session::now();
+    s.shell.app.doc.board_session.timer = Some(desigma_doc::TimerState { total_secs: 60.0, left_secs: 60.0, started_at: Some(now - 90.0) });
+    s.frame(vec![]);
+    let t = session(&s).timer.unwrap();
+    assert!(t.finished(now));
+    assert_eq!(t.clock(now), "0:00");
+    let _ = s.rect_of("board-timer-clock");
+}
+
+#[test]
+fn voting_session_counts_votes_and_lists_results() {
+    let mut s = board_sim();
+    let a = add_sticky(&mut s, 100.0, 200.0, "Alpha");
+    let b = add_sticky(&mut s, 400.0, 200.0, "Beta");
+    let c = add_sticky(&mut s, 700.0, 200.0, "Gamma");
+    // set up: 3 -> 4 votes each, then start
+    let start = s.rect_of("board-vote-start");
+    s.click(start.center());
+    let plus = s.rect_of("board-vote-plus");
+    s.click(plus.center());
+    assert_eq!(s.app().board.votes_each, desigma_doc::VOTES_DEFAULT + 1);
+    let go = s.rect_of("board-vote-go");
+    s.click(go.center());
+    let v = session(&s).vote.unwrap();
+    assert_eq!((v.votes_per_person, v.ended, v.used()), (4, false, 0));
+    assert!(session(&s).voting());
+    // clicking items votes instead of selecting
+    let (pa, pb, pc) = (node_center(&s, a), node_center(&s, b), node_center(&s, c));
+    s.click(pa);
+    s.click(pa);
+    s.click(pb);
+    assert!(s.app().selection.is_empty(), "votes do not select");
+    let v = session(&s).vote.unwrap();
+    assert_eq!((v.count(a), v.count(b), v.left()), (2, 1, 1));
+    // Alt takes a vote back
+    s.mods = Modifiers::ALT;
+    s.click(pa);
+    s.mods = Modifiers::NONE;
+    assert_eq!(session(&s).vote.unwrap().count(a), 1);
+    // spend the rest; a further vote is refused
+    s.click(pc);
+    s.click(pc);
+    s.click(pc);
+    let v = session(&s).vote.unwrap();
+    assert_eq!((v.count(c), v.left()), (2, 0), "the third click found no votes left");
+    s.click(pb);
+    assert_eq!(session(&s).vote.unwrap().count(b), 1, "no votes left");
+    // each vote is one undo step
+    s.cmd_key(Key::Z);
+    assert_eq!(session(&s).vote.unwrap().count(c), 1);
+    s.mods = Modifiers::COMMAND | Modifiers::SHIFT;
+    s.key(Key::Z);
+    s.mods = Modifiers::NONE;
+    assert_eq!(session(&s).vote.unwrap().count(c), 2);
+    // end: the results are sorted by votes
+    let end = s.rect_of("board-vote-end");
+    s.click(end.center());
+    let v = session(&s).vote.unwrap();
+    assert!(v.ended && !session(&s).voting());
+    assert_eq!(v.results(&s.app().doc), vec![(c, 2), (a, 1), (b, 1)]);
+    let _ = s.rect_of("board-vote-panel");
+    for i in 0..3 {
+        let _ = s.rect_of(&format!("board-vote-row-{i}"));
+    }
+    // a result row selects its item
+    let row = s.rect_of("board-vote-row-0");
+    s.click(row.center());
+    assert_eq!(s.app().selection, vec![c]);
+    // voting is closed: clicks select again and add nothing
+    s.click(pb);
+    assert_eq!(s.app().selection, vec![b]);
+    assert_eq!(session(&s).vote.unwrap().count(b), 1);
+    // clear removes the dots and the session; undo brings the results back
+    let clear = s.rect_of("board-vote-clear");
+    s.click(clear.center());
+    assert!(session(&s).vote.is_none());
+    s.cmd_key(Key::Z);
+    assert!(session(&s).vote.is_some());
 }

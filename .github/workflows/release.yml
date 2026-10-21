@@ -47,21 +47,29 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      # Tag builds compile the version in (About, --version, update checks); dry runs
+      # stay unstamped, so they never look for updates.
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "DESIGMA_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
       # On Windows, crates/desigma-app/build.rs embeds the icon and version info
       # (rc.exe ships with the runner's Windows SDK); it fails the build under CI
       # if that step breaks, so an icon-less exe is never released.
       - name: Build desigma and desigma-diff
         run: cargo build --release --locked --target ${{ matrix.target }} -p desigma-app -p desigma-diff
 
-      - name: Resolve version
-        id: version
+      - name: Check the stamped version
+        if: github.ref_type == 'tag'
         shell: bash
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          fi
+        run: test "$(target/${{ matrix.target }}/release/desigma --version)" = "desigma ${DESIGMA_VERSION}"
 
       - name: Package
         shell: bash
@@ -94,20 +102,25 @@ jobs:
         with:
           key: release-macos-universal
 
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "DESIGMA_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build both architectures
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --release --locked --target "$t" -p desigma-app -p desigma-diff
           done
 
-      - name: Resolve version
-        id: version
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Check the stamped version
+        if: github.ref_type == 'tag'
+        run: test "$(target/aarch64-apple-darwin/release/desigma --version)" = "desigma ${DESIGMA_VERSION}"
 
       - name: Package desigma.app (.dmg and .tar.gz)
         run: scripts/package-macos.sh "${{ steps.version.outputs.version }}"

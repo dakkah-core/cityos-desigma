@@ -340,9 +340,11 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
         NodeKind::Table(_) => "TABLE",
         NodeKind::TableCell(_) => "TABLE_CELL",
         NodeKind::Unknown { type_name } => type_name.as_str(),
-        NodeKind::Sticky(_) | NodeKind::Connector(_) | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. } => {
-            crate::board::type_name(&node.kind).unwrap_or("SECTION")
-        }
+        NodeKind::Sticky(_)
+        | NodeKind::Connector(_)
+        | NodeKind::ShapeWithText(_)
+        | NodeKind::Stamp { .. }
+        | NodeKind::CodeBlock(_) => crate::board::type_name(&node.kind).unwrap_or("SECTION"),
     };
     m.insert("type".into(), ty.into());
     crate::variables::export_node_variables(node, &mut m);
@@ -509,7 +511,14 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
                 m.insert("vectorNetwork".into(), crate::vecnet::network_to_json(net));
             }
         }
-        NodeKind::Sticky(_) | NodeKind::Connector(_) | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. } => {
+        NodeKind::Sticky(_)
+        | NodeKind::Connector(_)
+        | NodeKind::ShapeWithText(_)
+        | NodeKind::Stamp { .. }
+        | NodeKind::BoardSection(_)
+        | NodeKind::Table(_)
+        | NodeKind::TableCell(_)
+        | NodeKind::CodeBlock(_) => {
             crate::board::export_fields(node, parent_abs.map(|p| p.translation()).unwrap_or(Vec2::ZERO), &mut m, &|t| figma_id(doc, t));
         }
         NodeKind::BooleanOp(op) => {
@@ -558,7 +567,12 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
         let mut kids = Vec::new();
         for c in &node.children {
             let pa = if matches!(node.kind, NodeKind::Page { .. }) { None } else { Some(&abs) };
-            if let Some(k) = export_node(doc, *c, pa, depth + 1) {
+            if let Some(mut k) = export_node(doc, *c, pa, depth + 1) {
+                if let (NodeKind::Table(t), Some(o)) = (&node.kind, k.as_object_mut()) {
+                    let (r, col) = t.cell_pos(kids.len());
+                    o.insert("rowIndex".into(), r.into());
+                    o.insert("columnIndex".into(), col.into());
+                }
                 kids.push(k);
             }
         }

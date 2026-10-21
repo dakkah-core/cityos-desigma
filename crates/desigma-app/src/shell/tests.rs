@@ -931,11 +931,13 @@ fn layout_guide_section_edits_the_grids_of_a_frame() {
 }
 
 mod board;
+mod board_blocks;
 mod board_home;
 mod comments;
 mod components;
 mod decks;
 mod dev;
+mod drawing;
 mod find;
 mod history;
 mod home;
@@ -951,3 +953,4 @@ mod assets_thumbs;
 mod libraries;
 mod lint;
 mod plugins;
+mod updater;

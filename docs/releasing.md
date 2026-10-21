@@ -5,7 +5,7 @@ Releases are tag-driven. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.
 ## Checklist
 
 1. Make sure `main` is green (tests on Linux, Windows and macOS, Clippy).
-2. Bump `version` under `[workspace.package]` in the root `Cargo.toml`, run `cargo build --workspace` so `Cargo.lock` updates, and commit both (`release: 0.2.0`).
+2. Optionally bump `version` under `[workspace.package]` in the root `Cargo.toml`, run `cargo build --workspace` so `Cargo.lock` updates, and commit both (`release: 0.2.0`). The app's own version comes from the tag either way: the workflow compiles it in as `DESIGMA_VERSION` (About, `desigma --version`, update checks) and fails if `--version` disagrees.
 3. Tag and push:
 
    ```sh
@@ -43,6 +43,17 @@ This rewrites `assets/icon/png/`, `desigma.ico`, `desigma.iconset/` and `desigma
 ## Dry run
 
 Run the workflow from the Actions tab (Release, Run workflow) on any branch. It builds and packages everything and uploads the archives as workflow artifacts, but creates no release. Run it after any change to `scripts/package-macos.sh` or the macOS plist, then open the downloaded `.dmg` on a Mac to check the icon, the drag-to-Applications layout and the Open Anyway flow. The version is stamped `0.0.0-dev.<sha>`.
+
+## Update notifications
+
+Release builds compare their stamped version with GitHub's release list (`/repos/deepfounder-ai/desigma/releases`; pre-releases are offered only to pre-release builds) and show a banner when a newer one is out. To preview the banner and dialog offline, stamp a build and point `DESIGMA_UPDATE_URL` at a file (or an `http://127.0.0.1` URL) in GitHub's release-list shape with a newer tag:
+
+```sh
+DESIGMA_VERSION=0.1.0-alpha.7 cargo build -p desigma-app
+DESIGMA_UPDATE_URL=releases.json target/debug/desigma --fixture showcase --panel updater --screenshot update.png
+```
+
+`--panel updater-banner` shows the banner instead of the dialog.
 
 ## Not covered yet
 

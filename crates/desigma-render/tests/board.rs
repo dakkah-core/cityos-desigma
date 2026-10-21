@@ -217,7 +217,7 @@ fn stamps_draw_badges_with_white_glyphs() {
     for (i, k) in STAMP_KINDS.iter().enumerate() {
         t.add(None, |id| Node::stamp(id, Vec2::new(10.0 + i as f32 * 90.0, 10.0), k, 80.0));
     }
-    let pm = t.render(470, 100);
+    let pm = t.render(10 + STAMP_KINDS.len() as u32 * 90, 100);
     for (i, k) in STAMP_KINDS.iter().enumerate() {
         let x0 = 10 + i as u32 * 90;
         let layers = stamp_layers(k);
@@ -250,4 +250,122 @@ fn board_items_respect_opacity_and_visibility() {
     t.node(a).visible = false;
     let pm = t.render(160, 160);
     assert_eq!(px(&pm, 70, 90), WHITE);
+}
+
+fn count_near(pm: &Pixmap, r: (u32, u32, u32, u32), c: Color, tol: i32) -> usize {
+    let want = [(c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8, 255];
+    let mut n = 0;
+    for y in r.1..r.3 {
+        for x in r.0..r.2 {
+            if near(px(pm, x, y), want, tol) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+fn code_block(t: &mut T, r: Rect, lang: CodeLang, code: &str) -> NodeId {
+    t.add(None, |id| Node::code_block(id, r, lang, code))
+}
+
+#[test]
+fn code_block_draws_a_themed_panel_with_highlighted_tokens() {
+    let mut t = T::new();
+    let a = code_block(&mut t, Rect::new(20.0, 20.0, 360.0, 120.0), CodeLang::Rust, "fn main() {\n    let x = 42;\n}");
+    let pm = t.render(400, 160);
+    let dark_bg = CodeTheme::Dark.background();
+    let want = [(dark_bg.r * 255.0).round() as u8, (dark_bg.g * 255.0).round() as u8, (dark_bg.b * 255.0).round() as u8, 255];
+    assert!(near(px(&pm, 350, 120), want, 2), "dark panel fill {:?}", px(&pm, 350, 120));
+    // rounded: the very corner shows the page
+    assert!(px(&pm, 20, 20)[0] > 245, "corner shows the page: {:?}", px(&pm, 20, 20));
+    // keywords and numbers have their own colours
+    let body = (20, 20, 380, 140);
+    assert!(count_near(&pm, body, CodeTheme::Dark.token(TokenKind::Keyword), 40) > 8, "keyword pixels");
+    assert!(count_near(&pm, body, CodeTheme::Dark.token(TokenKind::Number), 40) > 4, "number pixels");
+    // the light theme swaps the panel colour
+    if let NodeKind::CodeBlock(c) = &mut t.node(a).kind {
+        c.theme = CodeTheme::Light;
+    }
+    let pm = t.render(400, 160);
+    let light = CodeTheme::Light.background();
+    assert!(near(px(&pm, 350, 120), [(light.r * 255.0).round() as u8, (light.g * 255.0).round() as u8, (light.b * 255.0).round() as u8, 255], 2));
+    assert!(count_near(&pm, body, CodeTheme::Light.token(TokenKind::Keyword), 40) > 8);
+}
+
+#[test]
+fn code_block_line_numbers_can_be_switched_off() {
+    let mut t = T::new();
+    let a = code_block(&mut t, Rect::new(0.0, 0.0, 300.0, 100.0), CodeLang::Plain, "one\ntwo\nthree");
+    let with = t.render(300, 100);
+    if let NodeKind::CodeBlock(c) = &mut t.node(a).kind {
+        c.line_numbers = false;
+    }
+    let without = t.render(300, 100);
+    // the gutter column holds dim digits only while line numbers are on; the code itself is brighter
+    let count = |pm: &Pixmap, lo: u8, hi: u8| {
+        let mut n = 0;
+        for y in 12..80 {
+            for x in 10..40 {
+                if (lo..=hi).contains(&px(pm, x, y)[0]) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    assert!(count(&with, 0x50, 0xB0) > 10, "dim line numbers drawn: {}", count(&with, 0x50, 0xB0));
+    assert_eq!(count(&with, 0xC0, 0xFF), 0, "no code in the gutter column");
+    assert!(count(&without, 0xC0, 0xFF) > 10, "code moves left when the gutter is off");
+}
+
+#[test]
+fn code_block_text_frame_matches_its_layout() {
+    let mut t = T::new();
+    let a = code_block(&mut t, Rect::new(0.0, 0.0, 300.0, 100.0), CodeLang::Python, "def f(x):\n    return x");
+    let n = t.doc.get(a).unwrap();
+    let f = desigma_render::board::text_frame(&t.doc, n).unwrap();
+    let NodeKind::CodeBlock(c) = &n.kind else { panic!() };
+    assert_eq!(f.rect, c.layout(n.size).text_box);
+    assert_eq!(f.props.style.font_family, CODE_FONT);
+    assert!(!f.props.runs.is_empty());
+}
+
+#[test]
+fn highlighted_text_draws_its_background() {
+    let mut t = T::new();
+    t.doc.kind = DocumentKind::Board;
+    let id = t.add(None, |id| {
+        let mut n = Node::new(id, NodeKind::Text(board_text(20.0, TextAlignH::Left, TextAlignV::Top)));
+        n.transform = Affine::translate(10.0, 10.0);
+        n.size = Vec2::new(120.0, 40.0);
+        n
+    });
+    if let NodeKind::Text(tp) = &mut t.node(id).kind {
+        tp.content = "Hi".into();
+    }
+    let plain = t.render(150, 60);
+    assert_eq!(px(&plain, 100, 40), WHITE, "no background without a fill");
+    t.node(id).fills = vec![Paint::solid(Color::rgb(0xFF, 0xE5, 0x8F))];
+    let hl = t.render(150, 60);
+    assert!(near(px(&hl, 100, 40), [0xFF, 0xE5, 0x8F, 255], 2), "highlight behind the text: {:?}", px(&hl, 100, 40));
+    assert_eq!(px(&hl, 145, 55), WHITE, "outside the text box");
+    assert!(ink(&hl, (10, 10, 40, 50)) > 10, "the text is still drawn over it");
+}
+
+#[test]
+fn voted_items_get_a_dot_with_the_count() {
+    let mut t = T::new();
+    let a = sticky(&mut t, Rect::new(10.0, 10.0, 240.0, 240.0), "", Color::WHITE);
+    let before = t.render(270, 270);
+    let mut v = VoteSession::new(5);
+    v.add(a);
+    v.add(a);
+    t.doc.board_session.vote = Some(v);
+    let after = t.render(270, 270);
+    // the dot sits in the top right corner of the note
+    let dot = (10 + 240 - 40, 10, 10 + 240, 10 + 40);
+    assert_eq!(count_near(&before, dot, desigma_render::board::VOTE_COLOR, 6), 0);
+    assert!(count_near(&after, dot, desigma_render::board::VOTE_COLOR, 6) > 100, "dot drawn");
+    assert!(ink(&after, dot) == 0 || count_near(&after, dot, Color::WHITE, 6) > 4, "count is white on the dot");
 }

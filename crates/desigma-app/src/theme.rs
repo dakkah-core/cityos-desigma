@@ -656,11 +656,13 @@ pub const VAR_FIELD_H: f32 = 24.0;
 pub const VAR_POPOVER_W: f32 = 264.0;
 
 // ---------------------------------------------------------------- board (whiteboard) mode
-/// Sticky note and section palette: eight pastel colours (`0xRRGGBB`), the first is the default.
-pub const BOARD_PALETTE: [u32; 8] = [0xFFE58F, 0xFFC48A, 0xFFB3B3, 0xF2B8E6, 0xD5C3FF, 0xB6D4FF, 0xA8E6DD, 0xC4EBA6];
+/// Sticky note and section palette (`0xRRGGBB`), the first is the default: FigJam's eight pastels, then light gray and white.
+pub const BOARD_PALETTE: [u32; 10] = [0xFFE58F, 0xFFC48A, 0xFFB3B3, 0xF2B8E6, 0xD5C3FF, 0xB6D4FF, 0xA8E6DD, 0xC4EBA6, 0xE6E6E6, 0xFFFFFF];
 /// Ink colours for connectors, markers and text on a board (dark first).
 pub const BOARD_INK: [u32; 8] = [0x1E1E1E, 0x757575, 0xF24822, 0xFFA629, 0x14AE5C, 0x0C8CE9, 0x9747FF, 0xEE46BC];
 /// Canvas colour of a board and the dots drawn on it.
+/// FigJam's drawing palette: black, grey, red, orange, yellow, green, blue, violet, pink.
+pub const BOARD_DRAW_INK: [u32; 9] = [0x1E1E1E, 0x757575, 0xF24822, 0xFFA629, 0xFFD43B, 0x14AE5C, 0x0C8CE9, 0x9747FF, 0xEE46BC];
 pub const BOARD_BG: u32 = 0xF4F4F4;
 pub const BOARD_DOT: Color32 = rgba(0x000000, 0x2E);
 /// Distance between canvas dots in page units; the grid doubles while it would be denser than the minimum on screen.
@@ -678,6 +680,10 @@ pub const BOARD_STICKY_GAP: f32 = 24.0;
 pub const BOARD_MARKER_WIDTH: f32 = 6.0;
 pub const BOARD_HIGHLIGHTER_WIDTH: f32 = 24.0;
 pub const BOARD_HIGHLIGHTER_ALPHA: f32 = 0.4;
+pub const BOARD_WASHI_WIDTH: f32 = 24.0;
+pub const BOARD_WASHI_ALPHA: f32 = 0.92;
+/// Radius of the eraser disc in screen pixels.
+pub const BOARD_ERASER_RADIUS: f32 = 10.0;
 /// Floating contextual toolbar: height, padding, gap to the selection, swatch size.
 pub const BOARD_BAR_H: f32 = 40.0;
 pub const BOARD_BAR_PAD: f32 = 6.0;

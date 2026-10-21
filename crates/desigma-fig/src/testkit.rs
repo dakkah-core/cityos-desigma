@@ -321,6 +321,7 @@ pub fn figma_like_schema() -> Schema {
     f(&mut b, "styleDescription", nat(String), false);
     f(&mut b, "key", nat(String), false);
     f(&mut b, "guidPath", gpt, false);
+    f(&mut b, "overriddenSymbolID", gt, false);
     // Overrides are NodeChange-shaped messages.
     b.field(sd, "symbolOverrides", FieldType::Def(nc), true, 2);
     f(&mut b, "derivedSymbolData", FieldType::Def(nc), true);
@@ -833,5 +834,68 @@ pub fn upgrade_fig(how: Compression) -> Vec<u8> {
     let schema = figma_like_schema();
     let root = schema.find("Message").unwrap();
     let body = schema.encode_message(root, &upgrade_message()).unwrap();
+    container::write_container(&schema.encode(), &body, how, 101)
+}
+
+// ---- nested instance swap fixture (see `tests/nested_swap.rs`)
+
+/// A `ListRow` component whose nested icon instance is swapped on one of its
+/// instances through a `symbolOverrides` entry carrying `overriddenSymbolID`,
+/// followed by a deeper override addressing a child of the *new* icon.
+pub fn nested_swap_message() -> V {
+    let doc = node((0, 0), (0, 0), "!", "DOCUMENT", "Document", vec![]);
+    let page = node((0, 1), (0, 0), "a", "CANVAS", "Page 1", vec![]);
+    let size = |w: f32, h: f32| ("size", vec2(w, h));
+
+    let gear_icon = node((2, 10), (0, 1), "a", "SYMBOL", "Icon / settings", vec![size(16.0, 16.0)]);
+    let gear = node((2, 11), (2, 10), "a", "RECTANGLE", "Gear", vec![size(16.0, 16.0), ("fillPaints", V::Array(vec![solid(0.0, 0.0, 0.0)]))]);
+    let users_icon = node((2, 20), (0, 1), "b", "SYMBOL", "Icon / users", vec![size(16.0, 16.0)]);
+    let people = node((2, 21), (2, 20), "a", "RECTANGLE", "People", vec![size(8.0, 16.0), ("fillPaints", V::Array(vec![solid(0.0, 0.0, 0.0)]))]);
+    let people2 = node((2, 22), (2, 20), "b", "RECTANGLE", "People2", vec![size(8.0, 16.0), ("transform", matrix(8.0, 0.0))]);
+
+    let row = node((2, 30), (0, 1), "c", "SYMBOL", "ListRow", vec![size(100.0, 24.0)]);
+    let slot = node((2, 31), (2, 30), "a", "INSTANCE", "Icon", vec![size(16.0, 16.0), ("symbolData", msg(vec![("symbolID", guid(2, 10))]))]);
+
+    let row_a = node(
+        (2, 40),
+        (0, 1),
+        "d",
+        "INSTANCE",
+        "Row A",
+        vec![
+            size(100.0, 24.0),
+            ("transform", matrix(0.0, 100.0)),
+            (
+                "symbolData",
+                msg(vec![
+                    ("symbolID", guid(2, 30)),
+                    (
+                        "symbolOverrides",
+                        V::Array(vec![
+                            ov(&[(2, 31)], vec![("overriddenSymbolID", guid(2, 20))]),
+                            ov(&[(2, 31), (2, 21)], vec![("fillPaints", V::Array(vec![solid(1.0, 0.0, 0.0)]))]),
+                        ]),
+                    ),
+                ]),
+            ),
+        ],
+    );
+    let row_b = node(
+        (2, 41),
+        (0, 1),
+        "e",
+        "INSTANCE",
+        "Row B",
+        vec![size(100.0, 24.0), ("transform", matrix(0.0, 200.0)), ("symbolData", msg(vec![("symbolID", guid(2, 30))]))],
+    );
+
+    msg(vec![("nodeChanges", V::Array(vec![row_a, row_b, slot, row, people2, people, users_icon, gear, gear_icon, page, doc])), ("blobs", V::Array(vec![]))])
+}
+
+/// `.fig` bytes for [`nested_swap_message`].
+pub fn nested_swap_fig(how: Compression) -> Vec<u8> {
+    let schema = figma_like_schema();
+    let root = schema.find("Message").unwrap();
+    let body = schema.encode_message(root, &nested_swap_message()).unwrap();
     container::write_container(&schema.encode(), &body, how, 101)
 }

@@ -6,6 +6,8 @@
 
 mod board;
 mod board_blocks;
+mod brush;
+mod code;
 mod comments;
 mod cityos;
 mod components;
@@ -30,6 +32,8 @@ mod vector_fit;
 
 pub use board::*;
 pub use board_blocks::*;
+pub use brush::*;
+pub use code::*;
 pub use comments::*;
 pub use cityos::*;
 pub use components::*;

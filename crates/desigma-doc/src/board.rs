@@ -29,19 +29,27 @@ pub const STICKY_FONT_MAX: f32 = 32.0;
 /// Smallest text size before a sticky note's text is clipped.
 pub const STICKY_FONT_MIN: f32 = 8.0;
 
+/// Width and height of a new wide sticky note.
+pub const STICKY_WIDE_W: f32 = 360.0;
+pub const STICKY_WIDE_H: f32 = 240.0;
+
 /// A sticky note. The note is drawn as a rounded square in `color` with a soft shadow.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StickyProps {
     pub color: Color,
     pub author: Option<String>,
     /// Text content. `text.style.font_size` is the largest size; renderers shrink it to fit.
     pub text: TextProps,
     pub show_author: bool,
+    /// The wide variant (a landscape note); the node's size is what is drawn, this records the
+    /// variant so the editor can toggle between the two.
+    pub wide: bool,
 }
 
 impl Default for StickyProps {
     fn default() -> Self {
-        Self { color: STICKY_YELLOW, author: None, text: board_text(STICKY_FONT_MAX, TextAlignH::Left, TextAlignV::Top), show_author: false }
+        Self { color: STICKY_YELLOW, author: None, text: board_text(STICKY_FONT_MAX, TextAlignH::Left, TextAlignV::Top), show_author: false, wide: false }
     }
 }
 
@@ -330,7 +338,7 @@ pub fn fit_font_size(max: f32, min: f32, mut fits: impl FnMut(f32) -> bool) -> f
 // ------------------------------------------------------------------- stamps
 
 /// The built-in stamp designs.
-pub const STAMP_KINDS: [&str; 5] = ["thumbs_up", "heart", "star", "question", "plus_one"];
+pub const STAMP_KINDS: [&str; 12] = ["thumbs_up", "heart", "star", "question", "plus_one", "smile", "check", "cross", "fire", "eyes", "bulb", "exclaim"];
 
 pub fn stamp_label(kind: &str) -> &'static str {
     match kind {
@@ -339,6 +347,13 @@ pub fn stamp_label(kind: &str) -> &'static str {
         "star" => "Star",
         "question" => "Question",
         "plus_one" => "Plus one",
+        "smile" => "Smile",
+        "check" => "Check",
+        "cross" => "Cross",
+        "fire" => "Fire",
+        "eyes" => "Eyes",
+        "bulb" => "Idea",
+        "exclaim" => "Exclamation",
         _ => "Stamp",
     }
 }
@@ -427,6 +442,47 @@ pub fn stamp_layers(kind: &str) -> Vec<StampLayer> {
             let one = line_path(&[v(0.58, 0.42), v(0.67, 0.34), v(0.67, 0.66)]);
             vec![badge(0x1F_B3_6B), fill(plus), StampLayer { paths: vec![one], fill: None, stroke: Some((white, 0.07)) }]
         }
+        "smile" => {
+            let eyes = fill(vec![ellipse_path(0.36, 0.4, 0.06, 0.08), ellipse_path(0.64, 0.4, 0.06, 0.08)]);
+            let mouth = Path { cmds: vec![PathCmd::MoveTo(v(0.3, 0.57)), PathCmd::QuadTo(v(0.5, 0.86), v(0.7, 0.57))], fill_rule: FillRule::NonZero };
+            vec![badge(0xFF_B4_00), eyes, StampLayer { paths: vec![mouth], fill: None, stroke: Some((white, 0.06)) }]
+        }
+        "check" => {
+            let tick = line_path(&[v(0.29, 0.52), v(0.44, 0.67), v(0.72, 0.35)]);
+            vec![badge(0x1F_B3_6B), StampLayer { paths: vec![tick], fill: None, stroke: Some((white, 0.09)) }]
+        }
+        "cross" => {
+            let (a, b) = (line_path(&[v(0.32, 0.32), v(0.68, 0.68)]), line_path(&[v(0.68, 0.32), v(0.32, 0.68)]));
+            vec![badge(0xE5_48_4D), StampLayer { paths: vec![a, b], fill: None, stroke: Some((white, 0.09)) }]
+        }
+        "fire" => {
+            let flame = Path {
+                cmds: vec![
+                    PathCmd::MoveTo(v(0.5, 0.2)),
+                    PathCmd::CubicTo(v(0.52, 0.36), v(0.72, 0.42), v(0.72, 0.6)),
+                    PathCmd::CubicTo(v(0.72, 0.74), v(0.62, 0.8), v(0.5, 0.8)),
+                    PathCmd::CubicTo(v(0.38, 0.8), v(0.28, 0.74), v(0.28, 0.6)),
+                    PathCmd::CubicTo(v(0.28, 0.5), v(0.33, 0.45), v(0.38, 0.4)),
+                    PathCmd::CubicTo(v(0.4, 0.46), v(0.43, 0.48), v(0.46, 0.48)),
+                    PathCmd::CubicTo(v(0.44, 0.38), v(0.46, 0.28), v(0.5, 0.2)),
+                    PathCmd::Close,
+                ],
+                fill_rule: FillRule::NonZero,
+            };
+            vec![badge(0xFF_7A_00), fill(vec![flame])]
+        }
+        "eyes" => {
+            let dark = Color::rgb(0x1E, 0x1E, 0x1E);
+            let whites = fill(vec![ellipse_path(0.36, 0.5, 0.115, 0.17), ellipse_path(0.64, 0.5, 0.115, 0.17)]);
+            let pupils =
+                StampLayer { paths: vec![ellipse_path(0.39, 0.52, 0.05, 0.075), ellipse_path(0.61, 0.52, 0.05, 0.075)], fill: Some(dark), stroke: None };
+            vec![badge(0x75_75_75), whites, pupils]
+        }
+        "bulb" => {
+            let base = vec![rect_path(0.42, 0.62, 0.16, 0.07), rect_path(0.45, 0.72, 0.1, 0.05)];
+            vec![badge(0xFF_C9_33), fill(vec![ellipse_path(0.5, 0.42, 0.17, 0.19)]), fill(base)]
+        }
+        "exclaim" => vec![badge(0xFF_A6_29), fill(vec![rect_path(0.465, 0.24, 0.07, 0.34), ellipse_path(0.5, 0.7, 0.045, 0.045)])],
         // thumbs up
         "thumbs_up" => {
             let cuff = rect_path(0.24, 0.45, 0.12, 0.27);
@@ -1111,6 +1167,16 @@ impl Node {
         n
     }
 
+    /// A code block at `r` with `code` in `lang`.
+    pub fn code_block(id: NodeId, r: Rect, lang: CodeLang, code: impl Into<String>) -> Self {
+        let mut props = CodeBlockProps { lang, ..Default::default() };
+        props.text.content = code.into();
+        let mut n = Self::new(id, NodeKind::CodeBlock(props));
+        n.transform = Affine::translate(r.x, r.y);
+        n.size = Vec2::new(r.w, r.h);
+        n
+    }
+
     pub fn stamp(id: NodeId, at: Vec2, kind: &str, size: f32) -> Self {
         let mut n = Self::new(id, NodeKind::Stamp { kind: kind.to_string() });
         n.transform = Affine::translate(at.x, at.y);
@@ -1321,6 +1387,46 @@ mod tests {
         let b = d.alloc_id();
         let b = d.insert(page, Node::sticky(b, Rect::new(300.0, 200.0, 100.0, 100.0), "b")).unwrap();
         (d, page, a, b)
+    }
+
+    #[test]
+    fn sticky_wide_flag_defaults_for_old_files() {
+        let d = StickyProps::default();
+        assert!(!d.wide);
+        let mut v = serde_json::to_value(&d).unwrap();
+        v.as_object_mut().unwrap().remove("wide");
+        let back: StickyProps = serde_json::from_value(v).unwrap();
+        assert!(!back.wide);
+        let wide = StickyProps { wide: true, ..Default::default() };
+        let back: StickyProps = serde_json::from_str(&serde_json::to_string(&wide).unwrap()).unwrap();
+        assert!(back.wide);
+        const { assert!(STICKY_WIDE_W > STICKY_WIDE_H) };
+    }
+
+    #[test]
+    fn every_stamp_has_a_badge_artwork_and_a_name() {
+        let mut seen = std::collections::HashSet::new();
+        for k in STAMP_KINDS {
+            assert!(seen.insert(k), "{k} listed twice");
+            assert_ne!(stamp_label(k), "Stamp", "{k} has no label");
+            let layers = stamp_layers(k);
+            assert!(layers.len() >= 2, "{k} has a badge and a glyph");
+            assert!(layers[0].fill.is_some());
+            assert!(layers.iter().skip(1).all(|l| l.paths.iter().all(|p| !p.cmds.is_empty())));
+        }
+        assert!(STAMP_KINDS.len() >= 12);
+    }
+
+    #[test]
+    fn code_blocks_have_text_and_a_node_constructor() {
+        let n = Node::code_block(NodeId(1), rect(10.0, 20.0, 300.0, 100.0), CodeLang::Rust, "fn main() {}");
+        assert!(n.kind.is_board_item());
+        assert_eq!(n.kind.board_text().map(|t| t.content.as_str()), Some("fn main() {}"));
+        assert_eq!(n.kind.default_name(), "Code block");
+        assert_eq!((n.transform.tx, n.size.x), (10.0, 300.0));
+        let json = serde_json::to_string(&n).unwrap();
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, n.kind);
     }
 
     #[test]

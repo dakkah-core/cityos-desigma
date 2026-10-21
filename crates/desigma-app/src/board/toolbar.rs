@@ -1,5 +1,6 @@
-//! The bottom toolbar of a board: Move, Hand, Marker / Highlighter, Sticky, Shape, Connector, Text,
-//! Section and Stamp, with popovers for the brush, the shape and the stamp.
+//! The bottom toolbar of a board: Move, Hand, the drawing tray (Marker / Highlighter / Washi tape /
+//! Eraser), Sticky, Shape, Connector, Text, Section and Stamp, and a "more" button for the rest (Table), with
+//! popovers for the brush, the shape, the stamp and the extra tools.
 
 use super::{color32, color_of, rgb_of, ToolMenu};
 use crate::app::App;
@@ -8,7 +9,7 @@ use crate::icons::{self, Icon};
 use crate::panels::toolbar::tool_icon;
 use crate::theme;
 use crate::widgets;
-use desigma_doc::{ShapeKind, STAMP_KINDS};
+use desigma_doc::{ShapeKind, WashiPattern, BRUSH_SIZES, STAMP_KINDS};
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 struct Slot {
@@ -17,18 +18,22 @@ struct Slot {
     menu: Option<ToolMenu>,
     /// A divider before the slot.
     divider: bool,
+    /// The "more" button: it opens a popover of extra tools instead of picking its tool.
+    more: bool,
 }
 
-const SLOTS: [Slot; 9] = [
-    Slot { tools: &[Tool::Move], menu: None, divider: false },
-    Slot { tools: &[Tool::Hand], menu: None, divider: false },
-    Slot { tools: &[Tool::Marker, Tool::Highlighter], menu: Some(ToolMenu::Brush), divider: true },
-    Slot { tools: &[Tool::Sticky], menu: None, divider: false },
-    Slot { tools: &[Tool::BoardShape], menu: Some(ToolMenu::Shape), divider: false },
-    Slot { tools: &[Tool::Connector], menu: None, divider: false },
-    Slot { tools: &[Tool::Text], menu: None, divider: false },
-    Slot { tools: &[Tool::Section], menu: None, divider: false },
-    Slot { tools: &[Tool::Stamp], menu: Some(ToolMenu::Stamp), divider: false },
+const SLOTS: [Slot; 11] = [
+    Slot { tools: &[Tool::Move], menu: None, divider: false, more: false },
+    Slot { tools: &[Tool::Hand], menu: None, divider: false, more: false },
+    Slot { tools: &[Tool::Marker, Tool::Highlighter, Tool::Washi, Tool::Eraser], menu: Some(ToolMenu::Brush), divider: true, more: false },
+    Slot { tools: &[Tool::Sticky], menu: Some(ToolMenu::Sticky), divider: false, more: false },
+    Slot { tools: &[Tool::BoardShape], menu: Some(ToolMenu::Shape), divider: false, more: false },
+    Slot { tools: &[Tool::Connector], menu: None, divider: false, more: false },
+    Slot { tools: &[Tool::Text], menu: None, divider: false, more: false },
+    Slot { tools: &[Tool::Section], menu: None, divider: false, more: false },
+    Slot { tools: &[Tool::Stamp], menu: Some(ToolMenu::Stamp), divider: false, more: false },
+    Slot { tools: &[Tool::Code], menu: None, divider: false, more: false },
+    Slot { tools: &[Tool::Table], menu: None, divider: false, more: true },
 ];
 
 const SLOT_GAP: f32 = 4.0;
@@ -64,7 +69,7 @@ pub fn toolbar_rect(screen: Rect) -> Rect {
 /// The tool a slot's button stands for right now.
 fn shown_tool(app: &App, s: &Slot) -> Tool {
     if s.menu == Some(ToolMenu::Brush) {
-        if app.tool.is_brush() {
+        if app.tool.is_drawing() {
             app.tool
         } else {
             app.board.brush
@@ -109,12 +114,24 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         if fill != Color32::TRANSPARENT {
             p.rect_filled(br, theme::cr(theme::RADIUS_MEDIUM), fill);
         }
-        icons::paint(&p, tool_icon(tool), br.center(), theme::TOOL_ICON_SIZE, if selected { Color32::WHITE } else { theme::ICON });
+        let icon = if s.more && !selected { Icon::Plus } else { tool_icon(tool) };
+        icons::paint(&p, icon, br.center(), theme::TOOL_ICON_SIZE, if selected { Color32::WHITE } else { theme::ICON });
         if resp.clicked() {
-            app.board.tool_menu = None;
-            app.set_tool(tool);
+            if s.more {
+                let open = app.board.tool_menu.map(|m| m.0) == Some(ToolMenu::More);
+                app.board.tool_menu = if open { None } else { Some((ToolMenu::More, br)) };
+            } else {
+                app.board.tool_menu = None;
+                app.set_tool(tool);
+            }
         }
-        let tip = if tool.shortcut().is_empty() { tool.label().to_string() } else { format!("{}   {}", tool.label(), tool.shortcut()) };
+        let tip = if s.more {
+            "More".to_string()
+        } else if tool.shortcut().is_empty() {
+            tool.label().to_string()
+        } else {
+            format!("{}   {}", tool.label(), tool.shortcut())
+        };
         resp.on_hover_text(tip);
         widgets::record(ui, &format!("board-tool-{tool:?}"), br);
         x += theme::TOOL_BUTTON;
@@ -153,10 +170,13 @@ fn popup(app: &mut App, ui: &mut Ui) {
     let (cols, rows) = match menu {
         ToolMenu::Brush => (4, 3),
         ToolMenu::Shape => (5, 2),
-        ToolMenu::Stamp => (5, 1),
+        ToolMenu::Stamp => (6, 2),
+        ToolMenu::Sticky => (2, 1),
+        ToolMenu::More => (1, 1),
     };
     let size = match menu {
-        ToolMenu::Brush => Vec2::new(8.0 * 26.0 + pad * 2.0, 2.0 * 32.0 + 34.0 + pad * 2.0),
+        ToolMenu::Brush => brush_menu_size(app, pad),
+        ToolMenu::More => Vec2::new(200.0 + pad * 2.0, MORE_TOOLS.len() as f32 * 32.0 + pad * 2.0),
         _ => Vec2::new(cols as f32 * CELL + pad * 2.0, rows as f32 * CELL + pad * 2.0),
     };
     let screen = ctx.content_rect();
@@ -170,6 +190,7 @@ fn popup(app: &mut App, ui: &mut Ui) {
         let inner = rect.shrink(pad);
         match menu {
             ToolMenu::Brush => brush_menu(app, ui, inner, &mut picked),
+            ToolMenu::More => more_menu(app, ui, inner, &mut picked),
             ToolMenu::Shape => {
                 for (i, k) in ShapeKind::ALL.iter().enumerate() {
                     let cell = Rect::from_min_size(inner.min + Vec2::new((i % cols) as f32 * CELL, (i / cols) as f32 * CELL), Vec2::splat(CELL));
@@ -190,9 +211,21 @@ fn popup(app: &mut App, ui: &mut Ui) {
                     }
                 }
             }
+            ToolMenu::Sticky => {
+                for (i, (wide, icon, tip)) in [(false, Icon::Sticky, "Sticky note"), (true, Icon::WideSticky, "Wide sticky note")].into_iter().enumerate() {
+                    let cell = Rect::from_min_size(inner.min + Vec2::new(i as f32 * CELL, 0.0), Vec2::splat(CELL));
+                    let resp = ui.interact(cell, ui.id().with(("board-sticky-kind", i)), Sense::click());
+                    cell_bg(&p, cell, app.board.wide == wide, resp.hovered());
+                    widgets::paint_icon_in(&p, cell, icon, 20.0, theme::ICON);
+                    widgets::record(ui, if wide { "board-sticky-wide" } else { "board-sticky-square" }, cell);
+                    if resp.on_hover_text(tip).clicked() {
+                        picked = Some(Pick::Sticky(wide));
+                    }
+                }
+            }
             ToolMenu::Stamp => {
                 for (i, k) in STAMP_KINDS.iter().enumerate() {
-                    let cell = Rect::from_min_size(inner.min + Vec2::new(i as f32 * CELL, 0.0), Vec2::splat(CELL));
+                    let cell = Rect::from_min_size(inner.min + Vec2::new((i % cols) as f32 * CELL, (i / cols) as f32 * CELL), Vec2::splat(CELL));
                     let sel = app.board.stamp == *k;
                     let resp = ui.interact(cell, ui.id().with(("board-stamp", i)), Sense::click());
                     cell_bg(&p, cell, sel, resp.hovered());
@@ -227,11 +260,22 @@ fn popup(app: &mut App, ui: &mut Ui) {
             app.board.tool_menu = None;
             app.set_tool(Tool::Stamp);
         }
+        Some(Pick::Sticky(wide)) => {
+            app.board.wide = wide;
+            app.board.tool_menu = None;
+            app.set_tool(Tool::Sticky);
+        }
         Some(Pick::Brush(t)) => {
             app.board.brush = t;
             app.set_tool(t);
         }
         Some(Pick::Ink(c)) => app.board.ink = color_of(c),
+        Some(Pick::More(t)) => {
+            app.board.tool_menu = None;
+            app.set_tool(t);
+        }
+        Some(Pick::Size(i)) => app.board.size = i,
+        Some(Pick::Pattern(p)) => app.board.pattern = p,
         None => {
             if outside || esc {
                 app.board.tool_menu = None;
@@ -241,10 +285,14 @@ fn popup(app: &mut App, ui: &mut Ui) {
 }
 
 enum Pick {
+    More(Tool),
     Shape(ShapeKind),
     Stamp(String),
+    Sticky(bool),
     Brush(Tool),
     Ink(u32),
+    Size(usize),
+    Pattern(WashiPattern),
 }
 
 fn cell_bg(p: &egui::Painter, cell: Rect, selected: bool, hover: bool) {
@@ -256,11 +304,108 @@ fn cell_bg(p: &egui::Painter, cell: Rect, selected: bool, hover: bool) {
     }
 }
 
-/// Marker / highlighter rows and the ink colours.
+/// The tools in the "more" popover.
+const MORE_TOOLS: [Tool; 1] = [Tool::Table];
+
+/// One row per extra tool, with its icon, name and shortcut.
+fn more_menu(app: &App, ui: &mut Ui, inner: Rect, picked: &mut Option<Pick>) {
+    let p = ui.painter().clone();
+    for (i, t) in MORE_TOOLS.into_iter().enumerate() {
+        let row = Rect::from_min_size(inner.min + Vec2::new(0.0, i as f32 * 32.0), Vec2::new(inner.width(), 32.0));
+        let resp = ui.interact(row, ui.id().with(("board-more", i)), Sense::click());
+        if app.tool == t {
+            p.rect_filled(row, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SELECTED);
+        } else if resp.hovered() {
+            p.rect_filled(row, theme::cr(theme::RADIUS_MEDIUM), theme::BG_HOVER);
+        }
+        icons::paint(&p, tool_icon(t), Pos2::new(row.left() + 18.0, row.center().y), 16.0, theme::ICON);
+        p.text(Pos2::new(row.left() + 36.0, row.center().y), Align2::LEFT_CENTER, t.label(), theme::font_body(), theme::TEXT);
+        p.text(Pos2::new(row.right() - 8.0, row.center().y), Align2::RIGHT_CENTER, t.shortcut(), theme::font_body(), theme::TEXT_TERTIARY);
+        widgets::record(ui, &format!("board-more-{t:?}"), row);
+        if resp.clicked() {
+            *picked = Some(Pick::More(t));
+        }
+    }
+}
+
+/// Tools listed in the drawing tray.
+const TRAY_TOOLS: [Tool; 4] = [Tool::Marker, Tool::Highlighter, Tool::Washi, Tool::Eraser];
+const TRAY_ROW: f32 = 32.0;
+const INK_CELL: f32 = 26.0;
+const OPTION_ROW: f32 = 32.0;
+
+/// Whether the tray shows colours and thickness (everything but the eraser).
+fn tray_has_ink(app: &App) -> bool {
+    app.board.brush != Tool::Eraser
+}
+
+/// Size of the drawing tray: the tools, then the colour row, the thickness row and, for washi
+/// tape, the pattern row.
+fn brush_menu_size(app: &App, pad: f32) -> Vec2 {
+    let mut h = TRAY_TOOLS.len() as f32 * TRAY_ROW + pad * 2.0;
+    if tray_has_ink(app) {
+        h += 6.0 + INK_CELL + 6.0 + OPTION_ROW;
+        if app.board.brush == Tool::Washi {
+            h += 6.0 + OPTION_ROW;
+        }
+    }
+    Vec2::new(theme::BOARD_DRAW_INK.len() as f32 * INK_CELL + pad * 2.0, h)
+}
+
+/// A small sample of washi tape in `r`.
+pub fn pattern_glyph(p: &egui::Painter, r: Rect, pattern: WashiPattern, base: Color32) {
+    p.rect_filled(r, 2.0, base);
+    let ink = Color32::from_white_alpha(150);
+    let st = Stroke::new(1.2, ink);
+    let p = p.with_clip_rect(r);
+    match pattern {
+        WashiPattern::Stripes => {
+            let mut x = r.left() - r.height();
+            while x < r.right() {
+                p.line_segment([Pos2::new(x, r.bottom()), Pos2::new(x + r.height(), r.top())], Stroke::new(2.0, ink));
+                x += 6.0;
+            }
+        }
+        WashiPattern::Dots => {
+            for (i, y) in [r.top() + 5.0, r.bottom() - 5.0].into_iter().enumerate() {
+                let mut x = r.left() + 4.0 + i as f32 * 3.0;
+                while x < r.right() {
+                    p.circle_filled(Pos2::new(x, y), 1.4, ink);
+                    x += 6.0;
+                }
+            }
+        }
+        WashiPattern::Grid => {
+            let mut x = r.left() + 3.0;
+            while x < r.right() {
+                p.vline(x, r.y_range(), st);
+                x += 6.0;
+            }
+            p.hline(r.x_range(), r.center().y, st);
+        }
+        WashiPattern::Zigzag => {
+            for y in [r.top() + 5.0, r.bottom() - 5.0] {
+                let pts: Vec<Pos2> = (0..8).map(|i| Pos2::new(r.left() + i as f32 * 4.0, y + if i % 2 == 0 { -2.0 } else { 2.0 })).collect();
+                p.add(egui::Shape::line(pts, st));
+            }
+        }
+        WashiPattern::Checks => {
+            for i in 0..8 {
+                for j in 0..3 {
+                    if (i + j) % 2 == 0 {
+                        p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + i as f32 * 4.0, r.top() + j as f32 * 4.0), Vec2::splat(4.0)), 0.0, ink);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The drawing tray: tool rows, the ink colours, the thickness choices and the tape patterns.
 fn brush_menu(app: &App, ui: &mut Ui, inner: Rect, picked: &mut Option<Pick>) {
     let p = ui.painter().clone();
-    for (i, t) in [Tool::Marker, Tool::Highlighter].into_iter().enumerate() {
-        let row = Rect::from_min_size(inner.min + Vec2::new(0.0, i as f32 * 32.0), Vec2::new(inner.width(), 32.0));
+    for (i, t) in TRAY_TOOLS.into_iter().enumerate() {
+        let row = Rect::from_min_size(inner.min + Vec2::new(0.0, i as f32 * TRAY_ROW), Vec2::new(inner.width(), TRAY_ROW));
         let sel = app.board.brush == t;
         let resp = ui.interact(row, ui.id().with(("board-brush", i)), Sense::click());
         if sel {
@@ -276,16 +421,47 @@ fn brush_menu(app: &App, ui: &mut Ui, inner: Rect, picked: &mut Option<Pick>) {
             *picked = Some(Pick::Brush(t));
         }
     }
-    let y = inner.top() + 2.0 * 32.0 + 6.0;
+    if !tray_has_ink(app) {
+        return;
+    }
+    let mut y = inner.top() + TRAY_TOOLS.len() as f32 * TRAY_ROW + 6.0;
     p.hline(inner.x_range(), y - 3.0, Stroke::new(1.0, theme::BORDER));
-    for (i, c) in theme::BOARD_INK.iter().enumerate() {
-        let r = Rect::from_min_size(Pos2::new(inner.left() + i as f32 * 26.0, y), Vec2::splat(26.0));
+    for (i, c) in theme::BOARD_DRAW_INK.iter().enumerate() {
+        let r = Rect::from_min_size(Pos2::new(inner.left() + i as f32 * INK_CELL, y), Vec2::splat(INK_CELL));
         let resp = ui.interact(r, ui.id().with(("board-ink", i)), Sense::click());
         let sel = rgb_of(app.board.ink) == *c;
         swatch(&p, r.center(), *c, sel, resp.hovered());
         widgets::record(ui, &format!("board-ink-{i}"), r);
         if resp.clicked() {
             *picked = Some(Pick::Ink(*c));
+        }
+    }
+    y += INK_CELL + 6.0;
+    // thickness: a dot per choice
+    let cell_w = inner.width() / BRUSH_SIZES.len() as f32;
+    for (i, k) in BRUSH_SIZES.iter().enumerate() {
+        let r = Rect::from_min_size(Pos2::new(inner.left() + i as f32 * cell_w, y), Vec2::new(cell_w, OPTION_ROW));
+        let resp = ui.interact(r, ui.id().with(("board-size", i)), Sense::click());
+        cell_bg(&p, r, app.board.size == i, resp.hovered());
+        p.circle_filled(r.center(), 2.0 + 3.0 * k, theme::ICON);
+        widgets::record(ui, &format!("board-size-{i}"), r);
+        if resp.on_hover_text(["Thin", "Medium", "Thick"][i]).clicked() {
+            *picked = Some(Pick::Size(i));
+        }
+    }
+    if app.board.brush == Tool::Washi {
+        y += OPTION_ROW + 6.0;
+        let cell_w = inner.width() / WashiPattern::ALL.len() as f32;
+        let base = color32(app.board.ink);
+        for (i, pat) in WashiPattern::ALL.iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(inner.left() + i as f32 * cell_w, y), Vec2::new(cell_w, OPTION_ROW));
+            let resp = ui.interact(r, ui.id().with(("board-pattern", i)), Sense::click());
+            cell_bg(&p, r, app.board.pattern == *pat, resp.hovered());
+            pattern_glyph(&p, Rect::from_center_size(r.center(), Vec2::new(cell_w - 10.0, 18.0)), *pat, base);
+            widgets::record(ui, &format!("board-pattern-{pat:?}"), r);
+            if resp.on_hover_text(pat.label()).clicked() {
+                *picked = Some(Pick::Pattern(*pat));
+            }
         }
     }
 }

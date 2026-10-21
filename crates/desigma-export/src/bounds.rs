@@ -36,6 +36,10 @@ pub fn own_overflow(n: &Node) -> (f32, f32, f32, f32) {
         r = reach;
         b = reach;
     }
+    if matches!(n.kind, NodeKind::BoardSection(_)) {
+        // the title pill above the box
+        t = t.max(desigma_doc::SECTION_TITLE_REACH);
+    }
     let has_stroke = n.stroke.paints.iter().any(|p| p.visible) && (n.stroke.weight > 0.0 || n.stroke.side_weights.is_some());
     if has_stroke {
         let out = match n.stroke.align {

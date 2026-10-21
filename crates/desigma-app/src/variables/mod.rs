@@ -406,6 +406,9 @@ impl App {
     }
 }
 
+/// Variables whose resolved value may differ after installing `store`: those added or edited,
+/// those of collections whose modes changed, and every variable aliasing one of them.
+/// Removed variables are left out (their bindings are baked, nothing reflows).
 pub use desigma_engine::variables::{bound_nodes, changed_variables, reflow_bound};
 
 /// True when `text` is a variables-only payload (no design document in it).

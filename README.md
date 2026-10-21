@@ -137,7 +137,7 @@ Every screenshot here is the real app on its built-in showcase file, captured of
       <br>
       <sub>A board: stickies, connectors, shapes with text, stamps and a section.</sub>
       <h3>Boards for thinking out loud</h3>
-      New board in the File menu or on the home screen opens a whiteboard with its own toolbar: stickies whose text shrinks to fit, shapes with text, markers, stamps and sections. <kbd>Tab</kbd> starts the next sticky, <kbd>Alt</kbd>-drag duplicates.
+      New board in the File menu or on the home screen opens a whiteboard with its own toolbar: stickies whose text shrinks to fit, shapes with text, markers, stamps, coloured sections (<kbd>Shift</kbd>+<kbd>S</kbd>) that carry the notes inside them, and tables (<kbd>Shift</kbd>+<kbd>T</kbd>) with + handles and <kbd>Tab</kbd> between cells. <kbd>Tab</kbd> starts the next sticky, <kbd>Alt</kbd>-drag duplicates.
       <br><br>
       <b>Connectors</b> come out of the magnet dots on any shape, route around the boxes they join and follow them when they move. FigJam files open as boards.
     </td>
@@ -287,7 +287,7 @@ For the optional private [desigma-plugins](https://github.com/deepfounder-ai/des
 https://github.com/deepfounder-ai/desigma-plugins/blob/main/plugins/icon-browser/manifest.json
 ```
 
-The registry is private. Before launching the editor, set `DESIGMA_PLUGINS_TOKEN` to a GitHub token with read access to that repository's contents. The installer uses the GitHub contents API, does not discover credentials automatically, and never puts credentials in URLs or installed metadata. Prefer a commit SHA in place of `main` for a fixed package revision.
+The registry is public, so no token is needed. The installer uses the GitHub contents API, which allows 60 unauthenticated requests per hour; if you hit that limit, set `DESIGMA_PLUGINS_TOKEN` to any GitHub token before launching the editor. The installer does not discover credentials automatically and never puts credentials in URLs or installed metadata. Prefer a commit SHA in place of `main` for a fixed package revision.
 
 Schema 2 plugins include a root HTML panel and declared HTML/CSS/JavaScript assets. Choose **Open** on an installed plugin to launch its panel in your browser. Icon Browser can insert static SVG into the current document as editable layers; one Undo removes each insertion. **Stop**, switching documents, or returning to the library revokes the session. Schema 1 packages remain installable but do not run.
 

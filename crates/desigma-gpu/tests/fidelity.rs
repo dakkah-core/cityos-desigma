@@ -229,3 +229,59 @@ fn board_kinds_through_the_cpu_fallback_match_cpu() {
     let c = compare(&mut g, "board_fallback", &doc, page, vp, (1000, 800), 8);
     assert!(c.report.ratio < 0.02, "mismatch {:.3}%", c.report.ratio * 100.0);
 }
+
+/// Sections (translucent body, title pill above the box, children inside) and tables (cell fills,
+/// grid lines, cell text).
+fn blocks_scene() -> (Document, NodeId) {
+    let mut t = T::new();
+    t.doc.kind = DocumentKind::Board;
+    t.doc.get_mut(t.page).unwrap().kind = NodeKind::Page { background: Color::rgb(0xF4, 0xF4, 0xF4) };
+    for (i, c) in [SectionColor::Blue, SectionColor::LightYellow, SectionColor::Pink].into_iter().enumerate() {
+        let s = t.add(None, |id| Node::board_section(id, Rect::new(20.0 + i as f32 * 220.0, 60.0, 200.0, 160.0), c.label()));
+        if let NodeKind::BoardSection(p) = &mut t.node(s).kind {
+            p.color = c;
+        }
+        if i == 0 {
+            t.add(Some(s), |id| Node::sticky(id, Rect::new(20.0, 20.0, 100.0, 100.0), "In a section"));
+        }
+        if i == 2 {
+            t.add(Some(s), |id| Node::sticky(id, Rect::new(20.0, 20.0, 100.0, 100.0), "Hidden"));
+            if let NodeKind::BoardSection(p) = &mut t.node(s).kind {
+                p.contents_hidden = true;
+            }
+        }
+    }
+    let nodes = table_nodes(&mut t.doc, Vec2::new(30.0, 280.0), 3, 3);
+    let table = nodes[0].id;
+    Command::Insert { parent: t.page, index: usize::MAX, nodes }.apply(&mut t.doc).unwrap();
+    for (r, c, text, fill) in [(0, 0, "Task", None), (0, 1, "Owner", Some(Color::rgb(0xB6, 0xD4, 0xFF))), (1, 2, "Done", Some(Color::rgb(0xC4, 0xEB, 0xA6)))] {
+        let id = table_cell_node(&t.doc, table, r, c).unwrap();
+        if let NodeKind::TableCell(cell) = &mut t.node(id).kind {
+            cell.text.content = text.into();
+            cell.fill = fill;
+        }
+    }
+    (t.doc, t.page)
+}
+
+#[test]
+fn board_sections_and_tables_match_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let (doc, page) = blocks_scene();
+    let c = compare(&mut g, "board_blocks", &doc, page, Viewport { offset: Vec2::new(0.0, 20.0), zoom: 1.0, dpr: 2.0 }, (1000, 800), 8);
+    assert!(c.report.ratio < 0.03, "mismatch {:.3}%", c.report.ratio * 100.0);
+    assert!(c.report_aa.ratio < 0.01, "mismatch with AA forgiven {:.3}%", c.report_aa.ratio * 100.0);
+}
+
+#[test]
+fn board_sections_and_tables_through_the_cpu_fallback_match_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let (doc, page) = blocks_scene();
+    // the lowered text and the translucent bodies take the CPU-into-texture path
+    g.compiler.opts.force_fallback = Some(Arc::new(|n: &Node| {
+        matches!(n.kind, NodeKind::Text(_)) || !n.fills.is_empty() && n.fills.iter().any(|p| matches!(&p.kind, PaintKind::Solid(c) if c.a < 1.0))
+    }));
+    let vp = Viewport { offset: Vec2::new(0.0, 20.0), zoom: 1.0, dpr: 2.0 };
+    let c = compare(&mut g, "board_blocks_fallback", &doc, page, vp, (1000, 800), 8);
+    assert!(c.report.ratio < 0.02, "mismatch {:.3}%", c.report.ratio * 100.0);
+}

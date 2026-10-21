@@ -84,7 +84,7 @@ pub fn begin_text_edit(app: &mut App, id: NodeId) {
         Some(t) => t.content.len(),
         _ => return,
     };
-    app.selection = vec![id];
+    app.selection = vec![selection_target(app, id)];
     // Like Figma, entering edit mode selects all the text; when the layer is the current Find result
     // the match is selected instead (so Enter / double-click after "next match" lands on it).
     let (mut caret, mut anchor) = (len, 0);
@@ -95,6 +95,18 @@ pub fn begin_text_edit(app: &mut App, id: NodeId) {
         }
     }
     app.canvas.text = Some(TextSession::new(id, caret, anchor, Tx::new(), false));
+}
+
+/// What stays selected while `id` is typed into: a table cell keeps its table selected (and
+/// becomes the table's active cell), everything else is selected itself.
+fn selection_target(app: &mut App, id: NodeId) -> NodeId {
+    match desigma_doc::table_of_cell(&app.doc, id) {
+        Some((table, ..)) => {
+            app.board.cell = Some(id);
+            table
+        }
+        None => id,
+    }
 }
 
 pub fn finish_text(app: &mut App, commit: bool) {
@@ -126,10 +138,11 @@ pub fn finish_text(app: &mut App, commit: bool) {
         app.sanitize();
     } else {
         let id = sess.id;
+        let target = selection_target(app, id);
         // text in Arabic, Hebrew or Devanagari needs its Noto fallback font (fetched once, then cached)
         let complex = app.doc.get(id).and_then(|n| n.kind.any_text()).is_some_and(|t| !desigma_fonts::scripts_in(&t.content).is_empty());
         app.run_tx(sess.tx);
-        app.selection = vec![id];
+        app.selection = vec![target];
         if complex {
             app.fonts.load_for(&app.doc);
         }
@@ -708,10 +721,19 @@ fn key_event(app: &mut App, key: egui::Key, m: egui::Modifiers) -> bool {
     true
 }
 
-/// Tab: on a sticky note it starts the next one to the right; elsewhere it changes the list level.
+/// Tab: in code it indents; on a sticky note it starts the next one to the right; elsewhere it changes the list level.
 fn tab(app: &mut App, shift: bool) {
+    if crate::board::table::tab_cell(app, !shift) {
+        return;
+    }
+    let on_code = app.canvas.text.as_ref().and_then(|s| app.doc.get(s.id)).is_some_and(|n| matches!(n.kind, NodeKind::CodeBlock(_)));
     let on_sticky = app.canvas.text.as_ref().and_then(|s| app.doc.get(s.id)).is_some_and(|n| matches!(n.kind, NodeKind::Sticky(_)));
-    if on_sticky {
+    if on_code {
+        // code takes indentation, not list levels
+        if !shift {
+            insert_text(app, "    ", EditKind::Other);
+        }
+    } else if on_sticky {
         if !shift {
             crate::board::create::tab_next(app);
         }

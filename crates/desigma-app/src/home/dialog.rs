@@ -171,7 +171,14 @@ impl App {
     pub fn show_about(&mut self) {
         let mut lines = vec![
             ("desigma is a free, open-source design editor written in Rust.".to_string(), String::new()),
-            (format!("Version {}", env!("CARGO_PKG_VERSION")), String::new()),
+            (
+                if crate::RELEASE_BUILD {
+                    format!("Version {}", crate::VERSION)
+                } else {
+                    format!("Version {} (development build, it does not check for updates)", crate::VERSION)
+                },
+                String::new(),
+            ),
             ("There are no accounts, plans or cloud. Your files stay on this computer.".to_string(), String::new()),
         ];
         if let Some(lib) = &self.lib {

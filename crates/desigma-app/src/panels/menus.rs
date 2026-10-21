@@ -101,6 +101,10 @@ pub enum Action {
     YourName,
     /// Preferences -> Use GPU rendering.
     ToggleGpu,
+    /// Preferences -> Check for updates automatically.
+    ToggleUpdateCheck,
+    /// Help -> Check for updates.
+    CheckForUpdates,
     Shortcuts,
     AboutDesigma,
     OpenGithub,
@@ -212,6 +216,8 @@ pub fn run(app: &mut App, ctx: &Context, a: Action) {
         Action::SaveVersion => app.begin_save_version(),
         Action::YourName => app.ask_author_name(),
         Action::ToggleGpu => app.toggle_gpu(),
+        Action::ToggleUpdateCheck => app.toggle_update_check(),
+        Action::CheckForUpdates => app.check_for_updates(ctx, true),
         Action::Shortcuts => app.show_shortcuts(),
         Action::AboutDesigma => app.show_about(),
         Action::OpenGithub => app.confirm_open_github(),
@@ -441,6 +447,7 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("Command palette", "Ctrl+K", Action::OpenPalette),
         leaf("Keyboard shortcuts", "", Action::Shortcuts).sep(),
         leaf("About desigma", "", Action::AboutDesigma),
+        leaf("Check for updates…", "", Action::CheckForUpdates),
         leaf("desigma on GitHub", "", Action::OpenGithub),
     ];
     vec![
@@ -460,6 +467,10 @@ fn main_nodes(app: &App) -> Vec<Node> {
             vec![
                 leaf("Your name…", "", Action::YourName),
                 leaf("Use GPU rendering", "", Action::ToggleGpu).on(app.canvas.gpu.active()).off(!app.canvas.gpu.available),
+                // builds from source never check, so the toggle is off and greyed there
+                leaf("Check for updates automatically", "", Action::ToggleUpdateCheck)
+                    .on(crate::RELEASE_BUILD && !app.updater.no_auto_check)
+                    .off(!crate::RELEASE_BUILD),
             ],
         ),
         leaf("Libraries", "", Action::About).off(true).sep(),

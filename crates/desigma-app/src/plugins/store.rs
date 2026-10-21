@@ -326,7 +326,7 @@ pub fn install(root: &Path, input: &str) -> Result<InstalledPlugin, String> {
             request = request.set("Authorization", &format!("Bearer {}", token.trim()));
         }
         let response = request.call().map_err(|err| -> String { match err {
-            ureq::Error::Status(401 | 403 | 404, _) => "The plugin repository or file is unavailable. For the private registry, set DESIGMA_PLUGINS_TOKEN to a GitHub token with read access to deepfounder-ai/desigma-plugins, then restart Desigma. Check the manifest URL and token permissions.".into(),
+            ureq::Error::Status(401 | 403 | 404, _) => "The plugin file is unavailable. Check the manifest URL. If GitHub's hourly rate limit was reached, set DESIGMA_PLUGINS_TOKEN to a GitHub token and restart Desigma.".into(),
             _ => "Plugin download failed. Check your connection and the manifest URL.".into(),
         } })?;
         if response.status() != 200 {
@@ -750,9 +750,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    #[ignore = "Requires explicit DESIGMA_PLUGINS_TOKEN and access to the private registry"]
+    #[ignore = "Needs network access to the public plugin registry"]
     fn real_registry_install() {
-        assert!(std::env::var("DESIGMA_PLUGINS_TOKEN").is_ok(), "Set DESIGMA_PLUGINS_TOKEN explicitly to run this test");
         let root = root();
         let url = "https://github.com/deepfounder-ai/desigma-plugins/blob/main/plugins/install-demo/manifest.json";
         let plugin = install(&root, url).expect("Install the published native sample");

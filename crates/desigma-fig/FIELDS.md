@@ -36,6 +36,8 @@ and render its frames with `--example fig_render`.
 | Layout grids | `layoutGrids` (`pattern`/`type`/`axis`, `sectionSize`, `gutterSize`, `count`, `offset`) | **unconfirmed** (no node in either file has the field) |
 | Guides | `guides`: present as an empty list on symbols and instances; element shape (`axis`, `offset`) | field confirmed, element shape unconfirmed |
 | Export settings | `exportSettings [{imageType PNG/SVG, constraint {type CONTENT_SCALE, value}, suffix, contentsOnly, colorProfile, svg*}]` | confirmed (JPEG/PDF, `CONTENT_WIDTH/HEIGHT` unconfirmed) |
+| FigJam sections | In a FigJam file `SECTION` maps to a board section: `fills` (nearest of the 16 section colours), `sectionContentsHidden`, children. In a design file it stays a design section | `SECTION` confirmed, `sectionContentsHidden` unconfirmed (no FigJam file at hand) |
+| FigJam tables | `TABLE` (`numRows`, `numColumns`) with `TABLE_CELL` children (`rowIndex`, `columnIndex`, `characters`, `fills`, `size`). Column widths come from the first row's cells, row heights from the first column's; missing cells are padded, extras dropped | **unconfirmed**: the field names follow the plugin API's table node; no FigJam file with a table was available to check them |
 | Dev status / annotations | `sectionStatusInfo {status, prevStatus, lastUpdateUnixTimestamp}` exists on symbols; not mapped. No `devStatus` or annotation fields appear | unconfirmed |
 | Plugin / edit metadata | `pluginData [{pluginID, key, value}]`, `editInfo {createdAt, lastEditedAt, userId}` | confirmed, ignored |
 
@@ -76,6 +78,8 @@ and render its frames with `--example fig_render`.
 | Instance | `symbolData {symbolID, symbolOverrides [...], uniformScaleFactor}`, `derivedSymbolData [...]`, `derivedSymbolDataLayoutVersion`, `propsAreBubbled`. **Instances never store children** | confirmed |
 | Override paths | `guidPath {guids [..]}` holds `overrideKey` values, not node guids (1 to 3 entries; nested instances take two or more) | confirmed |
 | Override content | any NodeChange fields: `size`, `transform`, `fillPaints`, `strokePaints`, `strokeWeight`, `textData`, `fontName`, `styleIdForFill` (`{assetRef}`), `fillGeometry`, `strokeGeometry`, ... | confirmed |
+| Nested instance swap | override entry `{guidPath: [<slot>], overriddenSymbolID: <SYMBOL guid>}` replaces the nested instance's component; deeper entries under `[<slot>, ...]` then address the swapped component's children | confirmed (product UI file: list rows swapping their icon slot) |
+| Override paints bound to variables | `fillPaints` / `strokePaints` inside an override entry carry `colorVar` like node paints do; the literal `color` beside the alias can be stale (a dark-theme text override stored `#0A0A0A` next to an alias whose value is near-white), so the variable's value wins | confirmed (product UI file: dark-theme instances recolouring component text) |
 | Derived data | per path: `size`, `transform`, `fillGeometry`, `strokeGeometry` | confirmed |
 | Scale | `uniformScaleFactor` != 1 on instances made with the scale tool: copied contents scale by it | confirmed |
 | Property defs | `componentPropDefs [{id, name, type BOOL/TEXT/VARIANT/INSTANCE_SWAP, initialValue {boolValue / textValue{characters} / guidValue}, varValue, preferredValues, sortPosition}]` on the set; variants carry bare `{id, parentPropDefId}` aliases | confirmed |
