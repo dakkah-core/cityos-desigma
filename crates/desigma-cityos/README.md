@@ -8,6 +8,18 @@ Generic library prerequisites now include root OS transaction exclusion, expecte
 
 The current locked/offline Rust 1.93.1 core run is recorded in `.build/upstream/core-tests.log`: document and engine suites pass, along with library persistence/recovery suites. Top-level ignored subprocess-helper entries are exercised by their parent recovery tests; they are not substituted for required journeys. This evidence does not qualify the extension/app executable, packaged persistence journey, WebView, GPU coexistence or activation. `config/upstream/integration.json` declares the remaining core bridges, their invariants and regression owners.
 
+`scripts/upstream/verify-native-candidate.mjs` runs all five required packaged
+fixture tests against an explicitly selected compiled Windows test binary and
+its SHA256, then runs the application executable's headless checkpoint journey.
+Invoke it with the CMS root, fixture root (containing `reader/`,
+`evidence/` and `theme-fixtures/`), test binary and digest, then application binary
+and digest, using the CMS-selected
+Node runtime. It acquires the shared validation lease, verifies package integrity,
+requires matching canonical fixture commits, and rejects missing or ignored cases.
+Receipts bind the exact binary, input files and logs. An observed source HEAD does
+not attest an earlier compilation; build provenance, installed GUI/WebView and
+activation remain separate gates.
+
 Dependency direction:
 
 ```text
