@@ -91,4 +91,20 @@ jobs:
           components: rustfmt
 
       - name: Rustfmt
+        id: format
         run: cargo fmt --all --check
+
+      - name: Retain canonical formatting corrections for review
+        if: failure() && steps.format.outcome == 'failure'
+        run: |
+          mkdir -p .build/upstream/format
+          cargo fmt --all
+          git diff --binary > .build/upstream/format/canonical-format.patch
+          git rev-parse HEAD > .build/upstream/format/source-commit.txt
+
+      - name: Upload formatting corrections without accepting the failed gate
+        if: failure() && steps.format.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desigma-format-${{ github.sha }}
+          path: .build/upstream/format/
