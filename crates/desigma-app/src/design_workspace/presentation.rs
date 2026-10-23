@@ -241,8 +241,10 @@ mod tests {
     }
     #[test]
     fn named_renderer_themes_never_masquerade_as_native_paints_or_block_semantic_commands() {
-        let mut workspace = Workspace::default();
-        workspace.resource = Some(json!({"fixture":"cityos-web-frame","actualWebPreview":true}));
+        let mut workspace = Workspace {
+            resource: Some(json!({"fixture":"cityos-web-frame","actualWebPreview":true})),
+            ..Default::default()
+        };
         let native = workspace.presentation();
         let rendered = workspace.scenario();
         workspace.theme_id = "pinned-repository-theme".into();
@@ -266,11 +268,13 @@ mod tests {
         app.lib = Some(desigma_library::Library::open(&root).unwrap());
         app.home = None;
         let (bridge, requests, responses) = super::super::bridge::Bridge::test_transport();
-        let mut workspace = Workspace::default();
-        workspace.bridge = Some(bridge);
-        workspace.validated = true;
-        workspace.themes_loaded = true;
-        workspace.resource = Some(json!({"fixture":"cityos-accordion","actualWebPreview":true}));
+        let mut workspace = Workspace {
+            bridge: Some(bridge),
+            validated: true,
+            themes_loaded: true,
+            resource: Some(json!({"fixture":"cityos-accordion","actualWebPreview":true})),
+            ..Default::default()
+        };
         workspace.send(json!({"op":"Command","draft":draft(&app.doc),"command":{
             "draftId":"draft","expectedRevision":0,"operationId":"locale-race-edit",
             "operation":"set-property","nodeId":"accordion","property":"allowMultiple","value":true}}));

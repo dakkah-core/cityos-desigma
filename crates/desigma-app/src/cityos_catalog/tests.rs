@@ -4,9 +4,6 @@ use desigma_cityos::catalog::local_library;
 use desigma_cityos_catalog::Entry;
 use serde_json::{json, Value};
 
-pub(crate) fn idle_browser() -> Browser {
-    Browser(desigma_cityos::catalog::test_support::idle_browser(super::style::services()))
-}
 pub(crate) fn populated_browser() -> Browser {
     Browser(desigma_cityos::catalog::test_support::populated_browser(super::style::services()))
 }

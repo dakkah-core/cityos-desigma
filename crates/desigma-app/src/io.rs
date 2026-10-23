@@ -24,9 +24,9 @@ fn parse_path_bytes(path: &Path, bytes: &[u8]) -> Result<Document, String> {
         "fig" => desigma_fig::import_fig(bytes).map_err(|e| format!("Cannot import .fig: {e}"))?,
         "json" => {
             let text = text()?;
-            match desigma_fig::import_rest_json(&text) {
+            match desigma_fig::import_rest_json(text) {
                 Ok(d) => d,
-                Err(fig_err) => Document::from_json(&text).map_err(|e| format!("Not a Figma REST file ({fig_err}) nor a desigma file ({e})"))?,
+                Err(fig_err) => Document::from_json(text).map_err(|e| format!("Not a Figma REST file ({fig_err}) nor a desigma file ({e})"))?,
             }
         }
         "svg" => {
@@ -34,12 +34,12 @@ fn parse_path_bytes(path: &Path, bytes: &[u8]) -> Result<Document, String> {
             let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("svg");
             let mut doc = Document::new(name);
             let page = doc.add_page("Page 1");
-            desigma_svg::import_svg_named(&text, name, &mut doc, page, Vec2::ZERO).map_err(|e| format!("Cannot import SVG: {e}"))?;
+            desigma_svg::import_svg_named(text, name, &mut doc, page, Vec2::ZERO).map_err(|e| format!("Cannot import SVG: {e}"))?;
             doc
         }
         _ => {
             let text = text()?;
-            Document::from_json(&text).map_err(|e| format!("Invalid desigma file: {e}"))?
+            Document::from_json(text).map_err(|e| format!("Invalid desigma file: {e}"))?
         }
     };
     if doc.name.is_empty() {

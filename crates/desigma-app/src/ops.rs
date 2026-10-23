@@ -944,13 +944,11 @@ impl App {
                 self.show_toast("Save the current document before opening a checkpoint", true);
                 return;
             }
-            if changed && self.doc.cityos.is_none() {
-                if native.is_some() {
+            if changed && self.doc.cityos.is_none() && native.is_some() {
                     if let Err(e) = self.save_current_external() {
                         self.show_toast(e, true);
                         return;
                     }
-                }
             }
         }
         if !self.flush_autosave() {

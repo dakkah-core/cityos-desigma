@@ -189,10 +189,9 @@ impl Reporter {
             }
         }
         self.report.omitted_cause_occurrences = self.report.omitted_cause_occurrences.saturating_add(causes.len().saturating_sub(MAX_CAUSES_PER_FRAME) as u64);
-        if self.report.write_failures < 3 && (self.report.frame_count == 1 || elapsed.saturating_sub(self.last_attempt) >= WRITE_INTERVAL) {
-            if self.flush(elapsed, false).is_err() && self.report.write_failures == 1 {
+        if self.report.write_failures < 3 && (self.report.frame_count == 1 || elapsed.saturating_sub(self.last_attempt) >= WRITE_INTERVAL)
+            && self.flush(elapsed, false).is_err() && self.report.write_failures == 1 {
                 eprintln!("desigma: performance report write failed; diagnostic writes are bounded");
-            }
         }
     }
 

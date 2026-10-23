@@ -25,7 +25,7 @@ use desigma_cityos::draft::{binding, draft};
 use desigma_cityos::draft::{local_copy, revision};
 use desigma_doc::Document;
 #[cfg(test)]
-use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Command};
+use desigma_doc::{CityosBase, CityosBinding, Command};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -159,10 +159,12 @@ mod tests {
         app.changed();
         let document = app.doc.to_json().unwrap();
         let history = serde_json::to_value(&app.hist).unwrap();
-        let mut workspace = Workspace::default();
-        workspace.open = true;
-        workspace.pending = Some(Instant::now());
-        workspace.preview = Some(json!({"draftRevision":0}));
+        let mut workspace = Workspace {
+            open: true,
+            pending: Some(Instant::now()),
+            preview: Some(json!({"draftRevision":0})),
+            ..Default::default()
+        };
         workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
         workspace.open_desigma_files(&mut app).unwrap();
         assert!(!workspace.open && !workspace.library_requested());
@@ -188,8 +190,10 @@ mod tests {
         let hash = app.autosave.saved_hash;
         let blocker = library.path("projects").join(&file.project_id).join(".save.pending.json");
         std::fs::create_dir(&blocker).unwrap();
-        let mut workspace = Workspace::default();
-        workspace.open = true;
+        let mut workspace = Workspace {
+            open: true,
+            ..Default::default()
+        };
         workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
         assert!(workspace.open_desigma_files(&mut app).is_err());
         assert!(workspace.open && workspace.library_requested());
@@ -211,11 +215,13 @@ mod tests {
         home.search = "Retain my file filter".into();
         home.scroll = 42.;
         app.home = Some(home);
-        let mut workspace = Workspace::default();
-        workspace.open = true;
-        workspace.preview_only = true;
-        workspace.staged = Some(Document::new("Temporary preview"));
-        workspace.temporary_canvas = Some(Box::new(App::new(Document::new("Temporary canvas"))));
+        let mut workspace = Workspace {
+            open: true,
+            preview_only: true,
+            staged: Some(Document::new("Temporary preview")),
+            temporary_canvas: Some(Box::new(App::new(Document::new("Temporary canvas")))),
+            ..Default::default()
+        };
         workspace.open_desigma_files(&mut app).unwrap();
         assert!(!workspace.open && !workspace.library_requested());
         assert!(workspace.staged.is_none() && workspace.temporary_canvas.is_none());
@@ -230,9 +236,11 @@ mod tests {
         let mut app = App::new(Document::new("Current"));
         app.home = None;
         let document = app.doc.to_json().unwrap();
-        let mut workspace = Workspace::default();
-        workspace.open = true;
-        workspace.busy = Some("Command".into());
+        let mut workspace = Workspace {
+            open: true,
+            busy: Some("Command".into()),
+            ..Default::default()
+        };
         assert!(workspace.open_desigma_files(&mut app).unwrap_err().contains("current CityOS operation"));
         workspace.busy = None;
         workspace.recovery_pending = true;
@@ -346,9 +354,11 @@ mod tests {
     }
     #[test]
     fn inert_host_resize_does_not_schedule_semantic_work_or_idle_repaints() {
-        let mut workspace = Workspace::default();
-        workspace.harness = true;
-        workspace.preview_only = true;
+        let mut workspace = Workspace {
+            harness: true,
+            preview_only: true,
+            ..Default::default()
+        };
         for viewport in [(800, 600), (900, 700), (900, 700)] {
             workspace.observe_preview_viewport(viewport);
             assert_eq!(workspace.panel_size, viewport);
@@ -429,10 +439,12 @@ mod tests {
     #[test]
     fn global_design_chooser_exits_changes_and_preserves_design_toggle() {
         for (changes_mode, picker_open, expected_open) in [(true, false, true), (true, true, true), (false, false, true), (false, true, false)] {
-            let mut workspace = Workspace::default();
-            workspace.changes_mode = changes_mode;
-            workspace.picker_open = picker_open;
-            workspace.resources = vec![json!({"sourcePath":"selected.json"})];
+            let mut workspace = Workspace {
+                changes_mode: changes_mode,
+                picker_open: picker_open,
+                resources: vec![json!({"sourcePath":"selected.json"})],
+                ..Default::default()
+            };
             workspace.choose_design_file();
             assert!(!workspace.changes_mode, "The global chooser must reveal Design");
             assert_eq!(workspace.picker_open, expected_open, "changes={changes_mode}, picker={picker_open}");
@@ -1003,8 +1015,10 @@ mod tests {
         let mut next = app.doc.clone();
         next.name = "First edited".into();
         app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(next) }).unwrap();
-        let mut workspace = Workspace::default();
-        workspace.selected = "material".into();
+        let mut workspace = Workspace {
+            selected: "material".into(),
+            ..Default::default()
+        };
         workspace.replace_active(&mut app, tab_document_node("second", "accordion"), None).unwrap();
         let first_file = workspace.tabs["first"].session.as_ref().unwrap().file_id().unwrap().to_owned();
         app.home = None;
@@ -1032,10 +1046,12 @@ mod tests {
         app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
         let document = tab_document_node("accordion-draft", "accordion");
         let before = document.to_json().unwrap();
-        let mut workspace = Workspace::default();
-        workspace.selected = "material".into();
-        workspace.preview_only = true;
-        workspace.staged = Some(document);
+        let mut workspace = Workspace {
+            selected: "material".into(),
+            preview_only: true,
+            staged: Some(document),
+            ..Default::default()
+        };
         workspace.install_staged(&mut app);
         assert!(workspace.error.is_none(), "{:?}", workspace.error);
         assert_eq!(workspace.selected, "accordion");
@@ -1064,13 +1080,15 @@ mod tests {
             let mut app = App::new(tab_document_node("accordion-draft", "accordion"));
             app.home = None;
             app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
-            let mut workspace = Workspace::default();
-            workspace.open = true;
-            workspace.validated = true;
-            workspace.themes_loaded = true;
-            workspace.observed = revision(&app.doc);
-            workspace.resource = Some(json!({"label":"Accordion","actualWebPreview":true,"fixture":"cityos-accordion","editable":false}));
-            workspace.preview = Some(json!({"draftRevision":0,"observedViewport":{"width":540,"height":608},"scenario":{"fixture":"cityos-accordion"}}));
+            let mut workspace = Workspace {
+                open: true,
+                validated: true,
+                themes_loaded: true,
+                observed: revision(&app.doc),
+                resource: Some(json!({"label":"Accordion","actualWebPreview":true,"fixture":"cityos-accordion","editable":false})),
+                preview: Some(json!({"draftRevision":0,"observedViewport":{"width":540,"height":608},"scenario":{"fixture":"cityos-accordion"}})),
+                ..Default::default()
+            };
             let mut sizes = Vec::new();
             for iteration in 0..20 {
                 app.toast = if iteration % 4 == 3 {
@@ -1292,16 +1310,18 @@ mod tests {
     }
     #[test]
     fn reopening_cannot_reuse_prior_document_qualification_or_export() {
-        let mut workspace = Workspace::default();
-        workspace.validated = true;
-        workspace.current = true;
-        workspace.preview = Some(json!({"draftId":"previous","draftRevision":7}));
-        workspace.observed = Some(("previous".into(), 7));
-        workspace.pending = Some(Instant::now());
-        workspace.render_started = Some(Instant::now());
-        workspace.compare = Some("previous export".into());
-        workspace.compare_open = true;
-        workspace.busy = Some("Command".into());
+        let mut workspace = Workspace {
+            validated: true,
+            current: true,
+            preview: Some(json!({"draftId":"previous","draftRevision":7})),
+            observed: Some(("previous".into(), 7)),
+            pending: Some(Instant::now()),
+            render_started: Some(Instant::now()),
+            compare: Some("previous export".into()),
+            compare_open: true,
+            busy: Some("Command".into()),
+            ..Default::default()
+        };
         let app = App::new(Document::new("Unbound file"));
         workspace.resume(Config { node: "missing-node".into(), bridge: "missing-bridge".into(), repository: ".".into(), cache: ".".into() }, &app);
         assert!(!workspace.validated);
