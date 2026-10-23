@@ -4,22 +4,28 @@ mod atlas_tests;
 mod bridge;
 mod dependencies;
 mod editor_host;
+#[cfg(test)]
 mod history_commands;
 #[cfg(test)]
 mod horizon_tests;
-mod host;
+#[cfg(test)]
 mod layout;
 #[cfg(test)]
 mod material_tests;
-mod native_projection;
 mod presentation;
+#[cfg(test)]
 mod repaint;
 mod session;
+#[cfg(test)]
 mod submission_recovery;
 use crate::app::App;
 pub use desigma_cityos::bridge::Config;
-use desigma_cityos::draft::{binding, draft, local_copy, revision};
-use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Command, Document};
+use desigma_cityos::draft::{binding, draft};
+#[cfg(test)]
+use desigma_cityos::draft::{local_copy, revision};
+use desigma_doc::Document;
+#[cfg(test)]
+use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Command};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};

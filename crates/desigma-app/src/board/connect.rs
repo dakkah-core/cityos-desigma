@@ -149,4 +149,3 @@ pub fn release(app: &mut App, c: ConnectDrag) {
     }
 }
 
-pub use desigma_engine::connect::reroute_touched;

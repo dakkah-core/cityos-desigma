@@ -372,7 +372,7 @@ impl Library {
         };
         for entry in entries {
             let path = entry?.path();
-            if !path.extension().is_some_and(|extension| extension == "json") {
+            if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
             let id = path.file_stem().and_then(|id| id.to_str()).ok_or_else(|| LibraryError::Invalid("Invalid submission path".into()))?;

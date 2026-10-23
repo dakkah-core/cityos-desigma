@@ -1,5 +1,4 @@
 //! Thin desktop host for the extracted CityOS catalog.
-pub use desigma_cityos::catalog::WorkspaceRequest;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 

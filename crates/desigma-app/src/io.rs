@@ -66,6 +66,7 @@ pub fn save_path_observed(doc: &Document, path: &Path) -> Result<(PathBuf, Strin
     save_path_inner(doc, path, None)
 }
 
+#[cfg(test)]
 pub fn file_fingerprint(path: &Path) -> Result<String, String> {
     fingerprint_locked(path)
 }

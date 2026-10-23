@@ -1,10 +1,13 @@
 //! Presentation can replace derived canvas objects without editing a bound draft.
 #[cfg(test)]
 use super::draft;
+#[cfg(test)]
 use super::Workspace;
 use crate::app::App;
 use desigma_doc::Document;
+#[cfg(test)]
 use serde_json::{json, Value};
+#[cfg(test)]
 use std::time::Duration;
 
 #[derive(Default)]
@@ -39,7 +42,8 @@ pub(super) fn fit_canvas(state: &mut Option<AutoFit>, app: &mut App) {
     }
 }
 
-pub use desigma_cityos::workspace_support::presentation::{key, scene_matches, scene_resource};
+#[cfg(test)]
+use desigma_cityos::workspace_support::presentation::{key, scene_matches, scene_resource};
 pub(super) fn install(app: &mut App, projection: Document) -> Result<(), String> {
     let mut current = serde_json::to_value(&app.doc).map_err(|e| e.to_string())?;
     let derived = serde_json::to_value(&projection).map_err(|e| e.to_string())?;

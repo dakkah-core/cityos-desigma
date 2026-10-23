@@ -49,6 +49,7 @@ impl EditorSession {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn name(&self) -> &str {
         &self.document.name
     }
