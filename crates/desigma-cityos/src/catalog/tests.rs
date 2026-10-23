@@ -799,7 +799,7 @@ fn filter_change_cannot_install_old_results_or_old_preview() {
     let old = browser.filters.clone();
     browser.filters.search = "new search".into();
     browser.filters_changed();
-    tx.send(Reply::Query(3, old, 0, Ok(Page { entries: vec![entry("stale")], total: 1, next_offset: None }))).unwrap();
+    tx.send(Reply::Query(3, Box::new(old), 0, Ok(Page { entries: vec![entry("stale")], total: 1, next_offset: None }))).unwrap();
     tx.send(Reply::Materialize(2, "stale".into(), Ok(json!({"data":"stale"})))).unwrap();
     browser.poll();
     assert_eq!(browser.entries[0].id, "one");
@@ -855,7 +855,7 @@ fn catalog_refresh_filters_wait_for_cancellation_then_query_the_retained_generat
             assert_eq!(binding.mode, "local");
             assert_eq!(binding.config, browser.reader_config());
             assert_eq!(filters.search, "latest search");
-            tx.send(Reply::Query(epoch, filters, 0, Ok(Page { entries: vec![entry("matching")], total: 1, next_offset: None }))).unwrap();
+            tx.send(Reply::Query(epoch, Box::new(filters), 0, Ok(Page { entries: vec![entry("matching")], total: 1, next_offset: None }))).unwrap();
         }
         _ => panic!("Changed filters must precede another background scan"),
     }
@@ -1089,7 +1089,7 @@ fn failed_remote_refresh_recovered_from_cache_keeps_browsing_and_failure_backoff
     assert_eq!(browser.refresh_failures, 1);
     assert_eq!(browser.summary.as_ref().unwrap()["generationId"], "first");
     assert!(matches!(requests.try_recv(),Ok(Job::Query(_,filters,0,binding)) if filters.level=="L2"&&binding.generation=="first"));
-    tx.send(Reply::Query(browser.epoch, browser.filters.clone(), 0, Ok(Page { entries: vec![entry("L2-match")], total: 1, next_offset: None }))).unwrap();
+    tx.send(Reply::Query(browser.epoch, Box::new(browser.filters.clone()), 0, Ok(Page { entries: vec![entry("L2-match")], total: 1, next_offset: None }))).unwrap();
     browser.poll();
     assert_eq!(browser.entries[0].id, "L2-match");
     assert_eq!(browser.displayed_filters, browser.filters);
@@ -1291,7 +1291,7 @@ fn catalog_refresh_failed_cancel_fence_discards_session_and_preserves_display_fo
         browser.filters.search = "new search".into();
         browser.query(0);
         assert!(matches!(requests.try_recv(), Ok(Job::Query(..))));
-        tx.send(Reply::Query(browser.epoch, browser.filters.clone(), 0, Err(error))).unwrap();
+        tx.send(Reply::Query(browser.epoch, Box::new(browser.filters.clone()), 0, Err(error))).unwrap();
         browser.poll();
         assert_eq!(browser.summary, previous);
         assert_eq!(browser.entries[0].id, "one");
@@ -1311,7 +1311,7 @@ fn pagination_appends_and_unchanged_refresh_preserves_selection() {
     browser.pending_selection = false;
     browser.epoch = 4;
     browser.busy = true;
-    tx.send(Reply::Query(4, browser.filters.clone(), 1, Ok(Page { entries: vec![entry("two")], total: 2, next_offset: None }))).unwrap();
+    tx.send(Reply::Query(4, Box::new(browser.filters.clone()), 1, Ok(Page { entries: vec![entry("two")], total: 2, next_offset: None }))).unwrap();
     browser.poll();
     assert_eq!(browser.entries.len(), 2);
     tx.send(Reply::Scan(4, Ok(browser.summary.clone().unwrap()))).unwrap();
