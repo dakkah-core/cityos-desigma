@@ -148,4 +148,3 @@ pub fn release(app: &mut App, c: ConnectDrag) {
         app.tool = crate::canvas::tools::Tool::Move;
     }
 }
-
