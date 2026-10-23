@@ -23,9 +23,8 @@ pub use desigma_cityos::bridge::Config;
 use desigma_cityos::draft::{binding, draft};
 #[cfg(test)]
 use desigma_cityos::draft::{local_copy, revision};
-use desigma_doc::Document;
 #[cfg(test)]
-use desigma_doc::{CityosBase, CityosBinding, Command};
+use desigma_doc::{CityosBase, CityosBinding, Command, Document};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
