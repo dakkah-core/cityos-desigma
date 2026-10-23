@@ -945,10 +945,10 @@ impl App {
                 return;
             }
             if changed && self.doc.cityos.is_none() && native.is_some() {
-                    if let Err(e) = self.save_current_external() {
-                        self.show_toast(e, true);
-                        return;
-                    }
+                if let Err(e) = self.save_current_external() {
+                    self.show_toast(e, true);
+                    return;
+                }
             }
         }
         if !self.flush_autosave() {

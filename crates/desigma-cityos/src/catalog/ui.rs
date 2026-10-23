@@ -23,13 +23,18 @@ const COLLECTIONS: [(&str, &str); 8] = [
 
 fn preview_menu_height(available: f32) -> f32 {
     // Preserve the previous min/max fallback for invalid viewport geometry.
-    if available.is_nan() { 320.0 } else { available.clamp(1.0, 320.0) }
+    if available.is_nan() {
+        320.0
+    } else {
+        available.clamp(1.0, 320.0)
+    }
 }
 
 #[test]
 fn preview_menu_height_retains_bounded_and_invalid_geometry_behavior() {
-    for (value, expected) in [(f32::NAN, 320.0), (f32::INFINITY, 320.0), (f32::NEG_INFINITY, 1.0),
-        (0.0, 1.0), (1.0, 1.0), (64.0, 64.0), (320.0, 320.0), (900.0, 320.0)] {
+    for (value, expected) in
+        [(f32::NAN, 320.0), (f32::INFINITY, 320.0), (f32::NEG_INFINITY, 1.0), (0.0, 1.0), (1.0, 1.0), (64.0, 64.0), (320.0, 320.0), (900.0, 320.0)]
+    {
         assert_eq!(preview_menu_height(value), expected);
     }
 }

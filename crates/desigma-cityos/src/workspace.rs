@@ -1370,12 +1370,12 @@ impl<H: EditorHost> Workspace<H> {
                                                 return;
                                             }
                                         } else if let Err(error) = app.install_edit(document) {
-                                                self.error = Some(error);
-                                                return;
+                                            self.error = Some(error);
+                                            return;
                                         }
                                     } else if !self.install_resumed_projection(app, document) {
-                                            self.resume_presentation = projected_key;
-                                            return;
+                                        self.resume_presentation = projected_key;
+                                        return;
                                     }
                                     if let Some(key) = projected_key {
                                         self.projection_attempted = Some(key.clone());

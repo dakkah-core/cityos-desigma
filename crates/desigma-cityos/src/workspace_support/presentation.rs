@@ -41,11 +41,7 @@ impl<H: EditorHost> Workspace<H> {
         sent.is_some_and(|sent| *sent == self.presentation()) && self.active_draft(app).as_ref() == Some(&value["draft"])
     }
     pub fn refresh_native_presentation(&mut self, app: &H) -> bool {
-        if !self.has_native_scene()
-            || self.busy.is_some()
-            || self.recovery_pending
-            || self.pending.is_none_or(|at| at.elapsed() < Duration::from_millis(250))
-        {
+        if !self.has_native_scene() || self.busy.is_some() || self.recovery_pending || self.pending.is_none_or(|at| at.elapsed() < Duration::from_millis(250)) {
             return false;
         }
         let Some(draft) = self.active_draft(app) else {

@@ -159,12 +159,7 @@ mod tests {
         app.changed();
         let document = app.doc.to_json().unwrap();
         let history = serde_json::to_value(&app.hist).unwrap();
-        let mut workspace = Workspace {
-            open: true,
-            pending: Some(Instant::now()),
-            preview: Some(json!({"draftRevision":0})),
-            ..Default::default()
-        };
+        let mut workspace = Workspace { open: true, pending: Some(Instant::now()), preview: Some(json!({"draftRevision":0})), ..Default::default() };
         workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
         workspace.open_desigma_files(&mut app).unwrap();
         assert!(!workspace.open && !workspace.library_requested());
@@ -190,10 +185,7 @@ mod tests {
         let hash = app.autosave.saved_hash;
         let blocker = library.path("projects").join(&file.project_id).join(".save.pending.json");
         std::fs::create_dir(&blocker).unwrap();
-        let mut workspace = Workspace {
-            open: true,
-            ..Default::default()
-        };
+        let mut workspace = Workspace { open: true, ..Default::default() };
         workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
         assert!(workspace.open_desigma_files(&mut app).is_err());
         assert!(workspace.open && workspace.library_requested());
@@ -236,11 +228,7 @@ mod tests {
         let mut app = App::new(Document::new("Current"));
         app.home = None;
         let document = app.doc.to_json().unwrap();
-        let mut workspace = Workspace {
-            open: true,
-            busy: Some("Command".into()),
-            ..Default::default()
-        };
+        let mut workspace = Workspace { open: true, busy: Some("Command".into()), ..Default::default() };
         assert!(workspace.open_desigma_files(&mut app).unwrap_err().contains("current CityOS operation"));
         workspace.busy = None;
         workspace.recovery_pending = true;
@@ -354,11 +342,7 @@ mod tests {
     }
     #[test]
     fn inert_host_resize_does_not_schedule_semantic_work_or_idle_repaints() {
-        let mut workspace = Workspace {
-            harness: true,
-            preview_only: true,
-            ..Default::default()
-        };
+        let mut workspace = Workspace { harness: true, preview_only: true, ..Default::default() };
         for viewport in [(800, 600), (900, 700), (900, 700)] {
             workspace.observe_preview_viewport(viewport);
             assert_eq!(workspace.panel_size, viewport);
@@ -1015,10 +999,7 @@ mod tests {
         let mut next = app.doc.clone();
         next.name = "First edited".into();
         app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(next) }).unwrap();
-        let mut workspace = Workspace {
-            selected: "material".into(),
-            ..Default::default()
-        };
+        let mut workspace = Workspace { selected: "material".into(), ..Default::default() };
         workspace.replace_active(&mut app, tab_document_node("second", "accordion"), None).unwrap();
         let first_file = workspace.tabs["first"].session.as_ref().unwrap().file_id().unwrap().to_owned();
         app.home = None;
@@ -1046,12 +1027,7 @@ mod tests {
         app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
         let document = tab_document_node("accordion-draft", "accordion");
         let before = document.to_json().unwrap();
-        let mut workspace = Workspace {
-            selected: "material".into(),
-            preview_only: true,
-            staged: Some(document),
-            ..Default::default()
-        };
+        let mut workspace = Workspace { selected: "material".into(), preview_only: true, staged: Some(document), ..Default::default() };
         workspace.install_staged(&mut app);
         assert!(workspace.error.is_none(), "{:?}", workspace.error);
         assert_eq!(workspace.selected, "accordion");
