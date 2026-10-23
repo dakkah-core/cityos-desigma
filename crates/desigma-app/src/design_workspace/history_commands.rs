@@ -53,7 +53,7 @@ mod tests {
 
     fn workspace() -> (Workspace, std::sync::mpsc::Receiver<Value>, std::sync::mpsc::Sender<Result<Value, String>>) {
         let (bridge, requests, responses) = super::super::bridge::Bridge::test_transport();
-        let mut workspace = Workspace { bridge: Some(bridge), validated: true, themes_loaded: true, resource: Some(resource()), ..Default::default() };
+        let workspace = Workspace { bridge: Some(bridge), validated: true, themes_loaded: true, resource: Some(resource()), ..Default::default() };
         (workspace, requests, responses)
     }
 

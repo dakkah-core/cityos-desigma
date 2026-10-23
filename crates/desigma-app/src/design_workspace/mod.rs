@@ -423,8 +423,8 @@ mod tests {
     fn global_design_chooser_exits_changes_and_preserves_design_toggle() {
         for (changes_mode, picker_open, expected_open) in [(true, false, true), (true, true, true), (false, false, true), (false, true, false)] {
             let mut workspace = Workspace {
-                changes_mode: changes_mode,
-                picker_open: picker_open,
+                changes_mode,
+                picker_open,
                 resources: vec![json!({"sourcePath":"selected.json"})],
                 ..Default::default()
             };
