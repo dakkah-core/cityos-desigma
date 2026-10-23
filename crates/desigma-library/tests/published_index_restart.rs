@@ -54,8 +54,7 @@ fn published_index_restart_worker() {
             assert!(library.library_index(LIBRARY_ID).is_err());
             assert!(library.list_libraries().is_err(), "a damaged library must not disappear from a partial catalogue");
             assert!(library.load_snapshot(LIBRARY_ID, Some(1)).is_err(), "explicit reads must validate the publication index");
-            assert!(library.publish_library(LIBRARY_ID, &candidate, "Third").is_err(),
-                "an unavailable existing index must not restart the version sequence");
+            assert!(library.publish_library(LIBRARY_ID, &candidate, "Third").is_err(), "an unavailable existing index must not restart the version sequence");
         }
         "retry" => assert_eq!(library.publish_library(LIBRARY_ID, &candidate, "Third").unwrap().version, 3),
         _ => panic!("Unexpected index restart worker mode"),
@@ -65,9 +64,7 @@ fn published_index_restart_worker() {
 #[test]
 fn unavailable_published_index_after_restart_preserves_snapshots_and_recovers_after_repair() {
     for damage in ["truncated", "missing", "invalid-utf8"] {
-        let root = TestRoot(std::env::temp_dir().join(format!(
-            "desigma-published-index-{}-{}", std::process::id(), desigma_library::new_id()
-        )));
+        let root = TestRoot(std::env::temp_dir().join(format!("desigma-published-index-{}-{}", std::process::id(), desigma_library::new_id())));
         let library = Library::open(&root.0).unwrap();
         assert_eq!(library.publish_library(LIBRARY_ID, &document("First", Color::rgb(255, 0, 0)), "First").unwrap().version, 1);
         assert_eq!(library.publish_library(LIBRARY_ID, &document("Second", Color::rgb(0, 0, 255)), "Second").unwrap().version, 2);
@@ -117,9 +114,7 @@ fn unavailable_published_index_after_restart_preserves_snapshots_and_recovers_af
 
 #[test]
 fn legacy_layout_remains_readable_and_preserves_metadata_when_next_publication_commits() {
-    let root = TestRoot(std::env::temp_dir().join(format!(
-        "desigma-legacy-publication-{}-{}", std::process::id(), desigma_library::new_id()
-    )));
+    let root = TestRoot(std::env::temp_dir().join(format!("desigma-legacy-publication-{}-{}", std::process::id(), desigma_library::new_id())));
     let dir = root.0.join("libraries").join(LIBRARY_ID);
     std::fs::create_dir_all(&dir).unwrap();
     let source = document("Legacy", Color::rgb(255, 0, 0));
@@ -152,9 +147,7 @@ fn legacy_layout_remains_readable_and_preserves_metadata_when_next_publication_c
 #[test]
 fn valid_json_with_invalid_history_or_orphan_snapshot_is_never_exposed_or_overwritten() {
     for damage in ["duplicate-version", "identity", "missing-snapshot", "snapshot-identity", "orphan"] {
-        let root = TestRoot(std::env::temp_dir().join(format!(
-            "desigma-publication-history-{}-{}", std::process::id(), desigma_library::new_id()
-        )));
+        let root = TestRoot(std::env::temp_dir().join(format!("desigma-publication-history-{}-{}", std::process::id(), desigma_library::new_id())));
         let lib = Library::open(&root.0).unwrap();
         lib.publish_library(LIBRARY_ID, &document("First", Color::rgb(255, 0, 0)), "First").unwrap();
         let dir = root.0.join("libraries").join(LIBRARY_ID);
@@ -162,8 +155,9 @@ fn valid_json_with_invalid_history_or_orphan_snapshot_is_never_exposed_or_overwr
             "duplicate-version" | "identity" => {
                 let path = dir.join("index.json");
                 let mut index: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-                if damage == "identity" { index["id"] = "other-library".into(); }
-                else {
+                if damage == "identity" {
+                    index["id"] = "other-library".into();
+                } else {
                     let entry = index["versions"][0].clone();
                     index["versions"].as_array_mut().unwrap().push(entry);
                 }

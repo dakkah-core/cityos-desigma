@@ -11,7 +11,9 @@ pub struct CityosHistoryStep {
 }
 
 impl CityosHistoryStep {
-    pub fn source(&self) -> &Value { &self.source }
+    pub fn source(&self) -> &Value {
+        &self.source
+    }
     pub fn target(&self) -> &Value {
         match self.transition.command() {
             Command::CityosInstall { document } => document.cityos.as_ref().unwrap().exchange().unwrap(),
@@ -32,9 +34,13 @@ impl CityosHistory for History {
         let Command::CityosInstall { document } = transition.command() else { return Err(DocError::CityosProtected) };
         let source = doc.cityos.as_ref().ok_or(DocError::CityosProtected)?;
         let target = document.cityos.as_ref().ok_or(DocError::CityosProtected)?;
-        if source.validate().is_err() || target.validate().is_err() || source.base != target.base
-            || source.semantic_base != target.semantic_base || source.draft_id != target.draft_id
-            || source.document_id != target.document_id {
+        if source.validate().is_err()
+            || target.validate().is_err()
+            || source.base != target.base
+            || source.semantic_base != target.semantic_base
+            || source.draft_id != target.draft_id
+            || source.document_id != target.document_id
+        {
             return Err(DocError::CityosProtected);
         }
         let source_binding = serde_json::to_value(source).map_err(|_| DocError::CityosProtected)?;
@@ -49,7 +55,9 @@ impl CityosHistory for History {
     }
 
     fn commit_cityos(&mut self, doc: &mut Document, step: CityosHistoryStep, validated: Document) -> Result<(), DocError> {
-        if !self.cityos_step_current(doc, &step) { return Err(DocError::CityosProtected) }
+        if !self.cityos_step_current(doc, &step) {
+            return Err(DocError::CityosProtected);
+        }
         let next = validated.cityos.as_ref().and_then(|binding| binding.exchange()).ok_or(DocError::CityosProtected)?;
         let revision = step.source["draftRevision"].as_u64().and_then(|r| r.checked_add(1)).ok_or(DocError::CityosProtected)?;
         if next["draftRevision"].as_u64() != Some(revision) || next["semanticDraft"] != step.target()["semanticDraft"] {
@@ -71,9 +79,14 @@ mod tests {
         document.add_page("P");
         let base = json!({"id":"frame","root":{"props":{"elevation":"flat"}}});
         document.cityos = Some(CityosBinding {
-            schema_version: "cityos.design-exchange.v2".into(), document_id: "document".into(), draft_id: "draft".into(),
+            schema_version: "cityos.design-exchange.v2".into(),
+            document_id: "document".into(),
+            draft_id: "draft".into(),
             base: CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
-            semantic_base: base.clone(), dependency_pins: vec![], occurrences: BTreeMap::new(), exchange_v3: None,
+            semantic_base: base.clone(),
+            dependency_pins: vec![],
+            occurrences: BTreeMap::new(),
+            exchange_v3: None,
             exchange_v2: Some(json!({"schemaVersion":"cityos.design-exchange.v2","documentId":"document","draftId":"draft",
                 "base":{"kind":"canonical-git","repositoryId":"repo","commit":"a".repeat(40)},
                 "semanticBase":base,"semanticDraft":base,"draftRevision":0,"semanticDigest":"base"})),

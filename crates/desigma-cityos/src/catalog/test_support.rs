@@ -43,7 +43,9 @@ pub(super) fn captured_browser(services: CatalogUiServices) -> (Browser, Sender<
 pub(super) fn services() -> CatalogUiServices {
     CatalogUiServices {
         style: test_style,
-        record: |ui, name, rect| { ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new(("test-rect", name.to_string())), rect)); },
+        record: |ui, name, rect| {
+            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new(("test-rect", name.to_string())), rect));
+        },
         specimen_renderer: |_| Box::new(TestRenderer),
         pick_repository: || None,
         pick_reader: || None,
@@ -52,14 +54,18 @@ pub(super) fn services() -> CatalogUiServices {
 #[cfg(test)]
 struct TestRenderer;
 #[cfg(test)]
-impl SpecimenRenderer for TestRenderer { fn show(&mut self, _ui: &mut egui::Ui) {} }
+impl SpecimenRenderer for TestRenderer {
+    fn show(&mut self, _ui: &mut egui::Ui) {}
+}
 
 // Snapshot of chrome inputs for package UI tests; production styles always
 // come from the host. Preserve the desktop's premultiplied color channels.
 #[cfg(test)]
 fn test_style() -> CatalogStyle {
     use egui::Color32;
-    const fn rgb(c: u32) -> Color32 { Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8) }
+    const fn rgb(c: u32) -> Color32 {
+        Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+    }
     const fn rgba(c: u32, a: u8) -> Color32 {
         let r = ((c >> 16) & 0xFF) * a as u32 / 255;
         let g = ((c >> 8) & 0xFF) * a as u32 / 255;

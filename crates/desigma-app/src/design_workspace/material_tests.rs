@@ -31,8 +31,7 @@ fn document(material: &str) -> Document {
 
 fn workspace() -> (Workspace, std::sync::mpsc::Receiver<Value>, std::sync::mpsc::Sender<Result<Value, String>>) {
     let (bridge, requests, responses) = bridge::Bridge::test_transport();
-    let workspace = Workspace { bridge:Some(bridge), validated:true, themes_loaded:true,
-        resource:Some(resource()), ..Default::default() };
+    let workspace = Workspace { bridge: Some(bridge), validated: true, themes_loaded: true, resource: Some(resource()), ..Default::default() };
     (workspace, requests, responses)
 }
 
@@ -81,7 +80,8 @@ fn assert_ignored(workspace: &mut Workspace, app: &mut App, event: &Value) {
 #[test]
 fn current_material_observations_update_telemetry_without_authoring_native_paints_or_history() {
     for material in ["ambient", "glass", "raised", "trust"] {
-        let mut app = App::new(document("ambient")); app.home = None;
+        let mut app = App::new(document("ambient"));
+        app.home = None;
         let (mut workspace, _requests, _responses) = workspace();
         let receipt = prepared(&workspace, &app.doc);
         workspace.preview = Some(receipt.clone());
@@ -93,10 +93,17 @@ fn current_material_observations_update_telemetry_without_authoring_native_paint
         workspace.handle_preview_event(&mut app, &event);
         assert!(workspace.current && workspace.render_started.is_none());
         let preview = workspace.preview.as_ref().unwrap();
-        for (observed, field) in [("observedMaterial", "material"), ("observedBackground", "background"),
-            ("observedBorder", "border"), ("observedBackdrop", "backdrop"), ("observedElevation", "elevation"),
-            ("observedViewport", "viewport"), ("observedShadow", "shadow"),
-            ("observedThemePrimary", "themePrimary"), ("observedThemePage", "themePage")] {
+        for (observed, field) in [
+            ("observedMaterial", "material"),
+            ("observedBackground", "background"),
+            ("observedBorder", "border"),
+            ("observedBackdrop", "backdrop"),
+            ("observedElevation", "elevation"),
+            ("observedViewport", "viewport"),
+            ("observedShadow", "shadow"),
+            ("observedThemePrimary", "themePrimary"),
+            ("observedThemePage", "themePage"),
+        ] {
             assert_eq!(preview[observed], event[field], "{observed}");
         }
         assert_eq!(app.doc.to_json().unwrap(), before, "CSS observations cannot author a native material");
@@ -110,7 +117,8 @@ fn current_material_observations_update_telemetry_without_authoring_native_paint
 fn stale_rendered_material_cannot_cross_any_receipt_fence_or_replace_previous_observations() {
     for current in [false, true] {
         for key in ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"] {
-            let mut app = App::new(document("ambient")); app.home = None;
+            let mut app = App::new(document("ambient"));
+            app.home = None;
             let (mut workspace, _requests, _responses) = workspace();
             let receipt = prepared(&workspace, &app.doc);
             let accepted = rendered(&receipt, "ambient");
@@ -128,12 +136,19 @@ fn stale_rendered_material_cannot_cross_any_receipt_fence_or_replace_previous_ob
         }
     }
     // Compare the entire scenario, including fixed policy fields and dimensions.
-    for (pointer, value) in [("/target", json!("native")), ("/locale", json!("en")),
-        ("/theme", json!("dark")), ("/themeId", json!("other-theme")),
-        ("/viewport/width", json!(561)), ("/viewport/height", json!(721)),
-        ("/fixture", json!("other-fixture")), ("/renderMode", json!("interactive-fixture")),
-        ("/motion", json!("full"))] {
-        let mut app = App::new(document("ambient")); app.home = None;
+    for (pointer, value) in [
+        ("/target", json!("native")),
+        ("/locale", json!("en")),
+        ("/theme", json!("dark")),
+        ("/themeId", json!("other-theme")),
+        ("/viewport/width", json!(561)),
+        ("/viewport/height", json!(721)),
+        ("/fixture", json!("other-fixture")),
+        ("/renderMode", json!("interactive-fixture")),
+        ("/motion", json!("full")),
+    ] {
+        let mut app = App::new(document("ambient"));
+        app.home = None;
         let (mut workspace, _requests, _responses) = workspace();
         let receipt = prepared(&workspace, &app.doc);
         workspace.preview = Some(receipt.clone());
@@ -148,7 +163,8 @@ fn stale_rendered_material_cannot_cross_any_receipt_fence_or_replace_previous_ob
 fn matching_missing_empty_or_malformed_identities_do_not_acknowledge_material() {
     for key in ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"] {
         for bad in [Value::Null, json!(""), json!({})] {
-            let mut app = App::new(document("ambient")); app.home = None;
+            let mut app = App::new(document("ambient"));
+            app.home = None;
             let (mut workspace, _requests, _responses) = workspace();
             let mut receipt = prepared(&workspace, &app.doc);
             receipt[key] = bad;
@@ -167,7 +183,8 @@ fn matching_missing_empty_or_malformed_identities_do_not_acknowledge_material() 
 #[test]
 fn material_observations_are_fenced_by_live_scenario_and_active_document_scope() {
     for change in ["locale", "theme", "themeId", "viewport", "fixture", "renderMode", "draft", "revision", "digest"] {
-        let mut app = App::new(document("ambient")); app.home = None;
+        let mut app = App::new(document("ambient"));
+        app.home = None;
         let (mut workspace, _requests, _responses) = workspace();
         let receipt = prepared(&workspace, &app.doc);
         workspace.preview = Some(receipt.clone());
@@ -187,7 +204,8 @@ fn material_observations_are_fenced_by_live_scenario_and_active_document_scope()
         assert_ignored(&mut workspace, &mut app, &rendered(&receipt, "glass"));
     }
     // A temporary canonical preview belongs to staged, never the saved app tab.
-    let mut app = App::new(super::tests::tab_document("saved-tab")); app.home = None;
+    let mut app = App::new(super::tests::tab_document("saved-tab"));
+    app.home = None;
     let (mut workspace, _requests, _responses) = workspace();
     workspace.preview_only = true;
     workspace.staged = Some(document("trust"));
@@ -205,7 +223,8 @@ fn material_observations_are_fenced_by_live_scenario_and_active_document_scope()
 #[test]
 fn registered_specimen_material_observations_remain_inside_their_temporary_scope() {
     for fault in ["busy", "pending", "locator", "canonical", "scope"] {
-        let mut app = App::new(document("ambient")); app.home = None;
+        let mut app = App::new(document("ambient"));
+        app.home = None;
         let mut workspace = super::tests::specimen_workspace();
         let receipt = super::tests::specimen_receipt(&workspace);
         assert!(workspace.accept_specimen_preview(receipt.clone(), "FixturePreview"));
@@ -230,8 +249,12 @@ fn registered_specimen_material_observations_remain_inside_their_temporary_scope
 // The fixed protected node is an inspection fixture, not a native material renderer.
 fn command_reply(request: &Value, resource: &Value) -> Value {
     let mut next = request["draft"].clone();
-    let field = resource["fields"].as_array().unwrap().iter().find(|field|
-        field["nodeId"] == request["command"]["nodeId"] && field["property"] == request["command"]["property"]).unwrap();
+    let field = resource["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["nodeId"] == request["command"]["nodeId"] && field["property"] == request["command"]["property"])
+        .unwrap();
     *next["semanticDraft"].pointer_mut(field["sourcePointer"].as_str().unwrap()).unwrap() = request["command"]["value"].clone();
     let revision = next["draftRevision"].as_u64().unwrap() + 1;
     next["draftRevision"] = json!(revision);
@@ -251,7 +274,8 @@ fn dynamic_material_enum_dispatches_intent_and_undo_redo_wait_for_fresh_boundary
     assert_eq!(resource["fields"][0]["property"], "elevation");
     for option in field["values"].as_array().unwrap() {
         let original = if option.as_str() == Some("ambient") { "trust" } else { "ambient" };
-        let mut app = App::new(document(original)); app.home = None;
+        let mut app = App::new(document(original));
+        app.home = None;
         let (mut workspace, requests, responses) = workspace();
         let before = app.doc.to_json().unwrap();
         let history = serde_json::to_value(&app.hist).unwrap();
@@ -267,7 +291,8 @@ fn dynamic_material_enum_dispatches_intent_and_undo_redo_wait_for_fresh_boundary
         assert_eq!(&edit["command"]["value"], option);
         assert_eq!(app.doc.to_json().unwrap(), before);
         assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
-        responses.send(Ok(command_reply(&edit, &resource))).unwrap(); workspace.poll(&mut app);
+        responses.send(Ok(command_reply(&edit, &resource))).unwrap();
+        workspace.poll(&mut app);
         assert!(workspace.error.is_none(), "{:?}", workspace.error);
         assert_eq!(draft(&app.doc).unwrap()["semanticDraft"].pointer(MATERIAL).unwrap(), option);
         assert_eq!(draft(&app.doc).unwrap()["semanticBase"].pointer(MATERIAL).unwrap(), original);
@@ -275,7 +300,11 @@ fn dynamic_material_enum_dispatches_intent_and_undo_redo_wait_for_fresh_boundary
         for (redo, expected, revision) in [(false, json!(original), 2), (true, option.clone(), 3)] {
             let before = app.doc.to_json().unwrap();
             let history = serde_json::to_value(&app.hist).unwrap();
-            if redo { app.redo(); } else { app.undo(); }
+            if redo {
+                app.redo();
+            } else {
+                app.undo();
+            }
             assert_eq!(app.doc.to_json().unwrap(), before);
             workspace.poll(&mut app);
             let request = requests.try_recv().unwrap();
@@ -286,7 +315,8 @@ fn dynamic_material_enum_dispatches_intent_and_undo_redo_wait_for_fresh_boundary
             assert_eq!(request["command"]["value"], expected);
             assert_eq!(request["command"]["expectedRevision"], revision - 1);
             assert_ne!(request["command"]["operationId"], edit["command"]["operationId"]);
-            responses.send(Ok(command_reply(&request, &resource))).unwrap(); workspace.poll(&mut app);
+            responses.send(Ok(command_reply(&request, &resource))).unwrap();
+            workspace.poll(&mut app);
             assert!(workspace.error.is_none(), "{:?}", workspace.error);
             let next = draft(&app.doc).unwrap();
             assert_eq!(next["draftRevision"], revision);
@@ -304,23 +334,27 @@ fn blocked_or_rejected_material_edits_leave_the_bound_document_and_history_uncha
     let resource = resource();
     let field = &resource["fields"][1];
     for fault in ["busy", "unvalidated", "selection", "frozen", "boundary-rejection"] {
-        let mut app = App::new(document("ambient")); app.home = None;
+        let mut app = App::new(document("ambient"));
+        app.home = None;
         let (mut workspace, requests, responses) = workspace();
         match fault {
             "busy" => workspace.busy = Some("Command".into()),
             "unvalidated" => workspace.validated = false,
             "selection" => workspace.selected = "frame".into(),
             "frozen" => app.ui.cityos_frozen_draft = Some(draft(&app.doc).unwrap()["draftId"].as_str().unwrap().into()),
-            _ => {},
+            _ => {}
         }
         let before = app.doc.to_json().unwrap();
         let history = serde_json::to_value(&app.hist).unwrap();
         workspace.send_property_command(&app, field, json!("glass"));
         if fault == "boundary-rejection" {
             assert_eq!(requests.try_recv().unwrap()["command"]["value"], "glass");
-            responses.send(Err("DESIGN_FIELD_UNSUPPORTED".into())).unwrap(); workspace.poll(&mut app);
+            responses.send(Err("DESIGN_FIELD_UNSUPPORTED".into())).unwrap();
+            workspace.poll(&mut app);
             assert_eq!(workspace.error.as_deref(), Some("DESIGN_FIELD_UNSUPPORTED"));
-        } else { assert!(requests.try_recv().is_err(), "{fault}"); }
+        } else {
+            assert!(requests.try_recv().is_err(), "{fault}");
+        }
         assert_eq!(app.doc.to_json().unwrap(), before, "{fault}");
         assert_eq!(serde_json::to_value(&app.hist).unwrap(), history, "{fault}");
     }
@@ -332,11 +366,13 @@ fn native_save_reopen_preserves_material_intent_baseline_and_binding() {
     let field = &resource["fields"][1];
     for material in field["values"].as_array().unwrap() {
         let original = if material.as_str() == Some("ambient") { "trust" } else { "ambient" };
-        let mut app = App::new(document(original)); app.home = None;
+        let mut app = App::new(document(original));
+        app.home = None;
         let (mut workspace, requests, responses) = workspace();
         workspace.send_property_command(&app, field, material.clone());
         let request = requests.try_recv().unwrap();
-        responses.send(Ok(command_reply(&request, &resource))).unwrap(); workspace.poll(&mut app);
+        responses.send(Ok(command_reply(&request, &resource))).unwrap();
+        workspace.poll(&mut app);
         assert!(workspace.error.is_none());
         let path = std::env::temp_dir().join(format!("desigma-material-{}.desigma", uuid::Uuid::new_v4()));
         let saved = crate::io::save_path(&app.doc, &path).unwrap();

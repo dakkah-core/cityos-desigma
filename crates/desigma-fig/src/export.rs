@@ -340,11 +340,9 @@ fn export_node(doc: &Document, id: NodeId, parent_abs: Option<&Affine>, depth: u
         NodeKind::Table(_) => "TABLE",
         NodeKind::TableCell(_) => "TABLE_CELL",
         NodeKind::Unknown { type_name } => type_name.as_str(),
-        NodeKind::Sticky(_)
-        | NodeKind::Connector(_)
-        | NodeKind::ShapeWithText(_)
-        | NodeKind::Stamp { .. }
-        | NodeKind::CodeBlock(_) => crate::board::type_name(&node.kind).unwrap_or("SECTION"),
+        NodeKind::Sticky(_) | NodeKind::Connector(_) | NodeKind::ShapeWithText(_) | NodeKind::Stamp { .. } | NodeKind::CodeBlock(_) => {
+            crate::board::type_name(&node.kind).unwrap_or("SECTION")
+        }
     };
     m.insert("type".into(), ty.into());
     crate::variables::export_node_variables(node, &mut m);

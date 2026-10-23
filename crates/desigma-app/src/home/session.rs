@@ -55,8 +55,13 @@ impl Autosave {
     pub(crate) fn history_hash(history: &History) -> Result<u64, String> {
         struct Sink(std::collections::hash_map::DefaultHasher);
         impl std::io::Write for Sink {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.write(bytes); Ok(bytes.len()) }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.write(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
         let mut sink = Sink(Default::default());
         serde_json::to_writer(&mut sink, history).map_err(|error| format!("Cannot compare undo history: {error}"))?;
@@ -66,12 +71,23 @@ impl Autosave {
     pub(crate) fn library_checkpoint(rev: u64, doc: &Document, history: &History, fingerprint: String) -> Result<Self, String> {
         let hash = Self::history_hash(history)?;
         let identity = history.change_identity();
-        Ok(Self { seen_rev: rev, saved_hash: doc_hash(doc), saved_history_hash: Some(hash),
-            seen_history: Some(identity.clone()), checked_history: Some((identity, hash)),
-            saved_checkpoint_fingerprint: Some(fingerprint), ..Default::default() })
+        Ok(Self {
+            seen_rev: rev,
+            saved_hash: doc_hash(doc),
+            saved_history_hash: Some(hash),
+            seen_history: Some(identity.clone()),
+            checked_history: Some((identity, hash)),
+            saved_checkpoint_fingerprint: Some(fingerprint),
+            ..Default::default()
+        })
     }
 
-    pub(crate) fn created_library_checkpoint(rev: u64, doc: &Document, history: &History, mut checkpoint: desigma_doc::DocumentCheckpoint) -> Result<Self, String> {
+    pub(crate) fn created_library_checkpoint(
+        rev: u64,
+        doc: &Document,
+        history: &History,
+        mut checkpoint: desigma_doc::DocumentCheckpoint,
+    ) -> Result<Self, String> {
         let fingerprint = desigma_library::checkpoint_fingerprint(&checkpoint).map_err(|error| error.to_string())?;
         // A fresh load may observe a competing writer. Never attach that writer's
         // expectation to our older candidate; only entry-name normalization is local.
@@ -110,9 +126,13 @@ pub(crate) fn doc_hash(doc: &Document) -> u64 {
     if doc.cityos.as_ref().is_some_and(|binding| binding.exchange().is_some() && binding.validate().is_ok()) {
         let mut value = serde_json::to_value(doc).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
-            for key in ["nodes", "pages", "next_id"] { object.remove(key); }
+            for key in ["nodes", "pages", "next_id"] {
+                object.remove(key);
+            }
         }
-        if let Some(binding) = value["cityos"].as_object_mut() { binding.remove("occurrences"); }
+        if let Some(binding) = value["cityos"].as_object_mut() {
+            binding.remove("occurrences");
+        }
         value.to_string().hash(&mut h);
     } else {
         doc.to_json().unwrap_or_default().hash(&mut h);
@@ -122,17 +142,24 @@ pub(crate) fn doc_hash(doc: &Document) -> u64 {
 
 impl App {
     pub(crate) fn persist_library_checkpoint(&self, doc: &Document, history: &History) -> Result<Autosave, String> {
-        let (Some(lib), Some(file)) = (&self.lib, &self.lib_file) else { return Err("This file is not in the library".into()); };
+        let (Some(lib), Some(file)) = (&self.lib, &self.lib_file) else {
+            return Err("This file is not in the library".into());
+        };
         let expected = self.autosave.saved_checkpoint_fingerprint.as_deref().ok_or("This library file has no observed checkpoint; reopen it before saving")?;
         let mut saved = Autosave::library_checkpoint(self.canvas.tiles.rev(), doc, history, expected.to_owned())?;
-        saved.saved_checkpoint_fingerprint = Some(lib.save_file_with_history_expected(&file.id, doc, history, expected).map_err(|error| format!("Cannot save: {error}"))?);
+        saved.saved_checkpoint_fingerprint =
+            Some(lib.save_file_with_history_expected(&file.id, doc, history, expected).map_err(|error| format!("Cannot save: {error}"))?);
         saved.saves = self.autosave.saves;
         Ok(saved)
     }
 
     fn autosave_target_changed(&mut self) -> Result<bool, String> {
-        if doc_hash(&self.doc) != self.autosave.saved_hash { return Ok(true); }
-        if self.lib_file.is_some() { return self.autosave.history_changed(&self.hist); }
+        if doc_hash(&self.doc) != self.autosave.saved_hash {
+            return Ok(true);
+        }
+        if self.lib_file.is_some() {
+            return self.autosave.history_changed(&self.hist);
+        }
         Ok(false)
     }
 
@@ -140,10 +167,15 @@ impl App {
     /// the path never supplies an expected generation from current disk contents.
     pub(crate) fn is_current_external_target(&self, path: &Path) -> bool {
         let mut target = path.to_path_buf();
-        if target.extension().is_none() { target.set_extension(crate::io::NATIVE_EXT); }
+        if target.extension().is_none() {
+            target.set_extension(crate::io::NATIVE_EXT);
+        }
         self.file_path.as_ref().is_some_and(|current| {
-            current == &target || std::fs::canonicalize(current).ok().zip(std::fs::canonicalize(&target).ok())
-                .is_some_and(|(left, right)| left == right || cfg!(windows) && left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy()))
+            current == &target
+                || std::fs::canonicalize(current)
+                    .ok()
+                    .zip(std::fs::canonicalize(&target).ok())
+                    .is_some_and(|(left, right)| left == right || cfg!(windows) && left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy()))
         })
     }
 
@@ -170,15 +202,19 @@ impl App {
 
     /// Persistent bound files use the same save/dirty rules inside and outside the library.
     fn save_autosave_target(&mut self) -> Result<(), String> {
-        if self.lib_file.is_some() { return self.save_library_file(); }
-        self.file_path.as_ref().filter(|p| self.doc.cityos.is_some()
-            && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
+        if self.lib_file.is_some() {
+            return self.save_library_file();
+        }
+        self.file_path
+            .as_ref()
+            .filter(|p| self.doc.cityos.is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
             .ok_or("Save this draft to the library or a native file first")?;
         self.save_current_external()
     }
     fn has_autosave_target(&self) -> bool {
-        self.lib_file.is_some() || self.doc.cityos.is_some() && self.file_path.as_ref()
-            .is_some_and(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
+        self.lib_file.is_some()
+            || self.doc.cityos.is_some()
+                && self.file_path.as_ref().is_some_and(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::io::NATIVE_EXT)))
     }
     /// Opens (or creates) the library at `root` and seeds it on first run.
     pub fn attach_library(&mut self, root: PathBuf) {
@@ -209,7 +245,9 @@ impl App {
             return;
         };
         crate::decks::ui::flush_notes(self);
-        if !self.flush_autosave(){return;}
+        if !self.flush_autosave() {
+            return;
+        }
         self.save_close_version();
         self.stop_plugin();
         self.canvas.reset_interaction();
@@ -226,7 +264,9 @@ impl App {
         // Observe our own pending save before loading its successor checkpoint.
         if self.lib_file.as_ref().is_some_and(|file| file.id == id) {
             self.exit_version_view();
-            if !self.flush_autosave() { return; }
+            if !self.flush_autosave() {
+                return;
+            }
         }
         let loaded = lib.file(id).and_then(|e| {
             let (checkpoint, missing) = lib.load_checkpoint_for_recovery_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, id)?;
@@ -244,10 +284,15 @@ impl App {
         doc.name = entry.name.clone();
         let autosave = match Autosave::library_checkpoint(self.canvas.tiles.rev(), &doc, &history, fingerprint) {
             Ok(autosave) => autosave,
-            Err(error) => { self.show_toast(error, true); return; }
+            Err(error) => {
+                self.show_toast(error, true);
+                return;
+            }
         };
         let needs_thumb = lib.thumbnail_path(&entry).is_none();
-        if !self.replace_document(doc, None){return;}
+        if !self.replace_document(doc, None) {
+            return;
+        }
         self.hist = history;
         self.lib_file = Some(LibFile { id: entry.id.clone(), project_id: entry.project.clone(), project, name: entry.name.clone() });
         self.autosave = autosave;
@@ -256,7 +301,9 @@ impl App {
         let _ = lib.mark_opened(id);
         self.home = None;
         self.ui.menu = None;
-        if !missing.is_empty() { self.show_toast(format!("Recovered draft. {} dependencies must be verified before editing or export.",missing.len()),true); }
+        if !missing.is_empty() {
+            self.show_toast(format!("Recovered draft. {} dependencies must be verified before editing or export.", missing.len()), true);
+        }
         if needs_thumb {
             thumb::refresh_in_background(lib, entry.id, self.export_doc().into_owned());
         }
@@ -282,7 +329,9 @@ impl App {
     }
 
     fn new_library_file_of(&mut self, target: Option<(String, Option<String>)>, kind: DocumentKind) {
-        if !self.flush_autosave(){return;}
+        if !self.flush_autosave() {
+            return;
+        }
         let Some(lib) = self.lib.clone() else {
             if kind == DocumentKind::Board {
                 self.new_board_document();
@@ -363,8 +412,8 @@ impl App {
         if self.has_autosave_target() {
             let result = self.autosave_target_changed().and_then(|changed| if changed { self.save_autosave_target() } else { Ok(()) });
             if let Err(e) = result {
-                self.autosave.changed_at=Some(self.now);
-                self.autosave.confirmed=true;
+                self.autosave.changed_at = Some(self.now);
+                self.autosave.confirmed = true;
                 self.show_toast(e, true);
                 return false;
             }
@@ -389,9 +438,9 @@ impl App {
             self.autosave.confirmed = false;
         }
         let Some(t) = self.autosave.changed_at else { return };
-        if let Some(at)=self.autosave.retry_at {
-            if self.now<at {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at-self.now).min(5.)));
+        if let Some(at) = self.autosave.retry_at {
+            if self.now < at {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at - self.now).min(5.)));
                 return;
             }
         }
@@ -402,23 +451,29 @@ impl App {
         } else if !self.autosave.confirmed && self.now - t >= PROBE_DELAY {
             // Cheap-ish check once the revision settled: did the document really change?
             match self.autosave_target_changed() {
-                Ok(false) => { self.autosave.changed_at = None; return; }
+                Ok(false) => {
+                    self.autosave.changed_at = None;
+                    return;
+                }
                 Ok(true) => {}
-                Err(error) => { self.show_toast(error, true); return; }
+                Err(error) => {
+                    self.show_toast(error, true);
+                    return;
+                }
             }
             self.autosave.confirmed = true;
-        } else if self.autosave.confirmed && self.now - t >= if self.doc.cityos.is_some(){2.0}else{AUTOSAVE_IDLE} {
+        } else if self.autosave.confirmed && self.now - t >= if self.doc.cityos.is_some() { 2.0 } else { AUTOSAVE_IDLE } {
             match self.autosave_target_changed() {
                 Ok(true) => match self.save_autosave_target() {
                     Ok(()) => self.autosave.saves += 1,
                     Err(e) => {
-                        self.autosave.changed_at=Some(self.now);
-                        self.autosave.failures=self.autosave.failures.saturating_add(1);
-                        let backoff=(2_u64 << self.autosave.failures.saturating_sub(1).min(4)).min(30);
-                        self.autosave.retry_at=Some(self.now+backoff as f64);
+                        self.autosave.changed_at = Some(self.now);
+                        self.autosave.failures = self.autosave.failures.saturating_add(1);
+                        let backoff = (2_u64 << self.autosave.failures.saturating_sub(1).min(4)).min(30);
+                        self.autosave.retry_at = Some(self.now + backoff as f64);
                         self.show_toast(e, true);
                         ctx.request_repaint_after(std::time::Duration::from_secs(backoff));
-                    },
+                    }
                 },
                 Ok(false) => self.autosave.changed_at = None,
                 Err(error) => self.show_toast(error, true),
@@ -455,11 +510,16 @@ impl App {
         match lib.create_file_with_history(project, folder, name, &doc, &self.hist) {
             Ok(e) => {
                 doc.name = e.name.clone();
-                let autosave = lib.load_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &e.id).map_err(|error| error.to_string())
+                let autosave = lib
+                    .load_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &e.id)
+                    .map_err(|error| error.to_string())
                     .and_then(|checkpoint| Autosave::created_library_checkpoint(self.canvas.tiles.rev(), &doc, &self.hist, checkpoint));
                 let autosave = match autosave {
                     Ok(autosave) => autosave,
-                    Err(error) => { self.show_toast(format!("File created, but its checkpoint could not be observed: {error}"), true); return; }
+                    Err(error) => {
+                        self.show_toast(format!("File created, but its checkpoint could not be observed: {error}"), true);
+                        return;
+                    }
                 };
                 self.doc.name = e.name.clone();
                 let project_name = lib.project(project).map(|p| p.name).unwrap_or_default();

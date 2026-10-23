@@ -48,7 +48,9 @@ impl App {
             Some(v) => v.saved,
             None => {
                 // edits still waiting for the autosave must be on disk before the live document is parked
-                if !self.flush_autosave(){return;}
+                if !self.flush_autosave() {
+                    return;
+                }
                 self.take_snapshot()
             }
         };
@@ -75,8 +77,7 @@ impl App {
                 return;
             }
         };
-        if self.doc.cityos.is_some() || old.cityos.is_some()
-            || self.history.viewing.as_ref().is_some_and(|view| view.saved.doc.cityos.is_some()) {
+        if self.doc.cityos.is_some() || old.cityos.is_some() || self.history.viewing.as_ref().is_some_and(|view| view.saved.doc.cityos.is_some()) {
             self.show_toast("Bound drafts require their reviewed baseline recovery; ordinary version restore is unavailable", true);
             return;
         }
@@ -98,7 +99,10 @@ impl App {
         }
         let saved = match self.persist_library_checkpoint(&document, &history) {
             Ok(saved) => saved,
-            Err(e) => { self.show_toast(format!("Cannot restore; current document retained: {e}"),true); return; }
+            Err(e) => {
+                self.show_toast(format!("Cannot restore; current document retained: {e}"), true);
+                return;
+            }
         };
         self.install(document, history, Some(self.page), vec![]);
         self.history.dirty = true;
@@ -134,11 +138,19 @@ impl App {
         let saved = if self.lib_file.is_some() {
             match self.persist_library_checkpoint(&document, &history) {
                 Ok(saved) => Some(saved),
-                Err(error) => { self.show_toast(format!("Cannot {action} restore: {error}"), true); return true; }
+                Err(error) => {
+                    self.show_toast(format!("Cannot {action} restore: {error}"), true);
+                    return true;
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
         self.install(document, history, Some(self.page), self.selection.clone());
-        if let Some(saved) = saved { self.autosave = saved; self.autosave.seen_rev = self.canvas.tiles.rev(); }
+        if let Some(saved) = saved {
+            self.autosave = saved;
+            self.autosave.seen_rev = self.canvas.tiles.rev();
+        }
         true
     }
 }

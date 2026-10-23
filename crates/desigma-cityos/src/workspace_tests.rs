@@ -3,12 +3,10 @@
 
 use crate::bridge::Bridge;
 use crate::draft::{binding, draft, revision};
-use crate::editor::{
-    BaselineInstall, BaselineRecovery, EditorHost, EditorSession, EditorStatus,
-};
+use crate::editor::{BaselineInstall, BaselineRecovery, EditorHost, EditorSession, EditorStatus};
+use crate::history::{CityosHistory, CityosHistoryStep};
 use crate::workspace::{DraftTab, Workspace};
 use desigma_doc::{Command, Document, DocumentCheckpoint, History};
-use crate::history::{CityosHistory, CityosHistoryStep};
 use desigma_library::{SubmissionCommand, SubmissionRecord, SubmissionState};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -60,12 +58,11 @@ impl FakeSession {
         let mut session = Self::from_document(file_id, fixture_document(draft_id, 0, "flat"));
         session.path = Some(PathBuf::from(format!("{file_id}.desigma")));
         for (revision, elevation) in [(1, "resting"), (2, "raised")] {
-            session.checkpoint.history.exec(
-                &mut session.checkpoint.document,
-                Command::CityosInstall {
-                    document: Box::new(fixture_document(draft_id, revision, elevation)),
-                },
-            ).unwrap();
+            session
+                .checkpoint
+                .history
+                .exec(&mut session.checkpoint.document, Command::CityosInstall { document: Box::new(fixture_document(draft_id, revision, elevation)) })
+                .unwrap();
         }
         session.checkpoint.history.undo(&mut session.checkpoint.document).unwrap();
         assert!(session.checkpoint.history.can_undo());
@@ -87,8 +84,12 @@ impl FakeSession {
 }
 
 impl EditorSession for FakeSession {
-    fn name(&self) -> &str { &self.checkpoint.document.name }
-    fn file_id(&self) -> Option<&str> { Some(&self.file_id) }
+    fn name(&self) -> &str {
+        &self.checkpoint.document.name
+    }
+    fn file_id(&self) -> Option<&str> {
+        Some(&self.file_id)
+    }
 }
 
 struct PendingBaseline {
@@ -133,7 +134,9 @@ impl EditorHost for FakeHost {
     type Canvas = Document;
     type CanvasState = ();
 
-    fn document(&self) -> &Document { &self.active.checkpoint.document }
+    fn document(&self) -> &Document {
+        &self.active.checkpoint.document
+    }
     fn status(&self) -> EditorStatus {
         EditorStatus {
             library_available: true,
@@ -149,38 +152,64 @@ impl EditorHost for FakeHost {
     }
     fn save_before_switch(&mut self) -> Result<(), String> {
         self.calls.push(Call::SaveBeforeSwitch);
-        if self.reject_preflight { Err("preflight save rejected".into()) } else { Ok(()) }
+        if self.reject_preflight {
+            Err("preflight save rejected".into())
+        } else {
+            Ok(())
+        }
     }
     fn save_to_draft_library(&mut self) -> Result<(), String> {
         Err("unexpected external library save".into())
     }
     fn replace_session(&mut self, document: Document, path: Option<PathBuf>) -> Result<Self::Session, String> {
         self.calls.push(Call::ReplaceSession);
-        if self.reject_transfer { return Err("final outgoing save rejected".into()); }
+        if self.reject_transfer {
+            return Err("final outgoing save rejected".into());
+        }
         let mut incoming = FakeSession::from_document("replacement-file", document);
         incoming.path = path;
         Ok(std::mem::replace(&mut self.active, incoming))
     }
     fn swap_session(&mut self, incoming: &mut Option<Self::Session>) -> Result<Self::Session, String> {
         self.calls.push(Call::SwapSession);
-        if self.reject_transfer { return Err("final outgoing save rejected".into()); }
+        if self.reject_transfer {
+            return Err("final outgoing save rejected".into());
+        }
         let incoming = incoming.take().ok_or("missing incoming session")?;
         Ok(std::mem::replace(&mut self.active, incoming))
     }
-    fn enter_document(&mut self) { self.calls.push(Call::EnterDocument); }
+    fn enter_document(&mut self) {
+        self.calls.push(Call::EnterDocument);
+    }
     fn open_files(&mut self) -> Result<(), String> {
         self.calls.push(Call::OpenFiles);
         Ok(())
     }
-    fn save(&mut self) { self.calls.push(Call::Save); }
-    fn undo(&mut self) { self.calls.push(Call::Undo); }
-    fn redo(&mut self) { self.calls.push(Call::Redo); }
-    fn open_dialog(&mut self) { panic!("unexpected external open dialog"); }
-    fn export_portable(&mut self) -> Result<(), String> { Err("unexpected portable export".into()) }
-    fn autosave_tick(&mut self, _ctx: &egui::Context) { panic!("unexpected native autosave"); }
-    fn flush_autosave(&mut self) -> bool { panic!("unexpected native autosave flush"); }
+    fn save(&mut self) {
+        self.calls.push(Call::Save);
+    }
+    fn undo(&mut self) {
+        self.calls.push(Call::Undo);
+    }
+    fn redo(&mut self) {
+        self.calls.push(Call::Redo);
+    }
+    fn open_dialog(&mut self) {
+        panic!("unexpected external open dialog");
+    }
+    fn export_portable(&mut self) -> Result<(), String> {
+        Err("unexpected portable export".into())
+    }
+    fn autosave_tick(&mut self, _ctx: &egui::Context) {
+        panic!("unexpected native autosave");
+    }
+    fn flush_autosave(&mut self) -> bool {
+        panic!("unexpected native autosave flush");
+    }
     fn toast(&mut self, _text: &str, _error: bool) {}
-    fn select_source(&mut self, source: &str) { self.active.selected = source.into(); }
+    fn select_source(&mut self, source: &str) {
+        self.active.selected = source.into();
+    }
 
     fn install_presentation(&mut self, document: Document) -> Result<(), String> {
         self.calls.push(Call::Presentation);
@@ -189,22 +218,23 @@ impl EditorHost for FakeHost {
     }
     fn install_edit(&mut self, document: Document) -> Result<(), String> {
         self.calls.push(Call::Edit);
-        self.active.checkpoint.history.exec(
-            &mut self.active.checkpoint.document,
-            Command::CityosInstall { document: Box::new(document) },
-        ).map_err(|error| error.to_string())?;
+        self.active
+            .checkpoint
+            .history
+            .exec(&mut self.active.checkpoint.document, Command::CityosInstall { document: Box::new(document) })
+            .map_err(|error| error.to_string())?;
         self.active.dirty = true;
         Ok(())
     }
-    fn take_history_request(&mut self) -> Option<CityosHistoryStep> { self.history_request.take() }
+    fn take_history_request(&mut self) -> Option<CityosHistoryStep> {
+        self.history_request.take()
+    }
     fn history_step_current(&self, step: &CityosHistoryStep) -> bool {
         self.active.checkpoint.history.cityos_step_current(self.document(), step)
     }
     fn install_history(&mut self, step: CityosHistoryStep, document: Document) -> Result<(), String> {
         self.calls.push(Call::History);
-        self.active.checkpoint.history.commit_cityos(
-            &mut self.active.checkpoint.document, step, document,
-        ).map_err(|error| error.to_string())
+        self.active.checkpoint.history.commit_cityos(&mut self.active.checkpoint.document, step, document).map_err(|error| error.to_string())
     }
     fn install_reviewed_baseline(&mut self, document: Document) -> Result<BaselineInstall, String> {
         self.calls.push(Call::ReviewedBaseline);
@@ -220,10 +250,7 @@ impl EditorHost for FakeHost {
         checkpoint.install_baseline(document);
         if self.uncertain_baseline {
             self.pending_baseline = Some(PendingBaseline { recovery: recovery.clone(), checkpoint });
-            return Ok(BaselineInstall::Uncertain {
-                recovery,
-                message: "durable write outcome requires exact readback".into(),
-            });
+            return Ok(BaselineInstall::Uncertain { recovery, message: "durable write outcome requires exact readback".into() });
         }
         self.active.checkpoint = checkpoint;
         self.active.dirty = false;
@@ -242,14 +269,24 @@ impl EditorHost for FakeHost {
         Ok(true)
     }
 
-    fn dependencies_complete(&self, _document: &Document, _validate_history: bool) -> Result<bool, String> { Ok(true) }
-    fn validate_history_dependencies(&self) -> Result<(), String> { Ok(()) }
+    fn dependencies_complete(&self, _document: &Document, _validate_history: bool) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn validate_history_dependencies(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn retain_dependencies(&self, _cache: &Path, _draft: &Value, _response: &Value) -> Result<(), String> {
         Err("unexpected dependency IO".into())
     }
-    fn submission_key(&self) -> Option<(PathBuf, String, String)> { None }
-    fn submissions(&self) -> Result<Vec<SubmissionRecord>, String> { Ok(Vec::new()) }
-    fn set_submission_frozen(&mut self, draft_id: Option<String>) { self.submission_frozen = draft_id; }
+    fn submission_key(&self) -> Option<(PathBuf, String, String)> {
+        None
+    }
+    fn submissions(&self) -> Result<Vec<SubmissionRecord>, String> {
+        Ok(Vec::new())
+    }
+    fn set_submission_frozen(&mut self, draft_id: Option<String>) {
+        self.submission_frozen = draft_id;
+    }
     fn recover_submission(&mut self, record: &SubmissionRecord) -> Result<bool, String> {
         self.calls.push(Call::RecoverSubmission);
         if self.retained_submission.as_ref() == Some(record) {
@@ -262,7 +299,9 @@ impl EditorHost for FakeHost {
     fn install_accepted(&mut self, _record: &SubmissionRecord, _document: Document) -> Result<(), String> {
         Err("unexpected accepted-submission install".into())
     }
-    fn temporary_canvas(document: Document) -> Self::Canvas { document }
+    fn temporary_canvas(document: Document) -> Self::Canvas {
+        document
+    }
     fn select_temporary_source(_canvas: &mut Self::Canvas, _source: &str) {}
     fn draw_canvas(&mut self, _ui: &mut egui::Ui, _native_scene: bool, _state: &mut ()) -> Option<String> {
         panic!("unexpected native canvas rendering");
@@ -321,7 +360,9 @@ fn transport(workspace: &mut Workspace<FakeHost>) -> (Receiver<Value>, Sender<Re
     (requests, responses)
 }
 
-fn property_field() -> Value { json!({"nodeId":"root", "property":"elevation"}) }
+fn property_field() -> Value {
+    json!({"nodeId":"root", "property":"elevation"})
+}
 
 #[test]
 fn redo_keyboard_chord_is_consumed_before_the_less_specific_undo_chord() {
@@ -333,13 +374,17 @@ fn redo_keyboard_chord_is_consumed_before_the_less_specific_undo_chord() {
         (egui::Modifiers::NONE, None),
     ] {
         let ctx = egui::Context::default();
-        let input = egui::RawInput {modifiers, events:vec![egui::Event::Key {
-            key:egui::Key::Z, physical_key:None, pressed:true, repeat:false, modifiers,
-        }], ..Default::default()};
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key { key: egui::Key::Z, physical_key: None, pressed: true, repeat: false, modifiers }],
+            ..Default::default()
+        };
         let mut observed = None;
         let _ = ctx.run_ui(input, |ui| {
             let step = ui.ctx().input_mut(take_shortcut);
-            if step.is_some() { observed = step; }
+            if step.is_some() {
+                observed = step;
+            }
             assert_eq!(ui.ctx().input_mut(take_shortcut), None, "one event cannot trigger both directions");
         });
         assert_eq!(observed, expected);
@@ -394,9 +439,18 @@ fn catalog_coverage_never_rebases_or_grants_capabilities_and_context_removal_cle
     let resource = workspace.resource.clone();
     let (requests, _) = transport(&mut workspace);
     let catalog = crate::catalog::CoverageObservation {
-        repository_id:"b".repeat(64), generation_id:"a".repeat(64), canonical_commit:"c".repeat(40),
-        reader_identity:"d".repeat(64), mode:"local".into(), accounting_complete:Some(false), stale:true,
-        source_occurrences:Some(500), library_records:Some(40), theme_records:Some(3), token_records:Some(31), levels:vec![],
+        repository_id: "b".repeat(64),
+        generation_id: "a".repeat(64),
+        canonical_commit: "c".repeat(40),
+        reader_identity: "d".repeat(64),
+        mode: "local".into(),
+        accounting_complete: Some(false),
+        stale: true,
+        source_occurrences: Some(500),
+        library_records: Some(40),
+        theme_records: Some(3),
+        token_records: Some(31),
+        levels: vec![],
     };
     workspace.set_catalog_coverage(Some(catalog.clone()));
     assert_eq!(workspace.coverage.catalog, Some(catalog));
@@ -548,8 +602,11 @@ fn accepted_record(document: &Document) -> SubmissionRecord {
         "details":{"syntheticFixture":true}
     });
     SubmissionRecord {
-        schema_version: "cityos.submission.v1".into(), command, request_digest,
-        state: SubmissionState::AcceptedSyncPending, outcome: Some(outcome),
+        schema_version: "cityos.submission.v1".into(),
+        command,
+        request_digest,
+        state: SubmissionState::AcceptedSyncPending,
+        outcome: Some(outcome),
     }
 }
 
@@ -576,10 +633,7 @@ fn rejected_final_session_switch_retains_active_and_incoming_owners() {
     assert_eq!(workspace.tabs.len(), 1);
     let retained = &workspace.tabs["incoming"];
     assert_eq!(retained.session.as_ref().unwrap().snapshot(), incoming_snapshot);
-    assert_eq!(
-        (retained.locale.as_str(), retained.theme.as_str(), retained.theme_id.as_str()),
-        ("en", "dark", "incoming-theme"),
-    );
+    assert_eq!((retained.locale.as_str(), retained.theme.as_str(), retained.theme_id.as_str()), ("en", "dark", "incoming-theme"),);
     assert!(retained.interactive);
     assert_eq!(workspace.resource, resource);
     assert_eq!((&*workspace.locale, &*workspace.theme), ("ar", "light"));
@@ -615,11 +669,18 @@ fn successful_session_switch_moves_history_and_restores_tab_metadata() {
     let incoming = FakeSession::seeded("incoming-file", "incoming");
     let incoming_snapshot = incoming.snapshot();
     let incoming_resource = json!({"resourceId":"incoming-resource"});
-    workspace.tabs.insert("incoming".into(), DraftTab {
-        session: Some(incoming), resource: Some(incoming_resource.clone()),
-        locale: "en".into(), theme: "dark".into(), theme_id: "incoming-theme".into(),
-        interactive: true, selected: "root".into(),
-    });
+    workspace.tabs.insert(
+        "incoming".into(),
+        DraftTab {
+            session: Some(incoming),
+            resource: Some(incoming_resource.clone()),
+            locale: "en".into(),
+            theme: "dark".into(),
+            theme_id: "incoming-theme".into(),
+            interactive: true,
+            selected: "root".into(),
+        },
+    );
 
     workspace.activate_tab(&mut host, "incoming");
 
@@ -769,7 +830,9 @@ fn recovery_reads_require_original_acceptance_and_yield_to_a_reviewed_baseline_f
         workspace.validated = false;
         if reviewed_baseline {
             workspace.baseline_recovery = Some(BaselineRecovery {
-                file_id: "active-file".into(), draft_id: "active".into(), revision: 4,
+                file_id: "active-file".into(),
+                draft_id: "active".into(),
+                revision: 4,
                 semantic_digest: "c".repeat(64),
                 binding_digest: "d".repeat(64),
             });
@@ -825,11 +888,16 @@ fn uncertain_reviewed_baseline_fences_commands_switches_and_leaving_until_exact_
     let (requests, _responses) = transport(&mut workspace);
     assert_recovery_fences(&mut workspace, &mut host, &requests);
 
-    let mut wrong_file = expected.clone(); wrong_file.file_id = "different-file".into();
-    let mut wrong_draft = expected.clone(); wrong_draft.draft_id = "different-draft".into();
-    let mut wrong_revision = expected.clone(); wrong_revision.revision += 1;
-    let mut wrong_digest = expected.clone(); wrong_digest.semantic_digest = "c".repeat(64);
-    let mut wrong_binding = expected.clone(); wrong_binding.binding_digest = "d".repeat(64);
+    let mut wrong_file = expected.clone();
+    wrong_file.file_id = "different-file".into();
+    let mut wrong_draft = expected.clone();
+    wrong_draft.draft_id = "different-draft".into();
+    let mut wrong_revision = expected.clone();
+    wrong_revision.revision += 1;
+    let mut wrong_digest = expected.clone();
+    wrong_digest.semantic_digest = "c".repeat(64);
+    let mut wrong_binding = expected.clone();
+    wrong_binding.binding_digest = "d".repeat(64);
     let rejected_readbacks = [None, Some(wrong_file), Some(wrong_draft), Some(wrong_revision), Some(wrong_digest), Some(wrong_binding)];
     let rejected_count = rejected_readbacks.len();
     for (attempt, readback) in rejected_readbacks.into_iter().enumerate() {

@@ -339,7 +339,11 @@ pub fn install(root: &Path, input: &str) -> Result<InstalledPlugin, String> {
 }
 
 fn check_size(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-    if bytes.len() > MAX_BYTES { Err("Plugin files must be no larger than 2 MiB each.".into()) } else { Ok(bytes) }
+    if bytes.len() > MAX_BYTES {
+        Err("Plugin files must be no larger than 2 MiB each.".into())
+    } else {
+        Ok(bytes)
+    }
 }
 
 fn install_with(root: &Path, input: &str, mut fetch: impl FnMut(&str) -> Result<Vec<u8>, String>) -> Result<InstalledPlugin, String> {
@@ -623,9 +627,7 @@ mod tests {
         let mut m: serde_json::Value = serde_json::from_slice(&manifest()).unwrap();
         // A directory/file collision forces failure after writing the downloaded script.
         m["main"] = serde_json::json!("manifest.json/main.js");
-        assert!(
-            install_with(&root, URL, |url| Ok(if url.ends_with("manifest.json") { serde_json::to_vec(&m).unwrap() } else { b"void 0;".to_vec() })).is_err()
-        );
+        assert!(install_with(&root, URL, |url| Ok(if url.ends_with("manifest.json") { serde_json::to_vec(&m).unwrap() } else { b"void 0;".to_vec() })).is_err());
         assert!(!root.join("plugins").exists());
         assert!(list(&root).unwrap().is_empty());
         if root.exists() {

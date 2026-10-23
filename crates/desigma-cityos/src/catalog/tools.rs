@@ -2,7 +2,11 @@
 //! Only these fixed routes leave Desigma; catalog data and credentials do not.
 use super::CatalogUiServices;
 use egui::{RichText, Ui};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, TryRecvError},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
@@ -102,7 +106,10 @@ fn open_atlas_url(url: &str, cancelled: &AtomicBool, deadline: Instant) -> Resul
         Err(spawn_error)
     }
     #[cfg(not(feature = "open-url"))]
-    { let _ = (cancelled, deadline); Err(BROWSER_DISABLED.into()) }
+    {
+        let _ = (cancelled, deadline);
+        Err(BROWSER_DISABLED.into())
+    }
 }
 
 fn handoff_active(cancelled: &AtomicBool, deadline: Instant) -> Result<(), String> {
@@ -110,12 +117,17 @@ fn handoff_active(cancelled: &AtomicBool, deadline: Instant) -> Result<(), Strin
         Err("Browser handoff canceled. Your browser may already have opened.".into())
     } else if Instant::now() >= deadline {
         Err("Browser handoff timed out. Check your browser before retrying.".into())
-    } else { Ok(()) }
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "open-url", test))]
 fn wait_for_helper(child: &mut std::process::Child, cancelled: &AtomicBool, deadline: Instant) -> Result<(), String> {
-    struct Helper<'a> { child: &'a mut std::process::Child, reaped: bool }
+    struct Helper<'a> {
+        child: &'a mut std::process::Child,
+        reaped: bool,
+    }
     impl Drop for Helper<'_> {
         fn drop(&mut self) {
             if !self.reaped {
@@ -132,7 +144,9 @@ fn wait_for_helper(child: &mut std::process::Child, cancelled: &AtomicBool, dead
         match helper.child.try_wait() {
             Ok(Some(status)) => {
                 helper.reaped = true;
-                return if status.success() { Ok(()) } else {
+                return if status.success() {
+                    Ok(())
+                } else {
                     Err(format!("The browser launcher failed (exit {}).", status.code().map_or("unknown".into(), |code| code.to_string())))
                 };
             }
@@ -144,7 +158,9 @@ fn wait_for_helper(child: &mut std::process::Child, cancelled: &AtomicBool, dead
 
 struct WorkerPermit;
 impl Drop for WorkerPermit {
-    fn drop(&mut self) { HANDOFF_WORKER.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        HANDOFF_WORKER.store(false, Ordering::Release);
+    }
 }
 
 struct PendingLaunch {
@@ -160,23 +176,29 @@ impl PendingLaunch {
     }
 }
 impl Drop for PendingLaunch {
-    fn drop(&mut self) { self.cancel(); } // No join or OS wait on the UI thread.
+    fn drop(&mut self) {
+        self.cancel();
+    } // No join or OS wait on the UI thread.
 }
 
 fn spawn_handoff(destination: Destination, work: impl FnOnce(&AtomicBool, Instant) -> Result<(), String> + Send + 'static) -> Result<PendingLaunch, String> {
-    HANDOFF_WORKER.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+    HANDOFF_WORKER
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .map_err(|_| "A previous browser handoff is still finishing. Check your browser or try again shortly.".to_string())?;
     let permit = WorkerPermit;
     let cancelled = Arc::new(AtomicBool::new(false));
     let signal = cancelled.clone();
     let (send, result) = mpsc::sync_channel(1);
     let deadline = Instant::now() + HANDOFF_TIMEOUT;
-    let worker = std::thread::Builder::new().name("atlas-browser-handoff".into()).spawn(move || {
-        let outcome = handoff_active(&signal, deadline).and_then(|()| work(&signal, deadline));
-        // A new launch is permitted only after the owned helper has been reaped.
-        drop(permit);
-        let _ = send.send(outcome);
-    }).map_err(|_| "Could not start browser handoff. Copy the link and open it manually.".to_string())?;
+    let worker = std::thread::Builder::new()
+        .name("atlas-browser-handoff".into())
+        .spawn(move || {
+            let outcome = handoff_active(&signal, deadline).and_then(|()| work(&signal, deadline));
+            // A new launch is permitted only after the owned helper has been reaped.
+            drop(permit);
+            let _ = send.send(outcome);
+        })
+        .map_err(|_| "Could not start browser handoff. Copy the link and open it manually.".to_string())?;
     let handle = worker.thread().clone();
     drop(worker); // Worker owns cleanup; disposal only signals cancellation.
     Ok(PendingLaunch { destination, cancelled, result, worker: handle })
@@ -195,11 +217,13 @@ struct AtlasSession {
 }
 impl AtlasSession {
     fn open(&mut self, destination: Destination) {
-        if self.pending.is_some() { return; }
+        if self.pending.is_some() {
+            return;
+        }
         self.failure = None;
         self.dispatched = None;
-        let launch = validate_atlas_url(&destination.url()).and_then(|()|
-            spawn_handoff(destination, move |cancelled, deadline| open_atlas_url(&destination.url(), cancelled, deadline)));
+        let launch = validate_atlas_url(&destination.url())
+            .and_then(|()| spawn_handoff(destination, move |cancelled, deadline| open_atlas_url(&destination.url(), cancelled, deadline)));
         match launch {
             Ok(pending) => self.pending = Some(pending),
             Err(message) => self.failure = Some(LaunchFailure { destination, message }),
@@ -229,16 +253,21 @@ fn session(ctx: &egui::Context) -> Arc<Mutex<AtlasSession>> {
 }
 
 #[derive(Default)]
-pub(super) struct AtlasTools { menu_open: bool }
+pub(super) struct AtlasTools {
+    menu_open: bool,
+}
 
 // Workspace entry points share the same context-owned Atlas session as Browser.
 impl super::Browser {
-    pub fn atlas_workspace_menu(ui: &mut Ui, services: CatalogUiServices) { AtlasTools::default().menu(ui, services); }
-    pub fn atlas_workspace_feedback(ui: &mut Ui, services: CatalogUiServices) { AtlasTools::default().feedback(ui, services); }
+    pub fn atlas_workspace_menu(ui: &mut Ui, services: CatalogUiServices) {
+        AtlasTools::default().menu(ui, services);
+    }
+    pub fn atlas_workspace_feedback(ui: &mut Ui, services: CatalogUiServices) {
+        AtlasTools::default().feedback(ui, services);
+    }
 }
 
 impl AtlasTools {
-
     pub(super) fn menu(&mut self, ui: &mut Ui, services: CatalogUiServices) {
         let theme = services.theme();
         let state = session(ui.ctx());
@@ -303,32 +332,61 @@ impl AtlasTools {
         state.poll(ui.ctx());
         let pending = state.pending.is_some();
         let (destination, message, failed) = if let Some(job) = &state.pending {
-            (job.destination, if job.cancelled.load(Ordering::Acquire) { "Canceling browser handoff… Your browser may already have opened." } else { "Sending to your browser…" }.to_string(), false)
+            (
+                job.destination,
+                if job.cancelled.load(Ordering::Acquire) {
+                    "Canceling browser handoff… Your browser may already have opened."
+                } else {
+                    "Sending to your browser…"
+                }
+                .to_string(),
+                false,
+            )
         } else if let Some(failure) = &state.failure {
             (failure.destination, format!("Atlas could not open: {}", failure.message), true)
         } else if let Some(destination) = state.dispatched {
-            (destination, "Browser handoff finished. Check your browser and sign in with your approved account. Atlas access has not been verified.".into(), false)
-        } else { return; };
+            (
+                destination,
+                "Browser handoff finished. Check your browser and sign in with your approved account. Atlas access has not been verified.".into(),
+                false,
+            )
+        } else {
+            return;
+        };
         let mut retry = false;
         let mut dismiss = false;
         egui::Frame::new().inner_margin(egui::Margin::symmetric(theme.catalog_pad, 6)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if pending { ui.spinner(); }
+                if pending {
+                    ui.spinner();
+                }
                 ui.add(egui::Label::new(RichText::new(message).color(if failed { theme.danger } else { theme.text_secondary })).wrap());
                 if pending {
-                    if ui.button("Cancel handoff").clicked() { if let Some(job) = &state.pending { job.cancel(); } }
+                    if ui.button("Cancel handoff").clicked() {
+                        if let Some(job) = &state.pending {
+                            job.cancel();
+                        }
+                    }
                 } else if failed {
-                    retry = ui.add_enabled(cfg!(feature = "open-url"), egui::Button::new("Retry"))
-                        .on_disabled_hover_text(BROWSER_DISABLED).clicked();
+                    retry = ui.add_enabled(cfg!(feature = "open-url"), egui::Button::new("Retry")).on_disabled_hover_text(BROWSER_DISABLED).clicked();
                 }
                 let copy = ui.button("Copy Atlas link");
                 services.record(ui, "catalog-atlas-copy-failure", copy.rect);
-                if copy.clicked() { ui.ctx().copy_text(destination.url()); }
-                if !pending { dismiss = ui.button("Dismiss").clicked(); }
+                if copy.clicked() {
+                    ui.ctx().copy_text(destination.url());
+                }
+                if !pending {
+                    dismiss = ui.button("Dismiss").clicked();
+                }
             });
         });
-        if dismiss { state.failure = None; state.dispatched = None; }
-        else if retry { state.open(destination); ui.ctx().request_repaint(); }
+        if dismiss {
+            state.failure = None;
+            state.dispatched = None;
+        } else if retry {
+            state.open(destination);
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -385,17 +443,27 @@ mod tests {
 
     fn painted_text(shape: &egui::epaint::Shape, out: &mut String) {
         match shape {
-            egui::epaint::Shape::Text(text) => { out.push_str(&text.galley.job.text); out.push('\n'); }
-            egui::epaint::Shape::Vec(shapes) => { for shape in shapes { painted_text(shape, out); } }
+            egui::epaint::Shape::Text(text) => {
+                out.push_str(&text.galley.job.text);
+                out.push('\n');
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    painted_text(shape, out);
+                }
+            }
             _ => {}
         }
     }
 
     fn frame(tools: &mut AtlasTools, ctx: &egui::Context, width: f32, events: Vec<egui::Event>) -> egui::FullOutput {
-        ctx.run_ui(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 720.0))),
-            events, ..Default::default()
-        }, |ui| { tools.menu(ui, super::super::test_support::services()); tools.feedback(ui, super::super::test_support::services()); })
+        ctx.run_ui(
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 720.0))), events, ..Default::default() },
+            |ui| {
+                tools.menu(ui, super::super::test_support::services());
+                tools.feedback(ui, super::super::test_support::services());
+            },
+        )
     }
 
     fn click(tools: &mut AtlasTools, ctx: &egui::Context, width: f32, id: &str) -> egui::FullOutput {
@@ -403,9 +471,15 @@ mod tests {
         let pos = rect.center();
         let mut output = None;
         for pressed in [true, false] {
-            output = Some(frame(tools, ctx, width, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
-                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
-            }]));
+            output = Some(frame(
+                tools,
+                ctx,
+                width,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE },
+                ],
+            ));
         }
         output.unwrap()
     }
@@ -419,7 +493,9 @@ mod tests {
             frame(&mut tools, &ctx, width, vec![]);
             let closed = frame(&mut tools, &ctx, width, vec![]);
             let mut text = String::new();
-            for shape in &closed.shapes { painted_text(&shape.shape, &mut text); }
+            for shape in &closed.shapes {
+                painted_text(&shape.shape, &mut text);
+            }
             assert!(!tools.is_open());
             assert!(text.contains("Atlas ↗"));
             assert!(!text.contains("CityOS Atlas") && !text.contains("Codex Markdown"));
@@ -428,7 +504,9 @@ mod tests {
             let open = frame(&mut tools, &ctx, width, vec![]);
             assert!(tools.is_open());
             text.clear();
-            for shape in &open.shapes { painted_text(&shape.shape, &mut text); }
+            for shape in &open.shapes {
+                painted_text(&shape.shape, &mut text);
+            }
             assert!(text.contains("CityOS Atlas"));
             assert!(text.contains(PRIVATE_ACCESS));
             assert!(text.contains("Prepare fixes for Codex"));
@@ -451,10 +529,10 @@ mod tests {
             browser.settings_open = false;
             browser.auto_refresh = false;
             for _ in 0..2 {
-                let _ = ctx.run_ui(egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 900.0))),
-                    ..Default::default()
-                }, |ui| browser.show(ui, &ctx));
+                let _ = ctx.run_ui(
+                    egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 900.0))), ..Default::default() },
+                    |ui| browser.show(ui, &ctx),
+                );
             }
             let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", "catalog-atlas-menu".to_string())))).unwrap();
             assert!(rect.left() >= 0.0 && rect.right() <= width && rect.bottom() <= 900.0);
@@ -471,7 +549,9 @@ mod tests {
         frame(&mut tools, &ctx, 390.0, vec![]);
         let output = frame(&mut tools, &ctx, 390.0, vec![]);
         let mut text = String::new();
-        for shape in &output.shapes { painted_text(&shape.shape, &mut text); }
+        for shape in &output.shapes {
+            painted_text(&shape.shape, &mut text);
+        }
         assert!(text.contains("No default browser is configured"));
         assert!(text.contains("Copy Atlas link") && text.contains("Retry") && text.contains("Dismiss"));
         let copied = click(&mut tools, &ctx, 390.0, "catalog-atlas-copy-failure");
@@ -493,7 +573,9 @@ mod tests {
         frame(&mut tools, &ctx, 390.0, vec![]);
         let output = frame(&mut tools, &ctx, 390.0, vec![]);
         let mut text = String::new();
-        for shape in &output.shapes { painted_text(&shape.shape, &mut text); }
+        for shape in &output.shapes {
+            painted_text(&shape.shape, &mut text);
+        }
         assert!(text.contains(BROWSER_DISABLED));
         let copied = click(&mut tools, &ctx, 390.0, "catalog-atlas-copy-reports");
         assert!(copied.platform_output.commands.iter().any(|command| matches!(command,

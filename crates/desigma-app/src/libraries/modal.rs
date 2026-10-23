@@ -340,7 +340,9 @@ fn available(app: &mut App, ui: &mut Ui, m: Rect, top: f32) {
         p.text(status.left_center(), Align2::LEFT_CENTER, label, theme::font_small(), theme::TEXT);
         ui.interact(status, Id::new("lib-refresh-error"), Sense::hover()).on_hover_text(error);
         let retry = Rect::from_min_size(Pos2::new(x1 - 64.0, list_top + 1.0), Vec2::new(64.0, 24.0));
-        if button(ui, retry, "lib-refresh-retry", "Retry", false, true) { app.refresh_libraries(); }
+        if button(ui, retry, "lib-refresh-retry", "Retry", false, true) {
+            app.refresh_libraries();
+        }
         list_top += 32.0;
     }
     let list = Rect::from_min_max(Pos2::new(m.left(), list_top), m.max);

@@ -65,13 +65,11 @@ impl Shell {
 
     pub fn build(ctx: &Context, opts: Options) -> Self {
         let repair_startup_geometry = opts.screenshot.is_none() && opts.size.is_none();
-        let performance = opts.cityos_performance_report.clone().and_then(|path| {
-            match performance::Reporter::start(path) {
-                Ok(reporter) => Some(reporter),
-                Err(error) => {
-                    eprintln!("desigma: performance diagnostics unavailable ({:?})", error.kind());
-                    None
-                }
+        let performance = opts.cityos_performance_report.clone().and_then(|path| match performance::Reporter::start(path) {
+            Ok(reporter) => Some(reporter),
+            Err(error) => {
+                eprintln!("desigma: performance diagnostics unavailable ({:?})", error.kind());
+                None
             }
         });
         let mut cityos = crate::cityos_catalog::Browser::new(
@@ -583,28 +581,36 @@ impl eframe::App for Shell {
         if let Some(reporter) = &mut self.performance {
             let (pointer_down, minimized) = ui.ctx().input(|i| (i.pointer.any_down(), i.viewport().minimized.unwrap_or(false)));
             let [busy, pending, render_waiting, current, progress_repaint] = self.workspace.performance_state();
-            reporter.record(ui.ctx(), performance::State {
-                workspace: performance::WorkspaceSnapshot {
-                    open: self.workspace.open,
-                    combined_pending: self.workspace.inline_pending(),
-                    busy: Some(busy), pending: Some(pending), render_waiting: Some(render_waiting),
-                    current: Some(current), progress_repaint: Some(progress_repaint),
+            reporter.record(
+                ui.ctx(),
+                performance::State {
+                    workspace: performance::WorkspaceSnapshot {
+                        open: self.workspace.open,
+                        combined_pending: self.workspace.inline_pending(),
+                        busy: Some(busy),
+                        pending: Some(pending),
+                        render_waiting: Some(render_waiting),
+                        current: Some(current),
+                        progress_repaint: Some(progress_repaint),
+                    },
+                    fonts_loading: self.app.fonts.is_loading(),
+                    autosave_waiting: self.app.autosave.changed_at.is_some(),
+                    autosave_confirmed: self.app.autosave.confirmed,
+                    autosave_retry_scheduled: self.app.autosave.retry_at.is_some(),
+                    pointer_down,
+                    text_editing: self.app.canvas.text.is_some(),
+                    minimized,
+                    catalog_open: self.cityos.open,
+                    home_visible: self.app.home.is_some(),
+                    screenshot_active: self.shot.is_some(),
                 },
-                fonts_loading: self.app.fonts.is_loading(),
-                autosave_waiting: self.app.autosave.changed_at.is_some(),
-                autosave_confirmed: self.app.autosave.confirmed,
-                autosave_retry_scheduled: self.app.autosave.retry_at.is_some(),
-                pointer_down,
-                text_editing: self.app.canvas.text.is_some(),
-                minimized,
-                catalog_open: self.cityos.open,
-                home_visible: self.app.home.is_some(),
-                screenshot_active: self.shot.is_some(),
-            });
+            );
         }
         crate::cityos_jobs::set_background_paused(ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
-        if ui.ctx().input(|i| i.smooth_scroll_delta!=egui::Vec2::ZERO || i.events.iter().any(|event|
-            matches!(event,egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Key {pressed:true,..}))) {
+        if ui.ctx().input(|i| {
+            i.smooth_scroll_delta != egui::Vec2::ZERO
+                || i.events.iter().any(|event| matches!(event, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Key { pressed: true, .. }))
+        }) {
             crate::cityos_jobs::note_interaction();
         }
         self.app.poll_fonts();
@@ -624,7 +630,7 @@ impl eframe::App for Shell {
                 self.cityos.open = self.workspace.library_requested();
             }
         } else {
-            self.cityos.inline_preview=None;
+            self.cityos.inline_preview = None;
             self.cityos.has_bound_draft = self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some());
             self.draw(ui);
             if let Some(document) = self.cityos.local_design_request.take() {
@@ -635,7 +641,9 @@ impl eframe::App for Shell {
                         self.app.show_toast(error, true);
                     }
                     Ok(()) => {
-                        if !self.app.replace_document(document, None){return;}
+                        if !self.app.replace_document(document, None) {
+                            return;
+                        }
                         self.app.home = None;
                         self.cityos.open = false;
                         self.app.open_variables();
@@ -663,13 +671,22 @@ impl eframe::App for Shell {
             } else if self.app.doc.cityos.as_ref().is_some_and(|b| b.exchange().is_some()) && self.app.home.is_none() && !self.cityos.open {
                 self.workspace.resume(self.cityos.workspace_config(), &self.app);
             }
-            if !self.workspace.open&&self.cityos.open {
-                if let Some((pin,rect))=self.cityos.inline_preview.take(){
-                    if !self.cityos.inline_status.starts_with("Current"){self.cityos.yield_to_design();}
-                    self.cityos.inline_status=self.workspace.show_inline(&mut self.app,_frame,self.cityos.workspace_config(),pin,rect,ui.ctx().pixels_per_point(),ui.ctx());
-                    if self.workspace.inline_pending(){ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
-                }else{self.workspace.hide();}
-            }else if !self.workspace.open{self.workspace.hide();}
+            if !self.workspace.open && self.cityos.open {
+                if let Some((pin, rect)) = self.cityos.inline_preview.take() {
+                    if !self.cityos.inline_status.starts_with("Current") {
+                        self.cityos.yield_to_design();
+                    }
+                    self.cityos.inline_status =
+                        self.workspace.show_inline(&mut self.app, _frame, self.cityos.workspace_config(), pin, rect, ui.ctx().pixels_per_point(), ui.ctx());
+                    if self.workspace.inline_pending() {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                } else {
+                    self.workspace.hide();
+                }
+            } else if !self.workspace.open {
+                self.workspace.hide();
+            }
         }
     }
 }
@@ -752,11 +769,15 @@ impl Shell {
             crate::decks::ui::flush_notes(&mut self.app);
             self.app.save_close_version();
             close_failed = !self.app.flush_autosave();
-            if close_failed { ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose); }
+            if close_failed {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
         }
         if self.cityos.open {
             self.cityos.show(ui, &ctx);
-            if close_failed { self.toast(ui, ui.max_rect()); }
+            if close_failed {
+                self.toast(ui, ui.max_rect());
+            }
             return;
         }
         self.app.poll_plugins();

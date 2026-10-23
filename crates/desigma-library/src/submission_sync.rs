@@ -1,10 +1,10 @@
 //! Local installation of an ALREADY authenticated, accepted owner outcome.
 //! The trusted bridge must validate the complete projection before calling this
 //! module. Nothing here authenticates/qualifies an owner or dispatches a write.
+use crate::submission_policy::submission_policy;
 use crate::submissions::SUBMISSION_LOCK;
 use crate::{payload_digest, write_atomic, Library, LibraryError, Result, SubmissionObservation, SubmissionRecord, SubmissionState};
 use crate::{CheckpointStoragePolicy, UNMANAGED_STORAGE_POLICY};
-use crate::submission_policy::submission_policy;
 use desigma_doc::DocumentCheckpoint;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -73,7 +73,12 @@ impl SubmissionSyncIntent {
     }
 }
 
-fn validate_candidate(policy: &dyn CheckpointStoragePolicy, record: &SubmissionRecord, previous: &DocumentCheckpoint, candidate: &DocumentCheckpoint) -> Result<()> {
+fn validate_candidate(
+    policy: &dyn CheckpointStoragePolicy,
+    record: &SubmissionRecord,
+    previous: &DocumentCheckpoint,
+    candidate: &DocumentCheckpoint,
+) -> Result<()> {
     acceptance(record)?;
     // A clean, freshly sealed active history must archive the ENTIRE preceding
     // checkpoint, including its existing archives and both undo/redo stacks.
@@ -138,7 +143,13 @@ impl Library {
     pub fn prepare_submission_sync(&self, file_id: &str, accepted: &SubmissionRecord, candidate: &DocumentCheckpoint) -> Result<SubmissionSyncIntent> {
         self.prepare_submission_sync_with_policy(&UNMANAGED_STORAGE_POLICY, file_id, accepted, candidate)
     }
-    pub fn prepare_submission_sync_with_policy(&self, policy: &dyn CheckpointStoragePolicy, file_id: &str, accepted: &SubmissionRecord, candidate: &DocumentCheckpoint) -> Result<SubmissionSyncIntent> {
+    pub fn prepare_submission_sync_with_policy(
+        &self,
+        policy: &dyn CheckpointStoragePolicy,
+        file_id: &str,
+        accepted: &SubmissionRecord,
+        candidate: &DocumentCheckpoint,
+    ) -> Result<SubmissionSyncIntent> {
         let _submission = SUBMISSION_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _writer = crate::store::write_lock(self)?;
         crate::validate_id(file_id)?;
@@ -209,7 +220,9 @@ impl Library {
                 return Err(LibraryError::CheckpointConflict(intent.file_id.clone()));
             }
             sync_phase("before-install", self, &intent.file_id)?;
-            for pin in &intent.accepted.command.dependency_pins { self.verify_cityos_payload(pin)?; }
+            for pin in &intent.accepted.command.dependency_pins {
+                self.verify_cityos_payload(pin)?;
+            }
             let saved = self.save_checkpoint_reconciled_locked(&intent.file_id, &candidate)?;
             recovered_after_error = saved.recovered_after_error;
         }
@@ -247,7 +260,13 @@ impl Library {
     pub fn synchronize_accepted_submission(&self, file_id: &str, accepted: &SubmissionRecord, candidate: &DocumentCheckpoint) -> Result<SubmissionSyncReceipt> {
         self.synchronize_accepted_submission_with_policy(&UNMANAGED_STORAGE_POLICY, file_id, accepted, candidate)
     }
-    pub fn synchronize_accepted_submission_with_policy(&self, policy: &dyn CheckpointStoragePolicy, file_id: &str, accepted: &SubmissionRecord, candidate: &DocumentCheckpoint) -> Result<SubmissionSyncReceipt> {
+    pub fn synchronize_accepted_submission_with_policy(
+        &self,
+        policy: &dyn CheckpointStoragePolicy,
+        file_id: &str,
+        accepted: &SubmissionRecord,
+        candidate: &DocumentCheckpoint,
+    ) -> Result<SubmissionSyncReceipt> {
         self.prepare_submission_sync_with_policy(policy, file_id, accepted, candidate)?;
         self.resume_submission_sync_with_policy(policy, &accepted.command.operation_id)
     }
@@ -397,18 +416,21 @@ mod tests {
         };
         let prepared = library.prepare_submission_for_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file, command).unwrap();
         let accepted = library
-            .record_submission_observation_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, SubmissionObservation {
-                operation_id: prepared.command.operation_id.clone(),
-                request_digest: prepared.request_digest.clone(),
-                owner: prepared.command.owner.clone(),
-                resource: prepared.command.resource.clone(),
-                scope: prepared.command.scope.clone(),
-                state: SubmissionState::AcceptedSyncPending,
-                receipt_ref: "fixture-original-acceptance".into(),
-                owner_revision: Some("b".repeat(40)),
-                conclusively_ineligible: false,
-                details: json!({"fixture":true}),
-            })
+            .record_submission_observation_with_policy(
+                &crate::storage_policy::tests::BOUND_FIXTURE_POLICY,
+                SubmissionObservation {
+                    operation_id: prepared.command.operation_id.clone(),
+                    request_digest: prepared.request_digest.clone(),
+                    owner: prepared.command.owner.clone(),
+                    resource: prepared.command.resource.clone(),
+                    scope: prepared.command.scope.clone(),
+                    state: SubmissionState::AcceptedSyncPending,
+                    receipt_ref: "fixture-original-acceptance".into(),
+                    owner_revision: Some("b".repeat(40)),
+                    conclusively_ineligible: false,
+                    details: json!({"fixture":true}),
+                },
+            )
             .unwrap();
         let mut installed = original.document.clone();
         installed.name = "accepted full projection".into();
@@ -461,13 +483,19 @@ mod tests {
         let exchange = binding.exchange_mut().unwrap();
         exchange["semanticBase"] = accepted_semantics.clone();
         exchange["semanticDraft"] = accepted_semantics.clone();
-        assert!(f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).is_err());
+        assert!(f
+            .library
+            .prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+            .is_err());
         // Fixture of the original authenticated receipt carrying full readback
         // identity, before any local synchronization is prepared.
         let digest = payload_digest(&serde_json::to_vec(&accepted_semantics).unwrap());
         f.accepted.outcome.as_mut().unwrap()["details"]["acceptedSemanticDigest"] = json!(digest);
         f.library.write_submission_record(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.accepted).unwrap();
-        let saved = f.library.synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+        let saved = f
+            .library
+            .synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+            .unwrap();
         let installed = saved.checkpoint.document.cityos.unwrap();
         assert_eq!(installed.semantic_base, accepted_semantics);
         assert_eq!(installed.exchange().unwrap()["semanticDraft"], accepted_semantics);
@@ -477,13 +505,19 @@ mod tests {
     #[test]
     fn accepted_install_preserves_original_receipt_full_projection_history_and_pins() {
         let f = fixture();
-        let receipt = f.library.synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+        let receipt = f
+            .library
+            .synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+            .unwrap();
         assert_eq!(receipt.submission.state, SubmissionState::Synchronized);
         assert!(!receipt.submission.frozen());
         assert_eq!(receipt.submission.command, f.accepted.command);
         assert_eq!(receipt.submission.request_digest, f.accepted.request_digest);
         assert_eq!(receipt.submission.outcome, f.accepted.outcome);
-        assert_eq!(f.library.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(), [receipt.submission.clone()]);
+        assert_eq!(
+            f.library.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(),
+            [receipt.submission.clone()]
+        );
         let wire: serde_json::Value = serde_json::from_slice(&std::fs::read(f.library.submission_path("operation").unwrap()).unwrap()).unwrap();
         assert_eq!(wire["local_file"]["document_id"], "document");
         assert_eq!(wire["local_file"]["draft_id"], "draft");
@@ -510,7 +544,12 @@ mod tests {
         for phase in ["before-intent", "intent", "before-install", "installed", "readback", "before-synchronized", "synchronized"] {
             let f = fixture();
             SYNC_FAULT.with(|fault| fault.set(Some(phase)));
-            assert!(f.library.synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).is_err(), "{phase}");
+            assert!(
+                f.library
+                    .synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+                    .is_err(),
+                "{phase}"
+            );
             let stored = f.library.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap();
             assert_eq!(stored.command, f.accepted.command, "{phase}");
             assert_eq!(stored.outcome, f.accepted.outcome, "{phase}");
@@ -539,7 +578,10 @@ mod tests {
         for phase in ["before-journal", "journal", "payloads", "document", "checkpoint", "manifest", "complete"] {
             for repeats in [0, 1] {
                 let f = fixture();
-                let intent = f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+                let intent = f
+                    .library
+                    .prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+                    .unwrap();
                 crate::store::inject_save_fault(phase, repeats);
                 let result = f.library.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation");
                 // A one-shot after-journal error is reconciled inside the same
@@ -559,10 +601,16 @@ mod tests {
                 assert_eq!(saved.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
                 assert_eq!(saved.submission.command, f.accepted.command);
                 assert_eq!(saved.submission.outcome, f.accepted.outcome);
-                assert_eq!(restarted.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(), [saved.submission.clone()]);
+                assert_eq!(
+                    restarted.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(),
+                    [saved.submission.clone()]
+                );
                 assert_eq!(saved.checkpoint.retained.len(), f.original.retained.len() + 1);
                 assert!(restarted.save_checkpoint(&f.file, &f.original).is_err());
-                let again = Library::open(&f.root).unwrap().resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap();
+                let again = Library::open(&f.root)
+                    .unwrap()
+                    .resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation")
+                    .unwrap();
                 assert_eq!(again.sync_id, intent.sync_id);
                 assert_eq!(again.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
             }
@@ -574,7 +622,10 @@ mod tests {
         for root in ["original-history", "accepted", "submission-only"] {
             for damage in ["missing", "corrupt"] {
                 let f = fixture();
-                let intent = f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+                let intent = f
+                    .library
+                    .prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+                    .unwrap();
                 let (pin, bytes): (String, &[u8]) = match root {
                     "original-history" => (f.original.dependency_pins()[0].clone(), b"original history dependency"),
                     "accepted" => (f.accepted_pin.clone(), b"accepted-only dependency"),
@@ -583,13 +634,22 @@ mod tests {
                 let checkpoint_path = f.library.checkpoint_path(&f.file).unwrap();
                 let checkpoint_before = std::fs::read(&checkpoint_path).unwrap();
                 let path = f.library.path("cityos/payloads").join(&pin);
-                if damage == "missing" { std::fs::remove_file(&path).unwrap(); }
-                else { std::fs::write(&path, b"damaged").unwrap(); }
+                if damage == "missing" {
+                    std::fs::remove_file(&path).unwrap();
+                } else {
+                    std::fs::write(&path, b"damaged").unwrap();
+                }
                 let restarted = Library::open(&f.root).unwrap();
-                assert!(restarted.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").is_err(), "{root}/{damage}");
+                assert!(
+                    restarted.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").is_err(),
+                    "{root}/{damage}"
+                );
                 assert_eq!(std::fs::read(&checkpoint_path).unwrap(), checkpoint_before, "{root}/{damage}");
                 assert_eq!(restarted.load_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), intent);
-                assert_eq!(restarted.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(), [f.accepted.clone()]);
+                assert_eq!(
+                    restarted.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(),
+                    [f.accepted.clone()]
+                );
                 assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&pin));
                 assert!(restarted.put_cityos_payload(&pin, b"wrong repair").is_err());
                 restarted.put_cityos_payload(&pin, bytes).unwrap();
@@ -605,11 +665,17 @@ mod tests {
     fn dependency_loss_during_install_or_finalization_cannot_mark_synchronized() {
         for phase in ["before-install", "installed", "readback", "before-synchronized"] {
             let f = fixture();
-            let intent = f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+            let intent =
+                f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
             let pin = f.submission_pin.clone();
-            SYNC_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(move |library, _| {
-                std::fs::remove_file(library.path("cityos/payloads").join(&pin)).unwrap();
-            }))));
+            SYNC_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some((
+                    phase,
+                    Box::new(move |library, _| {
+                        std::fs::remove_file(library.path("cityos/payloads").join(&pin)).unwrap();
+                    }),
+                ))
+            });
             assert!(f.library.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").is_err(), "{phase}");
             assert_eq!(f.library.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(), [f.accepted.clone()]);
             assert_eq!(f.library.load_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), intent);
@@ -618,7 +684,15 @@ mod tests {
             }
             let restarted = Library::open(&f.root).unwrap();
             restarted.put_cityos_payload(&f.submission_pin, b"original submission-only dependency").unwrap();
-            assert_eq!(restarted.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap().checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
+            assert_eq!(
+                restarted
+                    .resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation")
+                    .unwrap()
+                    .checkpoint
+                    .to_json()
+                    .unwrap(),
+                f.candidate.to_json().unwrap()
+            );
         }
     }
 
@@ -627,7 +701,10 @@ mod tests {
         let f = fixture();
         let project = f.library.create_project("Other").unwrap();
         let other = f.library.create_file_checkpoint(&project.id, None, "Same draft copy", &f.original).unwrap();
-        assert!(f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &other.id, &f.accepted, &f.candidate).is_err());
+        assert!(f
+            .library
+            .prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &other.id, &f.accepted, &f.candidate)
+            .is_err());
         assert!(!f.library.submission_sync_path("operation").unwrap().exists());
         assert_eq!(f.library.load_checkpoint(&other.id).unwrap().to_json().unwrap(), f.original.to_json().unwrap());
         assert!(f.library.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &other.id).unwrap().is_empty());
@@ -652,10 +729,14 @@ mod tests {
             "save:complete" => crate::store::exit_during_save("complete"),
             _ => {
                 let phase = match phase.as_str() {
-                    "sync:before-intent" => "before-intent", "sync:intent" => "intent",
-                    "sync:before-install" => "before-install", "sync:installed" => "installed",
-                    "sync:readback" => "readback", "sync:before-synchronized" => "before-synchronized",
-                    "sync:synchronized" => "synchronized", _ => panic!("Unexpected sync worker phase"),
+                    "sync:before-intent" => "before-intent",
+                    "sync:intent" => "intent",
+                    "sync:before-install" => "before-install",
+                    "sync:installed" => "installed",
+                    "sync:readback" => "readback",
+                    "sync:before-synchronized" => "before-synchronized",
+                    "sync:synchronized" => "synchronized",
+                    _ => panic!("Unexpected sync worker phase"),
                 };
                 SYNC_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(|_, _| std::process::exit(92)))));
             }
@@ -666,15 +747,31 @@ mod tests {
 
     #[test]
     fn accepted_sync_recovery_survives_process_exit() {
-        for phase in ["sync:before-intent", "sync:intent", "sync:before-install", "sync:installed", "sync:readback",
-            "sync:before-synchronized", "sync:synchronized", "save:before-journal", "save:journal", "save:payloads",
-            "save:document", "save:checkpoint", "save:manifest", "save:complete"] {
+        for phase in [
+            "sync:before-intent",
+            "sync:intent",
+            "sync:before-install",
+            "sync:installed",
+            "sync:readback",
+            "sync:before-synchronized",
+            "sync:synchronized",
+            "save:before-journal",
+            "save:journal",
+            "save:payloads",
+            "save:document",
+            "save:checkpoint",
+            "save:manifest",
+            "save:complete",
+        ] {
             let f = fixture();
             std::fs::write(f.library.path("sync-test-candidate.json"), f.candidate.to_json().unwrap()).unwrap();
             let worker = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "submission_sync::tests::accepted_sync_interruption_worker", "--ignored", "--test-threads=1"])
-                .env("DESIGMA_SYNC_TEST_ROOT", &f.root).env("DESIGMA_SYNC_TEST_FILE", &f.file)
-                .env("DESIGMA_SYNC_TEST_PHASE", phase).output().unwrap();
+                .env("DESIGMA_SYNC_TEST_ROOT", &f.root)
+                .env("DESIGMA_SYNC_TEST_FILE", &f.file)
+                .env("DESIGMA_SYNC_TEST_PHASE", phase)
+                .output()
+                .unwrap();
             assert_eq!(worker.status.code(), Some(92), "{phase}: {}", String::from_utf8_lossy(&worker.stderr));
             let restarted = Library::open(&f.root).unwrap();
             let original = restarted.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap();
@@ -695,7 +792,8 @@ mod tests {
             assert_eq!(restarted.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file).unwrap(), [saved.submission]);
             assert!(restarted.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.submission_pin));
             assert!(restarted.save_checkpoint(&f.file, &f.original).is_err());
-            let again = Library::open(&f.root).unwrap().resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap();
+            let again =
+                Library::open(&f.root).unwrap().resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap();
             assert_eq!(again.sync_id, intent.sync_id);
             assert_eq!(again.checkpoint.to_json().unwrap(), f.candidate.to_json().unwrap());
         }
@@ -718,14 +816,20 @@ mod tests {
                 "digest" => wrong.outcome.as_mut().unwrap()["request_digest"] = json!("f".repeat(64)),
                 _ => wrong.state = SubmissionState::Published,
             }
-            assert!(f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &wrong, &f.candidate).is_err(), "{field}");
+            assert!(
+                f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &wrong, &f.candidate).is_err(),
+                "{field}"
+            );
             assert!(!f.library.submission_sync_path("operation").unwrap().exists());
         }
         for state in [SubmissionState::Prepared, SubmissionState::Pending, SubmissionState::Published, SubmissionState::Rejected, SubmissionState::Retired] {
             let mut record = f.accepted.clone();
             record.state = state;
             write_atomic(&f.library.submission_path("operation").unwrap(), &serde_json::to_vec(&record).unwrap()).unwrap();
-            assert!(f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &record, &f.candidate).is_err());
+            assert!(f
+                .library
+                .prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &record, &f.candidate)
+                .is_err());
         }
         assert_eq!(f.library.load_checkpoint(&f.file).unwrap().to_json().unwrap(), f.original.to_json().unwrap());
     }
@@ -772,7 +876,10 @@ mod tests {
                     }
                 }
             }
-            assert!(f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &wrong).is_err(), "{field}");
+            assert!(
+                f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &wrong).is_err(),
+                "{field}"
+            );
             assert_eq!(f.library.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), f.accepted);
         }
     }
@@ -780,18 +887,24 @@ mod tests {
     #[test]
     fn original_sync_intent_rejects_replacement_checkpoint_file_or_receipt_after_restart() {
         let f = fixture();
-        let intent = f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+        let intent =
+            f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
         let reopened = Library::open(&f.root).unwrap();
         let mut replacement = f.candidate.clone();
         replacement.document.name = "different full projection".into();
         assert!(reopened.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &replacement).is_err());
-        assert!(reopened.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "another-file", &f.accepted, &f.candidate).is_err());
+        assert!(reopened
+            .prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "another-file", &f.accepted, &f.candidate)
+            .is_err());
         let mut wrong = f.accepted.clone();
         wrong.outcome.as_mut().unwrap()["details"] = json!({"another":true});
         assert!(reopened.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &wrong, &f.candidate).is_err());
         assert_eq!(reopened.load_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), intent);
         reopened.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap();
-        assert_eq!(reopened.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap(), intent);
+        assert_eq!(
+            reopened.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap(),
+            intent
+        );
     }
 
     #[test]
@@ -812,7 +925,10 @@ mod tests {
             let saved = concurrent.to_json().unwrap();
             std::thread::spawn(move || writer.save_checkpoint(&id, &concurrent)).join().unwrap().unwrap();
             let reopened = Library::open(&f.root).unwrap();
-            assert!(matches!(reopened.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation"), Err(LibraryError::CheckpointConflict(_))));
+            assert!(matches!(
+                reopened.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation"),
+                Err(LibraryError::CheckpointConflict(_))
+            ));
             assert_eq!(reopened.load_checkpoint(&f.file).unwrap().to_json().unwrap(), saved);
             assert_eq!(reopened.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), f.accepted);
             assert!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().contains(&f.accepted_pin));
@@ -829,7 +945,10 @@ mod tests {
         edited.document.name = "new work on accepted baseline".into();
         f.library.save_checkpoint(&f.file, &edited).unwrap();
         let reopened = Library::open(&f.root).unwrap();
-        assert!(matches!(reopened.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation"), Err(LibraryError::CheckpointConflict(_))));
+        assert!(matches!(
+            reopened.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation"),
+            Err(LibraryError::CheckpointConflict(_))
+        ));
         assert_eq!(reopened.load_checkpoint(&f.file).unwrap().to_json().unwrap(), edited.to_json().unwrap());
         assert_eq!(reopened.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), f.accepted);
     }
@@ -886,7 +1005,10 @@ mod tests {
                 }),
             ))
         });
-        assert!(matches!(f.library.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation"), Err(LibraryError::ReconciliationRequired { .. })));
+        assert!(matches!(
+            f.library.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation"),
+            Err(LibraryError::ReconciliationRequired { .. })
+        ));
         assert_eq!(f.library.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), f.accepted);
     }
 
@@ -894,10 +1016,14 @@ mod tests {
     fn missing_accepted_payload_or_corrupt_intent_fail_closed_and_keep_original() {
         let f = fixture();
         std::fs::remove_file(f.library.path("cityos/payloads").join(&f.accepted_pin)).unwrap();
-        assert!(f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).is_err());
+        assert!(f
+            .library
+            .prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+            .is_err());
         assert_eq!(f.library.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), f.accepted);
         f.library.put_cityos_payload(&f.accepted_pin, b"accepted-only dependency").unwrap();
-        let mut intent = f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+        let mut intent =
+            f.library.prepare_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
         intent.file_id = "other-file".into();
         write_atomic(&f.library.submission_sync_path("operation").unwrap(), &serde_json::to_vec(&intent).unwrap()).unwrap();
         assert!(f.library.resume_submission_sync_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").is_err());
@@ -910,12 +1036,18 @@ mod tests {
     fn intent_storage_failure_cannot_install_or_discard_the_original_acceptance() {
         let f = fixture();
         std::fs::write(f.library.path("cityos/submission-sync"), "blocked intent directory").unwrap();
-        assert!(f.library.synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).is_err());
+        assert!(f
+            .library
+            .synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+            .is_err());
         assert_eq!(f.library.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, "operation").unwrap(), f.accepted);
         assert_eq!(f.library.load_checkpoint(&f.file).unwrap().to_json().unwrap(), f.original.to_json().unwrap());
         assert!(f.library.load_cityos_payload(&f.submission_pin).is_ok());
         std::fs::remove_file(f.library.path("cityos/submission-sync")).unwrap();
-        let receipt = Library::open(&f.root).unwrap().synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate).unwrap();
+        let receipt = Library::open(&f.root)
+            .unwrap()
+            .synchronize_accepted_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &f.file, &f.accepted, &f.candidate)
+            .unwrap();
         assert_eq!(receipt.submission.state, SubmissionState::Synchronized);
     }
 }

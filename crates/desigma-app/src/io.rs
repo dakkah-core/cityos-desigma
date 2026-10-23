@@ -21,9 +21,7 @@ fn parse_path_bytes(path: &Path, bytes: &[u8]) -> Result<Document, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let text = || std::str::from_utf8(bytes).map_err(|e| format!("Cannot read {}: {e}", path.display()));
     let mut doc = match ext.as_str() {
-        "fig" => {
-            desigma_fig::import_fig(bytes).map_err(|e| format!("Cannot import .fig: {e}"))?
-        }
+        "fig" => desigma_fig::import_fig(bytes).map_err(|e| format!("Cannot import .fig: {e}"))?,
         "json" => {
             let text = text()?;
             match desigma_fig::import_rest_json(&text) {
@@ -73,7 +71,8 @@ pub fn file_fingerprint(path: &Path) -> Result<String, String> {
 }
 
 fn fingerprint_locked(path: &Path) -> Result<String, String> {
-    std::fs::read(path).map(|bytes| desigma_library::payload_digest(&bytes))
+    std::fs::read(path)
+        .map(|bytes| desigma_library::payload_digest(&bytes))
         .map_err(|error| format!("Cannot read saved generation {}: {error}", path.display()))
 }
 
@@ -101,20 +100,28 @@ fn save_path_inner(doc: &Document, path: &Path, expected: Option<&str>) -> Resul
 
 fn external_lock(path: &Path, create_parent: bool) -> Result<std::fs::File, String> {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    if create_parent { std::fs::create_dir_all(parent).map_err(|error| format!("Cannot create save directory: {error}"))?; }
+    if create_parent {
+        std::fs::create_dir_all(parent).map_err(|error| format!("Cannot create save directory: {error}"))?;
+    }
     let parent = std::fs::canonicalize(parent).map_err(|error| format!("Cannot open save directory: {error}"))?;
     let name = path.file_name().ok_or("A document file name is required")?;
     let target = parent.join(name);
     match std::fs::symlink_metadata(&target) {
         Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => return Err("A regular document file is required".into()),
-        Ok(_) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("Cannot inspect document file: {error}")),
     }
     let mut lock_name = std::ffi::OsString::from(".");
-    lock_name.push(name); lock_name.push(".save.lock");
-    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
-        .open(parent.join(lock_name)).map_err(|error| format!("Cannot coordinate document save: {error}"))?;
+    lock_name.push(name);
+    lock_name.push(".save.lock");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(parent.join(lock_name))
+        .map_err(|error| format!("Cannot coordinate document save: {error}"))?;
     match lock.try_lock() {
         Ok(()) => Ok(lock),
         Err(std::fs::TryLockError::WouldBlock) => Err("The document is busy in another Desigma process. Retry saving.".into()),
@@ -165,15 +172,23 @@ mod tests {
     impl ExternalTemp {
         fn new() -> Self {
             let root = std::env::temp_dir().join(format!("desigma_external_{}_{}", std::process::id(), desigma_library::new_id()));
-            std::fs::create_dir(&root).unwrap(); Self(root)
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
         }
-        fn file(&self) -> PathBuf { self.0.join("draft.desigma") }
+        fn file(&self) -> PathBuf {
+            self.0.join("draft.desigma")
+        }
     }
-    impl Drop for ExternalTemp { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    impl Drop for ExternalTemp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn stale_external_save_preserves_the_newer_document_and_local_candidate() {
-        let temp = ExternalTemp::new(); let path = temp.file();
+        let temp = ExternalTemp::new();
+        let path = temp.file();
         save_path(&Document::new("base"), &path).unwrap();
         let (mut first, observation) = load_path_observed(&path).unwrap();
         let (mut second, same_observation) = load_path_observed(&path).unwrap();
@@ -194,26 +209,35 @@ mod tests {
         let root = PathBuf::from(directory);
         let _guard = external_lock(&root.join("draft.desigma"), false).unwrap();
         std::fs::write(root.join("ready"), b"locked").unwrap();
-        while !root.join("release").exists() { std::thread::sleep(std::time::Duration::from_millis(10)); }
+        while !root.join("release").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
     fn external_saves_fail_busy_across_processes_and_recover_after_exit() {
-        let temp = ExternalTemp::new(); let path = temp.file();
+        let temp = ExternalTemp::new();
+        let path = temp.file();
         save_path(&Document::new("base"), &path).unwrap();
         let fingerprint = file_fingerprint(&path).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["io::tests::external_lock_child", "--exact", "--nocapture"])
-            .env("DESIGMA_EXTERNAL_LOCK_CHILD", &temp.0).stdout(std::process::Stdio::null()).spawn().unwrap();
+            .env("DESIGMA_EXTERNAL_LOCK_CHILD", &temp.0)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         let started = std::time::Instant::now();
         while !temp.0.join("ready").exists() && started.elapsed().as_secs() < 10 {
-            if child.try_wait().unwrap().is_some() { break; }
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let ready = temp.0.join("ready").exists();
         let busy = if ready { save_path_expected(&Document::new("candidate"), &path, &fingerprint).unwrap_err() } else { String::new() };
         // Always release/stop our own helper before asserting to avoid an orphan.
-        child.kill().ok(); child.wait().unwrap();
+        child.kill().ok();
+        child.wait().unwrap();
         assert!(ready, "child did not acquire the external file lock");
         assert!(busy.contains("busy"), "{busy}");
         assert_eq!(file_fingerprint(&path).unwrap(), fingerprint);
@@ -225,9 +249,11 @@ mod tests {
     #[test]
     fn windows_failed_external_replacement_preserves_bytes_and_can_retry() {
         use std::os::windows::fs::OpenOptionsExt;
-        let temp = ExternalTemp::new(); let path = temp.file();
+        let temp = ExternalTemp::new();
+        let path = temp.file();
         save_path(&Document::new("base"), &path).unwrap();
-        let before = std::fs::read(&path).unwrap(); let observation = file_fingerprint(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let observation = file_fingerprint(&path).unwrap();
         let held = std::fs::OpenOptions::new().read(true).share_mode(3).open(&path).unwrap();
         let candidate = Document::new("retry candidate");
         assert!(save_path_expected(&candidate, &path, &observation).is_err());

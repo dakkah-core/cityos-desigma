@@ -89,7 +89,13 @@ pub fn refresh(lib: &Library, file: &str, doc: &Document) -> bool {
     }
 }
 
-struct ThumbnailJob { lib: Library, file: String, doc: Document, bytes: usize, cancel: std::sync::Arc<std::sync::atomic::AtomicBool> }
+struct ThumbnailJob {
+    lib: Library,
+    file: String,
+    doc: Document,
+    bytes: usize,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 #[derive(Default)]
 struct ThumbnailQueue {
     jobs: std::collections::VecDeque<ThumbnailJob>,
@@ -100,22 +106,29 @@ type SharedQueue = std::sync::Arc<(std::sync::Mutex<ThumbnailQueue>, std::sync::
 fn queue() -> &'static SharedQueue {
     static QUEUE: std::sync::OnceLock<SharedQueue> = std::sync::OnceLock::new();
     QUEUE.get_or_init(|| {
-        let shared = std::sync::Arc::new((std::sync::Mutex::new(ThumbnailQueue::default()),std::sync::Condvar::new()));
+        let shared = std::sync::Arc::new((std::sync::Mutex::new(ThumbnailQueue::default()), std::sync::Condvar::new()));
         let worker = shared.clone();
         std::thread::spawn(move || loop {
             let (lock, wake) = &*worker;
-            let mut state = lock.lock().unwrap_or_else(|e|e.into_inner());
-            while state.jobs.is_empty() { state=wake.wait(state).unwrap_or_else(|e|e.into_inner()); }
-            let job = state.jobs.pop_front().unwrap(); state.bytes-=job.bytes;
-            state.active=Some((job.lib.root().to_path_buf(),job.file.clone(),job.cancel.clone()));
+            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while state.jobs.is_empty() {
+                state = wake.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            let job = state.jobs.pop_front().unwrap();
+            state.bytes -= job.bytes;
+            state.active = Some((job.lib.root().to_path_buf(), job.file.clone(), job.cancel.clone()));
             drop(state);
-            let _=crate::cityos_jobs::run(false,Some(&job.cancel),|| {
-                if let Some(png)=thumbnail_png(&job.doc) {
-                    if !job.cancel.load(std::sync::atomic::Ordering::Acquire) { let _=job.lib.set_thumbnail(&job.file,&png); }
+            let _ = crate::cityos_jobs::run(false, Some(&job.cancel), || {
+                if let Some(png) = thumbnail_png(&job.doc) {
+                    if !job.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        let _ = job.lib.set_thumbnail(&job.file, &png);
+                    }
                 }
                 Ok(())
             });
-            let mut state=lock.lock().unwrap_or_else(|e|e.into_inner());state.active=None;wake.notify_all();
+            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+            state.active = None;
+            wake.notify_all();
         });
         shared
     })
@@ -123,36 +136,63 @@ fn queue() -> &'static SharedQueue {
 /// One bounded, coalescing thumbnail worker shares the application's heavy-job budget.
 /// Oversized optional thumbnails are omitted; the saved document remains intact.
 pub fn refresh_in_background(lib: Library, file: String, doc: Document) {
-    const BUDGET:usize=64*1024*1024;
-    let bytes=doc.to_json().map(|s|s.len()).unwrap_or(BUDGET+1);
-    if bytes>BUDGET{return;}
-    let(lock,wake)=&**queue();let mut state=lock.lock().unwrap_or_else(|e|e.into_inner());
-    if let Some((root,id,cancel))=&state.active {if root==lib.root()&&id==&file {cancel.store(true,std::sync::atomic::Ordering::Release);}}
-    let mut index=0;
-    while index<state.jobs.len() {if state.jobs[index].lib.root()==lib.root()&&state.jobs[index].file==file {
-        let old=state.jobs.remove(index).unwrap();state.bytes-=old.bytes;
-    }else{index+=1;}}
-    while state.jobs.len()>=8 || state.bytes+bytes>BUDGET {let Some(old)=state.jobs.pop_front() else{break;};state.bytes-=old.bytes;}
-    state.bytes+=bytes;state.jobs.push_back(ThumbnailJob{lib,file,doc,bytes,cancel:Default::default()});wake.notify_one();
+    const BUDGET: usize = 64 * 1024 * 1024;
+    let bytes = doc.to_json().map(|s| s.len()).unwrap_or(BUDGET + 1);
+    if bytes > BUDGET {
+        return;
+    }
+    let (lock, wake) = &**queue();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((root, id, cancel)) = &state.active {
+        if root == lib.root() && id == &file {
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let mut index = 0;
+    while index < state.jobs.len() {
+        if state.jobs[index].lib.root() == lib.root() && state.jobs[index].file == file {
+            let old = state.jobs.remove(index).unwrap();
+            state.bytes -= old.bytes;
+        } else {
+            index += 1;
+        }
+    }
+    while state.jobs.len() >= 8 || state.bytes + bytes > BUDGET {
+        let Some(old) = state.jobs.pop_front() else {
+            break;
+        };
+        state.bytes -= old.bytes;
+    }
+    state.bytes += bytes;
+    state.jobs.push_back(ThumbnailJob { lib, file, doc, bytes, cancel: Default::default() });
+    wake.notify_one();
 }
 
 /// Cancel optional work for a library before a bounded headless session exits.
 /// Document/checkpoint saves have already completed independently of thumbnails.
-pub(crate) fn cancel_library_jobs(root:&std::path::Path) -> Result<(), String> {
-    let(lock,wake)=&**queue();let mut state=lock.lock().unwrap_or_else(|e|e.into_inner());
-    state.jobs.retain(|job|job.lib.root()!=root);state.bytes=state.jobs.iter().map(|job|job.bytes).sum();
-    if let Some((active,_,cancel))=&state.active {if active==root {cancel.store(true,std::sync::atomic::Ordering::Release);}}
-    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
-    while state.active.as_ref().is_some_and(|(active,_,_)|active==root) {
-        let remaining=deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() { return Err("Thumbnail worker did not stop within three seconds".into()); }
-        state=wake.wait_timeout(state,remaining).unwrap_or_else(|e|e.into_inner()).0;
+pub(crate) fn cancel_library_jobs(root: &std::path::Path) -> Result<(), String> {
+    let (lock, wake) = &**queue();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.jobs.retain(|job| job.lib.root() != root);
+    state.bytes = state.jobs.iter().map(|job| job.bytes).sum();
+    if let Some((active, _, cancel)) = &state.active {
+        if active == root {
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while state.active.as_ref().is_some_and(|(active, _, _)| active == root) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("Thumbnail worker did not stop within three seconds".into());
+        }
+        state = wake.wait_timeout(state, remaining).unwrap_or_else(|e| e.into_inner()).0;
     }
     Ok(())
 }
 
 #[cfg(test)]
-pub(crate) fn finish_library_jobs(root:&std::path::Path) {
+pub(crate) fn finish_library_jobs(root: &std::path::Path) {
     cancel_library_jobs(root).expect("Thumbnail worker did not finish");
 }
 
@@ -193,16 +233,21 @@ pub struct Textures {
 impl Textures {
     fn prune(&mut self, limit: usize, entries: usize) {
         while self.bytes > limit || self.map.len() > entries {
-            let Some(id)=self.touched.iter().min_by_key(|(_,time)|**time).map(|(id,_)|id.clone()) else {break;};
+            let Some(id) = self.touched.iter().min_by_key(|(_, time)| **time).map(|(id, _)| id.clone()) else {
+                break;
+            };
             self.touched.remove(&id);
-            if let Some((_,Some(texture)))=self.map.remove(&id) {self.bytes=self.bytes.saturating_sub(texture.size()[0]*texture.size()[1]*4);}
+            if let Some((_, Some(texture))) = self.map.remove(&id) {
+                self.bytes = self.bytes.saturating_sub(texture.size()[0] * texture.size()[1] * 4);
+            }
         }
     }
     /// The texture for `file`'s thumbnail, loading it if new or changed. At most
     /// `budget` decodes happen per call so a big grid does not stall a frame.
     pub fn get(&mut self, ctx: &egui::Context, lib: &Library, entry: &desigma_library::FileEntry, budget: &mut u32) -> Option<(egui::TextureId, egui::Vec2)> {
         let path = lib.thumbnail_path(entry)?;
-        self.serial=self.serial.wrapping_add(1);self.touched.insert(entry.id.clone(),self.serial);
+        self.serial = self.serial.wrapping_add(1);
+        self.touched.insert(entry.id.clone(), self.serial);
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         if let Some((seen, tex)) = self.map.get(&entry.id) {
             if *seen == mtime {
@@ -216,21 +261,31 @@ impl Textures {
         *budget -= 1;
         let tex: Option<egui::TextureHandle> = (|| -> Option<image::DynamicImage> {
             use std::io::Read;
-            let mut bytes=Vec::new();std::fs::File::open(&path).ok()?.take(4*1024*1024+1).read_to_end(&mut bytes).ok()?;
-            if bytes.len()>4*1024*1024{return None;}
-            let dimensions=image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions().ok()?;
-            if dimensions.0>1024||dimensions.1>1024{return None;}
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path).ok()?.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                return None;
+            }
+            let dimensions = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions().ok()?;
+            if dimensions.0 > 1024 || dimensions.1 > 1024 {
+                return None;
+            }
             image::load_from_memory(&bytes).ok()
-        })().map(|img| {
+        })()
+        .map(|img| {
             let rgba = img.to_rgba8();
             let size = [rgba.width() as usize, rgba.height() as usize];
             ctx.load_texture(format!("thumb-{}", entry.id), egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()), egui::TextureOptions::LINEAR)
         });
         let out = tex.as_ref().map(|t| (t.id(), t.size_vec2()));
-        if let Some((_,Some(previous)))=self.map.remove(&entry.id){self.bytes=self.bytes.saturating_sub(previous.size()[0]*previous.size()[1]*4);}
-        if let Some(texture)=&tex{self.bytes+=texture.size()[0]*texture.size()[1]*4;}
+        if let Some((_, Some(previous))) = self.map.remove(&entry.id) {
+            self.bytes = self.bytes.saturating_sub(previous.size()[0] * previous.size()[1] * 4);
+        }
+        if let Some(texture) = &tex {
+            self.bytes += texture.size()[0] * texture.size()[1] * 4;
+        }
         self.map.insert(entry.id.clone(), (mtime, tex));
-        self.prune(64*1024*1024,256);
+        self.prune(64 * 1024 * 1024, 256);
         out
     }
 }
@@ -241,14 +296,18 @@ mod tests {
     use desigma_doc::{Node, NodeKind, Rect, Vec2};
     #[test]
     fn texture_budget_evicts_the_least_recently_used_handle() {
-        let ctx=egui::Context::default();let mut textures=Textures::default();
-        for(index,id)in ["old","recent","new"].into_iter().enumerate(){
-            let texture=ctx.load_texture(id,egui::ColorImage::filled([64,64],egui::Color32::WHITE),Default::default());
-            textures.bytes+=64*64*4;textures.map.insert(id.into(),(None,Some(texture)));textures.touched.insert(id.into(),index as u64);
+        let ctx = egui::Context::default();
+        let mut textures = Textures::default();
+        for (index, id) in ["old", "recent", "new"].into_iter().enumerate() {
+            let texture = ctx.load_texture(id, egui::ColorImage::filled([64, 64], egui::Color32::WHITE), Default::default());
+            textures.bytes += 64 * 64 * 4;
+            textures.map.insert(id.into(), (None, Some(texture)));
+            textures.touched.insert(id.into(), index as u64);
         }
-        textures.prune(2*64*64*4,256);
-        assert!(!textures.map.contains_key("old"));assert!(textures.map.contains_key("recent"));
-        assert_eq!(textures.bytes,2*64*64*4);
+        textures.prune(2 * 64 * 64 * 4, 256);
+        assert!(!textures.map.contains_key("old"));
+        assert!(textures.map.contains_key("recent"));
+        assert_eq!(textures.bytes, 2 * 64 * 64 * 4);
     }
 
     fn doc_with_frame() -> Document {

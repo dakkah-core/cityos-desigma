@@ -14,11 +14,15 @@ pub fn content_digest(bytes: &[u8]) -> String {
 /// A namespace is one canonical path component below the selected library.
 fn namespace(value: &str) -> Result<()> {
     let device = matches!(value, "con" | "prn" | "aux" | "nul")
-        || value.strip_prefix("com").or_else(|| value.strip_prefix("lpt"))
+        || value
+            .strip_prefix("com")
+            .or_else(|| value.strip_prefix("lpt"))
             .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'));
-    if value.is_empty() || value.len() > 80
+    if value.is_empty()
+        || value.len() > 80
         || !value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
-        || device || matches!(value, "projects" | "trash" | "versions" | "libraries" | "settings")
+        || device
+        || matches!(value, "projects" | "trash" | "versions" | "libraries" | "settings")
     {
         return Err(LibraryError::Invalid("Invalid extension payload namespace".into()));
     }
@@ -76,7 +80,9 @@ impl PayloadStore {
         let path = directory.join(hash);
         // The selected library root is the authority boundary; extension-owned
         // descendants cannot redirect byte reads or writes through a link.
-        for candidate in [&scope, &directory, &path] { reject_link(candidate)?; }
+        for candidate in [&scope, &directory, &path] {
+            reject_link(candidate)?;
+        }
         Ok(path)
     }
 
@@ -95,8 +101,8 @@ impl PayloadStore {
         }
         match self.verify(expected) {
             Ok(()) => return Ok(()),
-            Err(LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(LibraryError::Invalid(_)) => {},
+            Err(LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(LibraryError::Invalid(_)) => {}
             Err(error) => return Err(error),
         }
         write_atomic(&path, bytes)?;
@@ -110,7 +116,9 @@ impl PayloadStore {
         let mut buffer = [0u8; 64 * 1024];
         loop {
             let read = file.read(&mut buffer)?;
-            if read == 0 { break; }
+            if read == 0 {
+                break;
+            }
             digest.update(&buffer[..read]);
         }
         if format!("{:x}", digest.finalize()) != hash {

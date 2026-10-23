@@ -16,29 +16,29 @@
 //! recents, thumbnails, trash), `publish` (shared libraries) and `versions`
 //! (version history). Each adds `impl Library` blocks in its own file.
 
-mod publish;
-mod store;
-mod versions;
-mod submissions;
-mod submission_sync;
 mod checkpoint;
-mod portable;
 mod payloads;
-mod storage_policy;
-mod submission_policy;
 #[cfg(test)]
 mod payloads_tests;
+mod portable;
+mod publish;
+mod storage_policy;
+mod store;
+mod submission_policy;
+mod submission_sync;
+mod submissions;
+mod versions;
 
-pub use publish::*;
-pub use store::*;
-pub use versions::*;
-pub use submissions::*;
-pub use submission_sync::*;
 pub use checkpoint::{checkpoint_fingerprint, CheckpointSaveReceipt};
-pub use portable::{VerifiedPortableCheckpoint, MAX_PORTABLE_CHECKPOINT_BYTES};
 pub use payloads::{content_digest, PayloadStore};
+pub use portable::{VerifiedPortableCheckpoint, MAX_PORTABLE_CHECKPOINT_BYTES};
+pub use publish::*;
 pub use storage_policy::{checkpoint_documents, CheckpointStoragePolicy, UnmanagedStoragePolicy, UNMANAGED_STORAGE_POLICY};
+pub use store::*;
 pub use submission_policy::{SubmissionCommandFacts, SubmissionDocumentFacts, SubmissionPolicy};
+pub use submission_sync::*;
+pub use submissions::*;
+pub use versions::*;
 
 use std::path::{Path, PathBuf};
 
@@ -81,7 +81,7 @@ impl Library {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
-        let library=Self { root };
+        let library = Self { root };
         let _guard = store::write_lock(&library)?;
         library.recover_pending_saves_locked()?;
         library.recover_pending_versions_locked()?;

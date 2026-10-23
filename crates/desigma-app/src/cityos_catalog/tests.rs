@@ -37,11 +37,16 @@ fn windows_catalog_font_fallback_contains_arabic_glyphs() {
 }
 
 #[test]
-fn theme_variables_open_the_collection_of_the_active_page(){
-    let (entry,specimen,snapshot)=editable_fixture();let document=local_library::create(&entry,&specimen,&snapshot,"light").unwrap();
-    let page=document.pages[0];let expected=document.get(page).unwrap().variables.modes.keys().next().unwrap().clone();
-    let mut app=crate::app::App::new(document);app.page=page;app.vars.collection=None;app.open_variables();
-    assert_eq!(app.vars.collection,Some(expected));
+fn theme_variables_open_the_collection_of_the_active_page() {
+    let (entry, specimen, snapshot) = editable_fixture();
+    let document = local_library::create(&entry, &specimen, &snapshot, "light").unwrap();
+    let page = document.pages[0];
+    let expected = document.get(page).unwrap().variables.modes.keys().next().unwrap().clone();
+    let mut app = crate::app::App::new(document);
+    app.page = page;
+    app.vars.collection = None;
+    app.open_variables();
+    assert_eq!(app.vars.collection, Some(expected));
 }
 
 struct LocalThemeMode {
@@ -57,7 +62,8 @@ fn local_theme_mode(document: &desigma_doc::Document, name: &str) -> LocalThemeM
     let collection = document.get(page).unwrap().variables.modes.keys().next().unwrap().clone();
     let mode = document.variable_collections[&collection].default_mode.clone();
     let primary = document.variables.values().find(|variable| variable.collection == collection && variable.name == "colors/primary").unwrap().id.clone();
-    let sample = document.nodes.values().find(|node| document.page_of(node.id) == Some(page) && node.variables.bindings.get("fills/0") == Some(&primary)).unwrap().id;
+    let sample =
+        document.nodes.values().find(|node| document.page_of(node.id) == Some(page) && node.variables.bindings.get("fills/0") == Some(&primary)).unwrap().id;
     LocalThemeMode { page, collection, mode, primary, sample }
 }
 
@@ -69,9 +75,7 @@ fn select_local_theme_collection(app: &mut crate::app::App, collection: &str) {
     let size = egui::vec2(1200., 900.);
     let name = format!("vars-coll:{}", app.doc.variable_collections[collection].name);
     let mut frame = |events| {
-        let _ = ctx.run_ui(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), events, ..Default::default()
-        }, |ui| {
+        let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), events, ..Default::default() }, |ui| {
             let content = ui.max_rect();
             crate::variables::view::show(app, ui, content);
         });
@@ -81,9 +85,10 @@ fn select_local_theme_collection(app: &mut crate::app::App, collection: &str) {
     let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", name)))).expect("Theme collection sidebar row");
     let pos = rect.center();
     for pressed in [true, false] {
-        frame(vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
-            pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
-        }]);
+        frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE },
+        ]);
     }
     assert_eq!(app.vars.collection.as_deref(), Some(collection));
 }

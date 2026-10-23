@@ -11,19 +11,27 @@ pub struct Recovery {
 }
 
 impl Recovery {
-    pub fn refresh_if_changed<H:EditorHost>(&mut self, app: &mut H) {
+    pub fn refresh_if_changed<H: EditorHost>(&mut self, app: &mut H) {
         let key = app.submission_key();
-        if self.key != key { self.reload(app); }
+        if self.key != key {
+            self.reload(app);
+        }
     }
 
-    pub fn reload<H:EditorHost>(&mut self, app: &mut H) {
+    pub fn reload<H: EditorHost>(&mut self, app: &mut H) {
         self.key = app.submission_key();
-        self.records.clear(); self.error = None; self.requested = None;
+        self.records.clear();
+        self.error = None;
+        self.requested = None;
         app.set_submission_frozen(None);
-        let Some((_, _, draft_id)) = &self.key else { return; };
+        let Some((_, _, draft_id)) = &self.key else {
+            return;
+        };
         match app.submissions() {
             Ok(records) => {
-                if records.iter().any(SubmissionRecord::frozen) { app.set_submission_frozen(Some(draft_id.clone())); }
+                if records.iter().any(SubmissionRecord::frozen) {
+                    app.set_submission_frozen(Some(draft_id.clone()));
+                }
                 self.records = records;
             }
             Err(error) => {
@@ -38,19 +46,19 @@ impl Recovery {
         self.records.iter().find(|record| record.state == SubmissionState::AcceptedSyncPending)
     }
 
-    pub fn recover_existing<H:EditorHost>(&mut self, app: &mut H, record: &SubmissionRecord) -> Result<bool, String> {
-        if !app.recover_submission(record)? {return Ok(false);}
+    pub fn recover_existing<H: EditorHost>(&mut self, app: &mut H, record: &SubmissionRecord) -> Result<bool, String> {
+        if !app.recover_submission(record)? {
+            return Ok(false);
+        }
         self.reload(app);
         Ok(true)
     }
 
-    pub fn install<H:EditorHost>(&mut self, app: &mut H, record: &SubmissionRecord, document: desigma_doc::Document) -> Result<(), String> {
-        app.install_accepted(record,document)?;
+    pub fn install<H: EditorHost>(&mut self, app: &mut H, record: &SubmissionRecord, document: desigma_doc::Document) -> Result<(), String> {
+        app.install_accepted(record, document)?;
         self.reload(app);
         Ok(())
     }
-
-
 }
 
 pub fn state_label(state: &SubmissionState) -> &'static str {

@@ -2,10 +2,10 @@
 //! binding picker and the App operations behind them. Every change goes through `Command::SetVariables`
 //! (or ordinary node updates for bindings) so it is one undo step.
 
+mod collection;
 pub mod popover;
 pub mod view;
 pub mod widgets;
-mod collection;
 
 use crate::app::App;
 use crate::edit::Tx;
@@ -189,10 +189,15 @@ impl App {
     /// Same-page manual choices survive; a theme page change follows its mode.
     pub(crate) fn sync_variable_collection(&mut self) {
         let current = self.vars.collection.as_deref().filter(|id| self.doc.variable_collections.contains_key(*id));
-        let page_collection = self.doc.get(self.page).and_then(|page| page.variables.modes.keys()
-            .find(|id| self.doc.variable_collections.contains_key(*id))).map(String::as_str);
-        let next = collection::select_collection(current, self.vars.collection_page != Some(self.page), page_collection,
-            self.doc.variable_collections.keys().next().map(String::as_str)).map(String::from);
+        let page_collection =
+            self.doc.get(self.page).and_then(|page| page.variables.modes.keys().find(|id| self.doc.variable_collections.contains_key(*id))).map(String::as_str);
+        let next = collection::select_collection(
+            current,
+            self.vars.collection_page != Some(self.page),
+            page_collection,
+            self.doc.variable_collections.keys().next().map(String::as_str),
+        )
+        .map(String::from);
         if next != self.vars.collection {
             self.finish_variable_editors();
             self.vars.clear_collection_rows();

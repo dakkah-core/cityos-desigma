@@ -1,6 +1,6 @@
 //! Existing portable-checkpoint v1 codec. Parsing grants no owner authority.
-use crate::{payload_digest, CheckpointStoragePolicy, LibraryError, Result, UNMANAGED_STORAGE_POLICY};
 use crate::storage_policy::checked_retention_roots;
+use crate::{payload_digest, CheckpointStoragePolicy, LibraryError, Result, UNMANAGED_STORAGE_POLICY};
 use desigma_doc::{Document, DocumentCheckpoint};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,9 +27,12 @@ fn read_payloads<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::resu
     struct Payloads;
     impl<'de> serde::de::Visitor<'de> for Payloads {
         type Value = BTreeMap<String, Vec<u8>>;
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result { formatter.write_str("unique digest-verified dependency payloads") }
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("unique digest-verified dependency payloads")
+        }
         fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> std::result::Result<Self::Value, M::Error> {
-            let mut payloads = BTreeMap::new(); let mut total = 0usize;
+            let mut payloads = BTreeMap::new();
+            let mut total = 0usize;
             while let Some((hash, bytes)) = map.next_entry::<String, Vec<u8>>()? {
                 total = total.checked_add(bytes.len()).ok_or_else(|| serde::de::Error::custom("Portable payload byte limit"))?;
                 if bytes.len() > MAX_PAYLOAD_BYTES || total > MAX_PAYLOAD_TOTAL || payloads.len() >= MAX_PAYLOADS {
@@ -61,13 +64,19 @@ impl VerifiedPortableCheckpoint {
         Self::parse_with_policy(&UNMANAGED_STORAGE_POLICY, text)
     }
     pub fn parse_with_policy(policy: &dyn CheckpointStoragePolicy, text: &str) -> Result<Self> {
-        if text.len() > MAX_PORTABLE_CHECKPOINT_BYTES { return Err(LibraryError::Invalid("Portable checkpoint exceeds the 128 MiB file limit".into())); }
+        if text.len() > MAX_PORTABLE_CHECKPOINT_BYTES {
+            return Err(LibraryError::Invalid("Portable checkpoint exceeds the 128 MiB file limit".into()));
+        }
         let wire: PortableWire = serde_json::from_str(text)?;
-        if wire.schema_version != "desigma.portable-checkpoint.v1" { return Err(LibraryError::Invalid("Unsupported portable checkpoint version".into())); }
+        if wire.schema_version != "desigma.portable-checkpoint.v1" {
+            return Err(LibraryError::Invalid("Unsupported portable checkpoint version".into()));
+        }
         let checkpoint = DocumentCheckpoint::from_json(&wire.checkpoint)?;
         policy.check_portable(&checkpoint)?;
         let roots: BTreeSet<_> = checked_retention_roots(policy, &checkpoint)?.into_iter().collect();
-        if roots != wire.payloads.keys().cloned().collect() { return Err(LibraryError::Invalid("Portable dependency closure mismatch".into())); }
+        if roots != wire.payloads.keys().cloned().collect() {
+            return Err(LibraryError::Invalid("Portable dependency closure mismatch".into()));
+        }
         Ok(Self { checkpoint, payloads: wire.payloads })
     }
     /// JSON inputs are bounded before allocation, including a growing-file race.
@@ -76,7 +85,9 @@ impl VerifiedPortableCheckpoint {
         Self::read_with_policy(&UNMANAGED_STORAGE_POLICY, path)
     }
     pub fn read_with_policy(policy: &dyn CheckpointStoragePolicy, path: &Path) -> Result<Option<Self>> {
-        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) { return Ok(None); }
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+            return Ok(None);
+        }
         let file = std::fs::File::open(path)?;
         let metadata = file.metadata()?;
         if !metadata.is_file() || metadata.len() > MAX_PORTABLE_CHECKPOINT_BYTES as u64 {
@@ -84,7 +95,9 @@ impl VerifiedPortableCheckpoint {
         }
         let mut text = String::new();
         file.take(MAX_PORTABLE_CHECKPOINT_BYTES as u64 + 1).read_to_string(&mut text)?;
-        if text.len() > MAX_PORTABLE_CHECKPOINT_BYTES { return Err(LibraryError::Invalid("JSON import changed beyond the 128 MiB file limit".into())); }
+        if text.len() > MAX_PORTABLE_CHECKPOINT_BYTES {
+            return Err(LibraryError::Invalid("JSON import changed beyond the 128 MiB file limit".into()));
+        }
         // Serde also accepts structs as positional arrays; only objects carry
         // a portable header. Still reject malformed JSON before falling back.
         if !text.trim_start().starts_with('{') {
@@ -92,13 +105,20 @@ impl VerifiedPortableCheckpoint {
             return Ok(None);
         }
         #[derive(Deserialize)]
-        struct Header { #[serde(rename = "schemaVersion", default)] schema_version: serde_json::Value }
+        struct Header {
+            #[serde(rename = "schemaVersion", default)]
+            schema_version: serde_json::Value,
+        }
         let header: Header = serde_json::from_str(&text)?;
         if header.schema_version.as_str().is_some_and(|version| version.starts_with("desigma.portable-checkpoint.")) {
             Self::parse_with_policy(policy, &text).map(Some)
-        } else { Ok(None) }
+        } else {
+            Ok(None)
+        }
     }
-    pub fn document(&self) -> &Document { &self.checkpoint.document }
+    pub fn document(&self) -> &Document {
+        &self.checkpoint.document
+    }
     /// Recheck the destination's installed policy at import time. A parsed
     /// portable value is immutable bytes, never a transferable policy grant.
     pub(crate) fn check_policy(&self, policy: &dyn CheckpointStoragePolicy) -> Result<()> {
@@ -109,7 +129,9 @@ impl VerifiedPortableCheckpoint {
         }
         Ok(())
     }
-    pub(crate) fn into_parts(self) -> (DocumentCheckpoint, BTreeMap<String, Vec<u8>>) { (self.checkpoint, self.payloads) }
+    pub(crate) fn into_parts(self) -> (DocumentCheckpoint, BTreeMap<String, Vec<u8>>) {
+        (self.checkpoint, self.payloads)
+    }
 }
 
 #[cfg(test)]
@@ -119,25 +141,38 @@ pub(crate) fn encode(checkpoint: &DocumentCheckpoint, payloads: BTreeMap<String,
 pub(crate) fn encode_with_policy(policy: &dyn CheckpointStoragePolicy, checkpoint: &DocumentCheckpoint, payloads: BTreeMap<String, Vec<u8>>) -> Result<String> {
     policy.check_portable(checkpoint)?;
     let roots: BTreeSet<_> = checked_retention_roots(policy, checkpoint)?.into_iter().collect();
-    if roots != payloads.keys().cloned().collect() { return Err(LibraryError::Invalid("Portable dependency closure mismatch".into())); }
-    if payloads.len() > MAX_PAYLOADS || payloads.values().any(|bytes| bytes.len() > MAX_PAYLOAD_BYTES)
-        || payloads.values().map(Vec::len).sum::<usize>() > MAX_PAYLOAD_TOTAL {
+    if roots != payloads.keys().cloned().collect() {
+        return Err(LibraryError::Invalid("Portable dependency closure mismatch".into()));
+    }
+    if payloads.len() > MAX_PAYLOADS
+        || payloads.values().any(|bytes| bytes.len() > MAX_PAYLOAD_BYTES)
+        || payloads.values().map(Vec::len).sum::<usize>() > MAX_PAYLOAD_TOTAL
+    {
         return Err(LibraryError::Invalid("Portable payload resource limit".into()));
     }
-    struct Bounded { bytes: Vec<u8>, exceeded: bool }
+    struct Bounded {
+        bytes: Vec<u8>,
+        exceeded: bool,
+    }
     impl Write for Bounded {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if bytes.len() > MAX_PORTABLE_CHECKPOINT_BYTES.saturating_sub(self.bytes.len()) {
-                self.exceeded = true; return Err(std::io::Error::other("Portable checkpoint exceeds the 128 MiB file limit"));
+                self.exceeded = true;
+                return Err(std::io::Error::other("Portable checkpoint exceeds the 128 MiB file limit"));
             }
-            self.bytes.extend_from_slice(bytes); Ok(bytes.len())
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     let wire = PortableWire { schema_version: "desigma.portable-checkpoint.v1".into(), checkpoint: checkpoint.to_json()?, payloads };
     let mut output = Bounded { bytes: Vec::new(), exceeded: false };
     if let Err(error) = serde_json::to_writer(&mut output, &wire) {
-        if output.exceeded { return Err(LibraryError::Invalid("Portable checkpoint exceeds the 128 MiB file limit".into())); }
+        if output.exceeded {
+            return Err(LibraryError::Invalid("Portable checkpoint exceeds the 128 MiB file limit".into()));
+        }
         return Err(error.into());
     }
     String::from_utf8(output.bytes).map_err(|error| LibraryError::Invalid(error.to_string()))
@@ -158,7 +193,9 @@ mod tests {
         }
     }
     impl Drop for JsonFile {
-        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     fn portable_json() -> serde_json::Value {
@@ -169,11 +206,18 @@ mod tests {
     #[test]
     fn read_leaves_unrelated_json_on_the_existing_import_path() {
         for text in [
-            "[]", "[1, true, null]", r#"["desigma.portable-checkpoint.v1"]"#,
+            "[]",
+            "[1, true, null]",
+            r#"["desigma.portable-checkpoint.v1"]"#,
             r#"["desigma.portable-checkpoint.v2"]"#,
             r#"[{"schemaVersion":"desigma.portable-checkpoint.v1"}]"#,
-            "{}", r#"{"schemaVersion":"figma.v1"}"#, r#"{"document":{"id":"root"}}"#,
-            "null", "true", "42", r#""desigma.portable-checkpoint.v1""#,
+            "{}",
+            r#"{"schemaVersion":"figma.v1"}"#,
+            r#"{"document":{"id":"root"}}"#,
+            "null",
+            "true",
+            "42",
+            r#""desigma.portable-checkpoint.v1""#,
         ] {
             let file = JsonFile::new(text);
             assert!(VerifiedPortableCheckpoint::read(&file.0).unwrap().is_none(), "{text}");
@@ -204,7 +248,9 @@ mod tests {
         for fault in ["missing", "checkpoint", "digest", "closure", "unknown"] {
             let mut value = portable_json();
             match fault {
-                "missing" => { value.as_object_mut().unwrap().remove("checkpoint"); }
+                "missing" => {
+                    value.as_object_mut().unwrap().remove("checkpoint");
+                }
                 "checkpoint" => value["checkpoint"] = serde_json::json!("{}"),
                 "digest" => value["payloads"]["invalid-digest"] = serde_json::json!([1]),
                 "closure" => value["payloads"][payload_digest(b"extra")] = serde_json::json!(b"extra".to_vec()),
@@ -221,8 +267,11 @@ mod tests {
             let mut value = portable_json();
             value["schemaVersion"] = serde_json::json!(version);
             let file = JsonFile::new(&value.to_string());
-            assert!(matches!(VerifiedPortableCheckpoint::read(&file.0), Err(LibraryError::Invalid(message))
-                if message == "Unsupported portable checkpoint version"), "{version}");
+            assert!(
+                matches!(VerifiedPortableCheckpoint::read(&file.0), Err(LibraryError::Invalid(message))
+                if message == "Unsupported portable checkpoint version"),
+                "{version}"
+            );
         }
     }
 

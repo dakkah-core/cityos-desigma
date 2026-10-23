@@ -96,8 +96,12 @@ fn variables_panel_keeps_document_save_shortcut_available() {
     let (document, fingerprint) = crate::io::load_path_observed(&path).unwrap();
     s.shell.app.doc = document;
     s.shell.app.file_path = Some(path.clone());
-    s.shell.app.autosave = crate::home::Autosave { seen_rev: s.app().canvas.tiles.rev(), saved_hash: crate::home::doc_hash(&s.app().doc),
-        external_fingerprint: Some(fingerprint), ..Default::default() };
+    s.shell.app.autosave = crate::home::Autosave {
+        seen_rev: s.app().canvas.tiles.rev(),
+        saved_hash: crate::home::doc_hash(&s.app().doc),
+        external_fingerprint: Some(fingerprint),
+        ..Default::default()
+    };
     open_view(&mut s, false);
     let variable = var(s.app(), "Surface/Card").id.clone();
     let (_, light, _) = theme_ids(s.app());

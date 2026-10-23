@@ -52,13 +52,25 @@ fn publish_fault(_phase: &str) -> Result<()> {
     {
         let hook = PUBLISH_HOOK.with(|slot| {
             let mut slot = slot.borrow_mut();
-            if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) { slot.take().map(|(_, hook)| hook) }
-            else { None }
+            if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) {
+                slot.take().map(|(_, hook)| hook)
+            } else {
+                None
+            }
         });
-        if let Some(hook) = hook { hook(); }
-        if PUBLISH_EXIT.with(|point| point.get() == Some(_phase)) { std::process::exit(92); }
+        if let Some(hook) = hook {
+            hook();
+        }
+        if PUBLISH_EXIT.with(|point| point.get() == Some(_phase)) {
+            std::process::exit(92);
+        }
         if PUBLISH_FAULT.with(|point| {
-            if point.get() == Some(_phase) { point.set(None); true } else { false }
+            if point.get() == Some(_phase) {
+                point.set(None);
+                true
+            } else {
+                false
+            }
         }) {
             return Err(std::io::Error::other(format!("Interrupted publication at {_phase}")).into());
         }
@@ -93,8 +105,7 @@ fn validate_index(index: &LibraryIndex, id: &str) -> Result<()> {
 }
 
 fn read_snapshot(dir: &Path, id: &str, version: u32) -> Result<LibrarySnapshot> {
-    let bytes = optional_bytes(&dir.join(format!("{version}.json")))?
-        .ok_or_else(|| LibraryError::NotFound(format!("library {id} version {version}")))?;
+    let bytes = optional_bytes(&dir.join(format!("{version}.json")))?.ok_or_else(|| LibraryError::NotFound(format!("library {id} version {version}")))?;
     let snapshot: LibrarySnapshot = serde_json::from_slice(&bytes)?;
     if snapshot.library_id != id || snapshot.version != version {
         return Err(invalid_publication("snapshot identity does not match its index"));
@@ -134,16 +145,20 @@ fn read_index(dir: &Path, id: &str) -> Result<LibraryIndex> {
 }
 
 fn changelog(previous: Option<&LibrarySnapshot>, next: &LibrarySnapshot) -> Vec<ChangeEntry> {
-    diff_snapshots(previous, next).into_iter().map(|update| ChangeEntry {
-        key: update.key,
-        kind: update.kind,
-        name: update.name,
-        change: match update.change {
-            UpdateKind::Added => "added",
-            UpdateKind::Changed => "changed",
-            UpdateKind::Removed => "removed",
-        }.into(),
-    }).collect()
+    diff_snapshots(previous, next)
+        .into_iter()
+        .map(|update| ChangeEntry {
+            key: update.key,
+            kind: update.kind,
+            name: update.name,
+            change: match update.change {
+                UpdateKind::Added => "added",
+                UpdateKind::Changed => "changed",
+                UpdateKind::Removed => "removed",
+            }
+            .into(),
+        })
+        .collect()
 }
 
 fn update_index(index: &mut LibraryIndex, snapshot: &LibrarySnapshot, entry: VersionEntry) {
@@ -155,10 +170,7 @@ fn update_index(index: &mut LibraryIndex, snapshot: &LibrarySnapshot, entry: Ver
 }
 
 fn empty_index(id: &str) -> LibraryIndex {
-    LibraryIndex {
-        id: id.into(), name: String::new(), versions: Vec::new(), components: 0, styles: 0, variables: 0,
-        source_path: None, source_file: None,
-    }
+    LibraryIndex { id: id.into(), name: String::new(), versions: Vec::new(), components: 0, styles: 0, variables: 0, source_path: None, source_file: None }
 }
 
 /// The caller holds the root publication lock throughout validation and replay.
@@ -205,9 +217,13 @@ fn recover_publication(dir: &Path, id: &str) -> Result<()> {
         return Err(invalid_publication("committed snapshot is missing"));
     }
     // All validation precedes the first target write. Replay is byte-idempotent.
-    if existing_snapshot.is_none() { write_atomic(&snapshot_path, pending.snapshot.as_bytes())?; }
+    if existing_snapshot.is_none() {
+        write_atomic(&snapshot_path, pending.snapshot.as_bytes())?;
+    }
     publish_fault("snapshot")?;
-    if !is_committed { write_atomic(&dir.join(INDEX), pending.index.as_bytes())?; }
+    if !is_committed {
+        write_atomic(&dir.join(INDEX), pending.index.as_bytes())?;
+    }
     publish_fault("index")?;
     remove_durable(&dir.join(PENDING))?;
     publish_fault("completion")
@@ -301,13 +317,12 @@ impl Library {
     /// process exit; try_lock never queues the UI behind a writer/recovery.
     /// All publication readers and mutators, including trash moves, participate.
     fn publication_lock(&self) -> Result<std::fs::File> {
-        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
-            .open(self.path(".publication.lock"))?;
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(self.path(".publication.lock"))?;
         match file.try_lock() {
             Ok(()) => Ok(file),
-            Err(std::fs::TryLockError::WouldBlock) => Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock, "Published library storage is busy; retry the operation",
-            ).into()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "Published library storage is busy; retry the operation").into())
+            }
             Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
         }
     }
@@ -367,20 +382,27 @@ impl Library {
         // Legacy ids may have been mapped to a safe directory name. Preserve
         // their persisted identity when addressed through that directory alias.
         let id = index.id.clone();
-        let previous_index = optional_bytes(&dir.join(INDEX))?.map(String::from_utf8)
-            .transpose().map_err(|_| invalid_publication("index is not UTF-8"))?;
+        let previous_index = optional_bytes(&dir.join(INDEX))?.map(String::from_utf8).transpose().map_err(|_| invalid_publication("index is not UTF-8"))?;
         let previous = if index.versions.is_empty() { None } else { Some(read_snapshot(&dir, &index.id, index.latest_version())?) };
-        let version = index.latest_version().max(doc.library.published.as_ref().map(|p| p.version).unwrap_or(0))
-            .checked_add(1).ok_or_else(|| invalid_publication("version sequence exhausted"))?;
+        let version = index
+            .latest_version()
+            .max(doc.library.published.as_ref().map(|p| p.version).unwrap_or(0))
+            .checked_add(1)
+            .ok_or_else(|| invalid_publication("version sequence exhausted"))?;
         let name = if doc.name.is_empty() { file_id_or_name.to_string() } else { doc.name.clone() };
         let snap = snapshot(doc, &id, &name, version);
         let published_at = now_rfc3339();
-        update_index(&mut index, &snap, VersionEntry {
-            version, description: description.into(), published_at: published_at.clone(), changelog: changelog(previous.as_ref(), &snap),
-        });
+        update_index(
+            &mut index,
+            &snap,
+            VersionEntry { version, description: description.into(), published_at: published_at.clone(), changelog: changelog(previous.as_ref(), &snap) },
+        );
         let mut pending = PendingPublication {
-            schema_version: "desigma.library-publication.v1".into(), previous_index,
-            index: serde_json::to_string_pretty(&index)?, snapshot: serde_json::to_string(&snap)?, digest: String::new(),
+            schema_version: "desigma.library-publication.v1".into(),
+            previous_index,
+            index: serde_json::to_string_pretty(&index)?,
+            snapshot: serde_json::to_string(&snap)?,
+            digest: String::new(),
         };
         pending.digest = pending.digest()?;
         publish_fault("before-journal")?;
@@ -430,7 +452,9 @@ impl Library {
             recover_publication(&e.path(), &id)?;
             // A failed first preparation can leave an empty directory without
             // publishing anything. It must not hide other committed libraries.
-            if std::fs::read_dir(e.path())?.next().transpose()?.is_none() { continue; }
+            if std::fs::read_dir(e.path())?.next().transpose()?.is_none() {
+                continue;
+            }
             out.push(read_index(&e.path(), &id)?);
         }
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
@@ -537,7 +561,9 @@ mod tests {
     struct PublishedRoot(PathBuf);
 
     impl Drop for PublishedRoot {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn seeded_publication() -> (PublishedRoot, Library, LibraryIndex, Vec<u8>, Vec<u8>) {
@@ -586,11 +612,21 @@ mod tests {
                 PUBLISH_FAULT.with(|point| point.set(Some(phase)));
                 assert!(lib.publish_library("ds", &next_document(), "Third description").is_err(), "{phase}/{reader}");
                 match reader {
-                    "open" => { Library::open(lib.root()).unwrap(); }
-                    "index" => { lib.library_index("ds").unwrap(); }
-                    "latest" => { lib.load_snapshot("ds", None).unwrap(); }
-                    "explicit" => { lib.load_snapshot("ds", Some(1)).unwrap(); }
-                    "list" => { assert_eq!(lib.list_libraries().unwrap().len(), 1); }
+                    "open" => {
+                        Library::open(lib.root()).unwrap();
+                    }
+                    "index" => {
+                        lib.library_index("ds").unwrap();
+                    }
+                    "latest" => {
+                        lib.load_snapshot("ds", None).unwrap();
+                    }
+                    "explicit" => {
+                        lib.load_snapshot("ds", Some(1)).unwrap();
+                    }
+                    "list" => {
+                        assert_eq!(lib.list_libraries().unwrap().len(), 1);
+                    }
                     _ => unreachable!(),
                 }
                 if phase == "before-journal" {
@@ -656,8 +692,12 @@ mod tests {
             std::process::exit(92);
         }
         let phase = match phase.as_str() {
-            "before-journal" => "before-journal", "journal" => "journal", "snapshot" => "snapshot",
-            "index" => "index", "completion" => "completion", _ => panic!("unexpected publication phase"),
+            "before-journal" => "before-journal",
+            "journal" => "journal",
+            "snapshot" => "snapshot",
+            "index" => "index",
+            "completion" => "completion",
+            _ => panic!("unexpected publication phase"),
         };
         PUBLISH_EXIT.with(|point| point.set(Some(phase)));
         lib.publish_library("ds", &next_document(), "Third description").unwrap();
@@ -666,8 +706,10 @@ mod tests {
 
     fn crash_command(root: &Path, phase: &str) -> std::process::Command {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "publish::tests::publication_crash_worker", "--ignored", "--test-threads=1"])
-            .env("DESIGMA_PUBLICATION_TEST_ROOT", root).env("DESIGMA_PUBLICATION_TEST_PHASE", phase);
+        command
+            .args(["--exact", "publish::tests::publication_crash_worker", "--ignored", "--test-threads=1"])
+            .env("DESIGMA_PUBLICATION_TEST_ROOT", root)
+            .env("DESIGMA_PUBLICATION_TEST_PHASE", phase);
         command
     }
 
@@ -676,20 +718,24 @@ mod tests {
         for first_publish in [false, true] {
             for phase in ["before-journal", "journal", "snapshot", "index", "completion"] {
                 let (root, lib, old, first, second) = seeded_publication();
-                if first_publish { std::fs::remove_dir_all(lib.library_dir("ds")).unwrap(); }
+                if first_publish {
+                    std::fs::remove_dir_all(lib.library_dir("ds")).unwrap();
+                }
                 assert_eq!(crash_command(&root.0, phase).status().unwrap().code(), Some(92), "{phase}");
                 let dir = lib.library_dir("ds");
                 let expected = if first_publish { 1 } else { 3 };
                 // Inspect actual on-disk boundary state before invoking recovery.
                 assert_eq!(dir.join(PENDING).exists(), matches!(phase, "journal" | "snapshot" | "index"));
                 assert_eq!(dir.join(format!("{expected}.json")).exists(), matches!(phase, "snapshot" | "index" | "completion"));
-                let pending: Option<PendingPublication> = optional_bytes(&dir.join(PENDING)).unwrap()
-                    .map(|bytes| serde_json::from_slice(&bytes).unwrap());
+                let pending: Option<PendingPublication> = optional_bytes(&dir.join(PENDING)).unwrap().map(|bytes| serde_json::from_slice(&bytes).unwrap());
                 let on_disk_index = optional_bytes(&dir.join(INDEX)).unwrap();
                 if matches!(phase, "index" | "completion") {
                     assert_eq!(serde_json::from_slice::<LibraryIndex>(on_disk_index.as_deref().unwrap()).unwrap().latest_version(), expected);
-                } else if first_publish { assert!(on_disk_index.is_none()); }
-                else { assert_eq!(serde_json::from_slice::<LibraryIndex>(on_disk_index.as_deref().unwrap()).unwrap(), old); }
+                } else if first_publish {
+                    assert!(on_disk_index.is_none());
+                } else {
+                    assert_eq!(serde_json::from_slice::<LibraryIndex>(on_disk_index.as_deref().unwrap()).unwrap(), old);
+                }
                 let reopened = Library::open(&root.0).unwrap();
                 if phase == "before-journal" {
                     assert_eq!(reopened.publish_library("ds", &next_document(), "Third description").unwrap().version, expected);
@@ -697,10 +743,15 @@ mod tests {
                 if first_publish {
                     assert_eq!(reopened.library_index("ds").unwrap().latest_version(), 1);
                     assert_eq!(reopened.load_snapshot("ds", Some(1)).unwrap().name, "Renamed Design System");
-                } else { assert_recovered(&reopened, &old, &first, &second); }
+                } else {
+                    assert_recovered(&reopened, &old, &first, &second);
+                }
                 if let Some(pending) = pending {
                     assert!(std::fs::read(dir.join(INDEX)).unwrap() == pending.index.as_bytes(), "{phase}: committed index bytes changed");
-                    assert!(std::fs::read(dir.join(format!("{expected}.json"))).unwrap() == pending.snapshot.as_bytes(), "{phase}: committed snapshot bytes changed");
+                    assert!(
+                        std::fs::read(dir.join(format!("{expected}.json"))).unwrap() == pending.snapshot.as_bytes(),
+                        "{phase}: committed snapshot bytes changed"
+                    );
                 }
                 let committed = std::fs::read(dir.join(format!("{expected}.json"))).unwrap();
                 // Replay after a second restart, then publish without a hint.
@@ -716,7 +767,10 @@ mod tests {
         let (root, lib, old, first, second) = seeded_publication();
         struct Worker(std::process::Child);
         impl Drop for Worker {
-            fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
         }
         let mut child = Worker(crash_command(&root.0, "hold-lock").spawn().unwrap());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -744,7 +798,20 @@ mod tests {
 
     #[test]
     fn recovery_rejects_invalid_intent_conflicting_snapshots_and_changed_history_before_writes() {
-        for damage in ["schema", "digest", "identity", "history", "source", "changelog", "counts", "snapshot", "index", "missing-index", "missing-history", "missing-committed-snapshot"] {
+        for damage in [
+            "schema",
+            "digest",
+            "identity",
+            "history",
+            "source",
+            "changelog",
+            "counts",
+            "snapshot",
+            "index",
+            "missing-index",
+            "missing-history",
+            "missing-committed-snapshot",
+        ] {
             let (_root, lib, _old, _first, _second) = seeded_publication();
             PUBLISH_FAULT.with(|point| point.set(Some(if damage == "missing-committed-snapshot" { "index" } else { "journal" })));
             assert!(lib.publish_library("ds", &next_document(), "Third description").is_err());
@@ -786,10 +853,13 @@ mod tests {
     }
 
     fn publication_files(dir: &Path) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
-        std::fs::read_dir(dir).unwrap().map(|entry| {
-            let entry = entry.unwrap();
-            (entry.file_name(), std::fs::read(entry.path()).unwrap())
-        }).collect()
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect()
     }
 
     #[test]
@@ -800,10 +870,15 @@ mod tests {
         let blocked_dir = dir.clone();
         // Obstruct the actual index replacement after its predecessor has been
         // validated and the new snapshot is durable, forcing a real OS failure.
-        PUBLISH_HOOK.with(|slot| *slot.borrow_mut() = Some(("snapshot", Box::new(move || {
-            std::fs::remove_file(blocked_dir.join(INDEX)).unwrap();
-            std::fs::create_dir(blocked_dir.join(INDEX)).unwrap();
-        }))));
+        PUBLISH_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some((
+                "snapshot",
+                Box::new(move || {
+                    std::fs::remove_file(blocked_dir.join(INDEX)).unwrap();
+                    std::fs::create_dir(blocked_dir.join(INDEX)).unwrap();
+                }),
+            ))
+        });
         assert!(matches!(lib.publish_library("ds", &next_document(), "Third description"), Err(LibraryError::Io(_))));
         let snapshot = std::fs::read(dir.join("3.json")).unwrap();
         let journal = std::fs::read(dir.join(PENDING)).unwrap();
@@ -853,9 +928,8 @@ mod tests {
         let root = PublishedRoot(tmp("legacy-identity"));
         let lib = Library::open(&root.0).unwrap();
         let mut doc = lib_doc();
-        doc.library.published = Some(PublishInfo {
-            library_id: "legacy/id".into(), name: doc.name.clone(), version: 0, description: String::new(), published_at: String::new(),
-        });
+        doc.library.published =
+            Some(PublishInfo { library_id: "legacy/id".into(), name: doc.name.clone(), version: 0, description: String::new(), published_at: String::new() });
         assert_eq!(lib.publish_library("ignored", &doc, "First").unwrap().version, 1);
         let second = lib.publish_library("legacy-id", &lib_doc(), "Second").unwrap();
         assert_eq!((second.library_id.as_str(), second.version), ("legacy/id", 2));

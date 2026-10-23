@@ -6,7 +6,7 @@ fn is_noop(c: &Command) -> bool {
 
 fn ids_of(doc: &Document, cmd: &Command, out: &mut Vec<NodeId>) {
     match cmd {
-        Command::CityosInstall { .. } | Command::RestoreDocument { .. } => {},
+        Command::CityosInstall { .. } | Command::RestoreDocument { .. } => {}
         Command::Insert { parent, nodes, .. } => {
             out.push(*parent);
             out.extend(nodes.iter().map(|n| n.id));
@@ -180,9 +180,7 @@ mod restore_regressions {
         let mut document = Document::new("current");
         let current = document.to_json().unwrap();
         let restored = Document::new("saved");
-        let command = Command::Batch(vec![Command::Batch(vec![Command::RestoreDocument {
-            document: Box::new(restored),
-        }])]);
+        let command = Command::Batch(vec![Command::Batch(vec![Command::RestoreDocument { document: Box::new(restored) }])]);
         let expected = format!("{command:?}");
         let result = with_sync(&mut document, command);
         assert_eq!(format!("{result:?}"), expected);

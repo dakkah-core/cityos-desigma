@@ -30,9 +30,7 @@ impl Temp {
         let mut checkpoint = DocumentCheckpoint::new(bound(&pins[0], "inactive"), History::default());
         checkpoint.install_baseline(bound(&pins[1], "undo-only"));
         for index in [2, 3] {
-            checkpoint.history.exec(&mut checkpoint.document, Command::CityosInstall {
-                document: Box::new(bound(&pins[index], payloads[index])),
-            }).unwrap();
+            checkpoint.history.exec(&mut checkpoint.document, Command::CityosInstall { document: Box::new(bound(&pins[index], payloads[index])) }).unwrap();
         }
         checkpoint.history.undo(&mut checkpoint.document).unwrap();
         let file = source.create_file_with_history(&project.id, None, "Portable", &checkpoint.document, &History::default()).unwrap();
@@ -41,18 +39,31 @@ impl Temp {
         // later exports. Its local record cannot travel in this earlier copy.
         let portable = source.export_checkpoint_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id).unwrap();
         let binding = checkpoint.document.cityos.as_ref().unwrap();
-        source.prepare_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, SubmissionCommand {
-            intent_id: "portable-intent".into(), operation_id: "portable-operation".into(), predecessor: None,
-            owner: "experience".into(), resource: "frame".into(),
-            scope: BTreeMap::from([("tenantId".into(), "fixture".into()), ("actorId".into(), "fixture".into())]),
-            base: binding.base.clone(), expected_revision: "a".repeat(40), semantic_base: binding.semantic_base.clone(),
-            submitted_snapshot: binding.exchange().unwrap()["semanticDraft"].clone(), dependency_pins: pins,
-        }).unwrap();
+        source
+            .prepare_submission_with_policy(
+                &desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY,
+                SubmissionCommand {
+                    intent_id: "portable-intent".into(),
+                    operation_id: "portable-operation".into(),
+                    predecessor: None,
+                    owner: "experience".into(),
+                    resource: "frame".into(),
+                    scope: BTreeMap::from([("tenantId".into(), "fixture".into()), ("actorId".into(), "fixture".into())]),
+                    base: binding.base.clone(),
+                    expected_revision: "a".repeat(40),
+                    semantic_base: binding.semantic_base.clone(),
+                    submitted_snapshot: binding.exchange().unwrap()["semanticDraft"].clone(),
+                    dependency_pins: pins,
+                },
+            )
+            .unwrap();
         (self.write("portable.json", &portable), checkpoint)
     }
 }
 impl Drop for Temp {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn ordinary(name: &str) -> Document {
@@ -69,13 +80,22 @@ fn bound(pin: &str, state: &str) -> Document {
     doc.images.insert("embedded".into(), vec![2, 4, 6]);
     let semantic_base = json!({"id":"frame","state":"base"});
     doc.cityos = Some(CityosBinding {
-        schema_version: "cityos.design-exchange.v3".into(), document_id: "document".into(), draft_id: "draft".into(),
+        schema_version: "cityos.design-exchange.v3".into(),
+        document_id: "document".into(),
+        draft_id: "draft".into(),
         base: CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
-        semantic_base: semantic_base.clone(), dependency_pins: vec![pin.into()],
-        occurrences: BTreeMap::from([(id.0.to_string(), CityosOccurrence {
-            definition_id: "fixture".into(), source_node_id: "material".into(), instance_id: Some("instance".into()),
-            occurrence_id: "occurrence".into(), view_id: "view".into(),
-        })]),
+        semantic_base: semantic_base.clone(),
+        dependency_pins: vec![pin.into()],
+        occurrences: BTreeMap::from([(
+            id.0.to_string(),
+            CityosOccurrence {
+                definition_id: "fixture".into(),
+                source_node_id: "material".into(),
+                instance_id: Some("instance".into()),
+                occurrence_id: "occurrence".into(),
+                view_id: "view".into(),
+            },
+        )]),
         exchange_v2: None,
         exchange_v3: Some(json!({
             "schemaVersion":"cityos.design-exchange.v3", "documentId":"document", "draftId":"draft", "draftRevision":0,
@@ -220,7 +240,10 @@ fn portable_open_saves_ordinary_native_edits_and_aborts_on_native_save_failure()
         let native = temp.0.join("current.desigma");
         io::save_path(&app.doc, &native).unwrap();
         app.autosave.external_fingerprint = Some(io::file_fingerprint(&native).unwrap());
-        if fail { std::fs::remove_file(&native).unwrap(); std::fs::create_dir(&native).unwrap(); }
+        if fail {
+            std::fs::remove_file(&native).unwrap();
+            std::fs::create_dir(&native).unwrap();
+        }
         app.file_path = Some(native.clone());
         app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
         app.add_page();
@@ -258,7 +281,9 @@ fn unsaved_ordinary_documents_and_changed_imports_are_never_discarded_for_a_chec
         assert_eq!(app.doc.to_json().unwrap(), doc);
         assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
         assert_eq!(app.file_path, original_path);
-        if let Some(path) = original_path { assert_eq!(std::fs::read_to_string(path).unwrap(), "keep original import"); }
+        if let Some(path) = original_path {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "keep original import");
+        }
         assert!(app.lib_file.is_none() && lib.list_projects().is_empty());
         assert!(!lib.path("cityos/payloads").exists());
     }
@@ -354,7 +379,9 @@ fn malformed_portables_never_flush_pending_notes_save_current_file_or_merge_comm
                 let pin = value["payloads"].as_object().unwrap().keys().next().unwrap().clone();
                 value["payloads"][pin] = json!([0]);
             }
-            "comments" => { value["comments"] = json!([{"id":"unexpected", "message":"do not merge"}]); }
+            "comments" => {
+                value["comments"] = json!([{"id":"unexpected", "message":"do not merge"}]);
+            }
             _ => {}
         }
         let text = if fault == "truncated" { r#"{"schemaVersion":"desigma.portable-checkpoint.v1","checkpoint":"#.to_string() } else { value.to_string() };
@@ -377,9 +404,14 @@ fn ordinary_native_json_and_svg_open_paths_still_use_the_original_loader() {
     let temp = Temp::new();
     let expected = ordinary("Ordinary");
     for extension in ["desigma", "json", "svg"] {
-        let path = temp.write(&format!("ordinary.{extension}"), &if extension == "svg" {
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>"#.into()
-        } else { expected.to_json().unwrap() });
+        let path = temp.write(
+            &format!("ordinary.{extension}"),
+            &if extension == "svg" {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>"#.into()
+            } else {
+                expected.to_json().unwrap()
+            },
+        );
         let loaded = io::load_path(&path).unwrap();
         let mut app = App::new(ordinary("Previous"));
         app.open_path(path.clone());
@@ -405,7 +437,10 @@ fn ordinary_comments_and_variables_json_still_merge_into_the_current_document() 
     app.open_path(temp.write("comments.json", r#"{"comments":[{"id":"1","message":"Keep this comment","user":{"handle":"Fixture"},"created_at":"2026-01-01T00:00:00Z","client_meta":{"x":4,"y":8}}]}"#));
     assert_eq!(app.doc.name, "Current");
     assert_eq!(app.doc.comments.len(), 1);
-    app.open_path(temp.write("comments-array.json", r#"[{"id":"2","message":"Array payload","user":{"handle":"Fixture"},"created_at":"2026-01-01T00:00:00Z","client_meta":{"x":4,"y":8}}]"#));
+    app.open_path(temp.write(
+        "comments-array.json",
+        r#"[{"id":"2","message":"Array payload","user":{"handle":"Fixture"},"created_at":"2026-01-01T00:00:00Z","client_meta":{"x":4,"y":8}}]"#,
+    ));
     assert_eq!(app.doc.comments.len(), 2, "ordinary JSON arrays must pass through portable recognition");
     assert!(app.lib_file.is_none() && app.file_path.is_none());
     assert!(app.hist.can_undo());

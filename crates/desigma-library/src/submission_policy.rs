@@ -33,10 +33,13 @@ pub(crate) fn submission_policy(policy: &dyn CheckpointStoragePolicy) -> Result<
     policy.submission_policy().ok_or_else(|| LibraryError::Invalid("Submission requires its explicit installed extension policy".into()))
 }
 
-pub(crate) fn inspect_document(policy: &dyn CheckpointStoragePolicy, command: &SubmissionCommand, document: &Document) -> Result<Option<SubmissionDocumentFacts>> {
+pub(crate) fn inspect_document(
+    policy: &dyn CheckpointStoragePolicy,
+    command: &SubmissionCommand,
+    document: &Document,
+) -> Result<Option<SubmissionDocumentFacts>> {
     let facts = submission_policy(policy)?.inspect_document(command, document)?;
-    if facts.as_ref().is_some_and(|facts| facts.document_id.trim().is_empty() || facts.draft_id.trim().is_empty())
-        || facts.is_none() && document.is_managed() {
+    if facts.as_ref().is_some_and(|facts| facts.document_id.trim().is_empty() || facts.draft_id.trim().is_empty()) || facts.is_none() && document.is_managed() {
         return Err(LibraryError::Invalid("Extension returned an invalid managed submission identity".into()));
     }
     Ok(facts)
@@ -48,12 +51,16 @@ pub(crate) fn inspect_document(policy: &dyn CheckpointStoragePolicy, command: &S
 #[cfg(test)]
 mod fixture {
     use crate::storage_policy::tests::BoundFixturePolicy;
+    use crate::{
+        payload_digest, LibraryError, Result, SubmissionCommand, SubmissionCommandFacts, SubmissionDocumentFacts, SubmissionObservation, SubmissionPolicy,
+        SubmissionRecord,
+    };
     use desigma_doc::{CityosBase, Document};
-    use crate::{payload_digest, LibraryError, Result, SubmissionCommand, SubmissionCommandFacts,
-        SubmissionDocumentFacts, SubmissionObservation, SubmissionPolicy, SubmissionRecord};
     use std::collections::BTreeMap;
 
-    fn invalid(message: &str) -> LibraryError { LibraryError::Invalid(message.into()) }
+    fn invalid(message: &str) -> LibraryError {
+        LibraryError::Invalid(message.into())
+    }
 
     impl SubmissionPolicy for BoundFixturePolicy {
         fn validate_command(&self, command: &SubmissionCommand) -> Result<SubmissionCommandFacts> {
@@ -63,10 +70,12 @@ mod fixture {
             match &command.base {
                 CityosBase::CanonicalGit { repository_id, commit }
                     if repository_id.is_empty() || commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
-                    return Err(invalid("Canonical committed base required")),
-                CityosBase::NativeOwner { owner, resource, revision }
-                    if owner != &command.owner || resource != &command.resource || revision.is_empty() =>
-                    return Err(invalid("Native base owner/resource mismatch")),
+                {
+                    return Err(invalid("Canonical committed base required"))
+                }
+                CityosBase::NativeOwner { owner, resource, revision } if owner != &command.owner || resource != &command.resource || revision.is_empty() => {
+                    return Err(invalid("Native base owner/resource mismatch"))
+                }
                 _ => {}
             }
             Ok(SubmissionCommandFacts { overlap_scope: BTreeMap::from([("tenantId".into(), command.scope["tenantId"].clone())]) })
@@ -74,17 +83,26 @@ mod fixture {
 
         fn inspect_document(&self, command: &SubmissionCommand, document: &Document) -> Result<Option<SubmissionDocumentFacts>> {
             let Some(binding) = &document.cityos else {
-                if document.is_managed() { return Err(invalid("Unsupported managed submission binding")); }
+                if document.is_managed() {
+                    return Err(invalid("Unsupported managed submission binding"));
+                }
                 return Ok(None);
             };
             binding.validate().map_err(LibraryError::Invalid)?;
-            let matches_legacy_effect = binding.base == command.base && binding.semantic_base == command.semantic_base
+            let matches_legacy_effect = binding.base == command.base
+                && binding.semantic_base == command.semantic_base
                 && binding.exchange().is_some_and(|exchange| exchange["semanticDraft"] == command.submitted_snapshot);
-            let matches_submitted = matches_legacy_effect && binding.exchange().is_some_and(|exchange|
-                exchange["semanticDraft"]["id"].as_str() == Some(command.resource.as_str())
-                    && exchange["base"]["sourceDigest"].as_str() == Some(command.expected_revision.as_str()));
-            Ok(Some(SubmissionDocumentFacts { document_id: binding.document_id.clone(), draft_id: binding.draft_id.clone(),
-                matches_submitted, matches_legacy_effect }))
+            let matches_submitted = matches_legacy_effect
+                && binding.exchange().is_some_and(|exchange| {
+                    exchange["semanticDraft"]["id"].as_str() == Some(command.resource.as_str())
+                        && exchange["base"]["sourceDigest"].as_str() == Some(command.expected_revision.as_str())
+                });
+            Ok(Some(SubmissionDocumentFacts {
+                document_id: binding.document_id.clone(),
+                draft_id: binding.draft_id.clone(),
+                matches_submitted,
+                matches_legacy_effect,
+            }))
         }
 
         fn validate_accepted(&self, record: &SubmissionRecord, previous: &Document, candidate: &Document) -> Result<()> {
@@ -99,11 +117,14 @@ mod fixture {
             let old = before.exchange().ok_or_else(|| invalid("Expanded original exchange required for synchronization"))?;
             let new = after.exchange().ok_or_else(|| invalid("Expanded accepted exchange required for synchronization"))?;
             if !self.inspect_document(&record.command, previous)?.is_some_and(|facts| facts.matches_submitted)
-                || before.document_id != after.document_id || before.draft_id != after.draft_id
-                || before.schema_version != after.schema_version || old.get("profileRef") != new.get("profileRef")
+                || before.document_id != after.document_id
+                || before.draft_id != after.draft_id
+                || before.schema_version != after.schema_version
+                || old.get("profileRef") != new.get("profileRef")
                 || old.get("semanticContract") != new.get("semanticContract")
                 || new["semanticBase"]["id"].as_str() != Some(record.command.resource.as_str())
-                || new["semanticBase"] != new["semanticDraft"] {
+                || new["semanticBase"] != new["semanticDraft"]
+            {
                 return Err(invalid("Accepted projection does not match the original resource/submitted snapshot"));
             }
             // Preserve the complete accepted resource, including compatible owner
@@ -111,13 +132,15 @@ mod fixture {
             let readback_digest = payload_digest(&serde_json::to_vec(&after.semantic_base)?);
             let pinned_readback = receipt.details.get("acceptedSemanticDigest").and_then(|value| value.as_str());
             if pinned_readback.is_some_and(|digest| digest != readback_digest)
-                || (after.semantic_base != record.command.submitted_snapshot && pinned_readback != Some(readback_digest.as_str())) {
+                || (after.semantic_base != record.command.submitted_snapshot && pinned_readback != Some(readback_digest.as_str()))
+            {
                 return Err(invalid("Full accepted semantic readback requires its original owner receipt digest"));
             }
             let revision = receipt.owner_revision.as_deref().ok_or_else(|| invalid("Accepted revision required"))?;
             match (&record.command.base, &after.base) {
                 (CityosBase::CanonicalGit { repository_id: original, .. }, CityosBase::CanonicalGit { repository_id, commit })
-                    if repository_id == original && commit == revision
+                    if repository_id == original
+                        && commit == revision
                         && old["base"]["sourcePath"].as_str().is_some_and(|path| !path.trim().is_empty())
                         && old["base"]["sourcePath"] == new["base"]["sourcePath"] => {}
                 (CityosBase::NativeOwner { .. }, CityosBase::NativeOwner { owner, resource, revision: actual })

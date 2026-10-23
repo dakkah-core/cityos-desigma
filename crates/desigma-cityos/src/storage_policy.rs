@@ -9,7 +9,9 @@ pub struct CityosStoragePolicy;
 pub const CITYOS_STORAGE_POLICY: CityosStoragePolicy = CityosStoragePolicy;
 
 impl CheckpointStoragePolicy for CityosStoragePolicy {
-    fn submission_policy(&self) -> Option<&dyn desigma_library::SubmissionPolicy> { Some(self) }
+    fn submission_policy(&self) -> Option<&dyn desigma_library::SubmissionPolicy> {
+        Some(self)
+    }
     fn check_portable(&self, checkpoint: &DocumentCheckpoint) -> Result<()> {
         for document in checkpoint_documents(checkpoint) {
             if let Some(binding) = &document.cityos {
@@ -31,7 +33,9 @@ impl CheckpointStoragePolicy for CityosStoragePolicy {
                 // Retain both native and exchange pins. A stale wrapper cannot
                 // drop dependencies held only by its expanded semantic payload.
                 if let Some(exchange) = binding.exchange() {
-                    let pins = exchange.get("dependencyPins").and_then(|pins| pins.as_array())
+                    let pins = exchange
+                        .get("dependencyPins")
+                        .and_then(|pins| pins.as_array())
                         .ok_or_else(|| LibraryError::Invalid("Expanded CityOS dependency pins are missing or invalid".into()))?;
                     for pin in pins {
                         let digest = pin["digest"].as_str().ok_or_else(|| LibraryError::Invalid("CityOS dependency pin has no digest".into()))?;
@@ -51,7 +55,7 @@ impl CheckpointStoragePolicy for CityosStoragePolicy {
 mod tests {
     use super::*;
     use desigma_doc::{CityosBinding, Command, Document, History, RetainedHistory};
-    use desigma_library::{Library, UNMANAGED_STORAGE_POLICY, VerifiedPortableCheckpoint};
+    use desigma_library::{Library, VerifiedPortableCheckpoint, UNMANAGED_STORAGE_POLICY};
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -59,11 +63,19 @@ mod tests {
     fn legacy(pin: &str, native: bool) -> Document {
         let mut document = Document::new("storage fixture");
         document.cityos = Some(CityosBinding {
-            schema_version: "cityos.design-exchange.v1".into(), document_id: "document".into(), draft_id: "draft".into(),
-            base: if native { CityosBase::NativeOwner { owner: "fixture-owner".into(), resource: "fixture".into(), revision: "1".into() } }
-                else { CityosBase::CanonicalGit { repository_id: "fixture".into(), commit: "a".repeat(40) } },
+            schema_version: "cityos.design-exchange.v1".into(),
+            document_id: "document".into(),
+            draft_id: "draft".into(),
+            base: if native {
+                CityosBase::NativeOwner { owner: "fixture-owner".into(), resource: "fixture".into(), revision: "1".into() }
+            } else {
+                CityosBase::CanonicalGit { repository_id: "fixture".into(), commit: "a".repeat(40) }
+            },
             semantic_base: json!({"id":"fixture","opaque":{"dependencyPins":"not a declared dependency field"}}),
-            dependency_pins: vec![pin.into()], occurrences: BTreeMap::new(), exchange_v2: None, exchange_v3: None,
+            dependency_pins: vec![pin.into()],
+            occurrences: BTreeMap::new(),
+            exchange_v2: None,
+            exchange_v3: None,
         });
         document
     }
@@ -81,7 +93,11 @@ mod tests {
     }
     fn nested_history_wire(document: Document, redo: bool) -> Value {
         let command = Command::Batch(vec![Command::Batch(vec![Command::CityosInstall { document: Box::new(document) }])]);
-        if redo { json!({"undo":[],"redo":[command]}) } else { json!({"undo":[command],"redo":[]}) }
+        if redo {
+            json!({"undo":[],"redo":[command]})
+        } else {
+            json!({"undo":[command],"redo":[]})
+        }
     }
     fn nested_history(document: Document, redo: bool) -> History {
         serde_json::from_value(nested_history_wire(document, redo)).unwrap()
@@ -92,8 +108,13 @@ mod tests {
         // native serializer to manufacture an impossible in-memory snapshot.
         let mut envelope: Value = serde_json::from_str(&expanded(&"a".repeat(64), &"b".repeat(64)).to_json().unwrap()).unwrap();
         let binding = document.cityos.as_ref().unwrap();
-        envelope["schemaVersion"] = json!(if binding.exchange_v3.is_some() { "desigma.document.v4" }
-            else if binding.exchange_v2.is_some() { "desigma.document.v3" } else { "desigma.document.v2" });
+        envelope["schemaVersion"] = json!(if binding.exchange_v3.is_some() {
+            "desigma.document.v4"
+        } else if binding.exchange_v2.is_some() {
+            "desigma.document.v3"
+        } else {
+            "desigma.document.v2"
+        });
         envelope["document"]["cityos"] = serde_json::to_value(document.cityos).unwrap();
         let wire = json!({"undo":[],"redo":[{"Batch":[{"Batch":[{"CityosInstall":{"document":envelope}}]}]}]});
         let error = serde_json::from_value::<History>(wire).expect_err("Malformed nested redo must fail before retention scanning");
@@ -105,24 +126,25 @@ mod tests {
             "current" => checkpoint.document = document,
             "archived" => checkpoint.retained.push(RetainedHistory { document, history: History::default() }),
             "undo" | "redo" => checkpoint.history = nested_history(document, placement == "redo"),
-            _ => checkpoint.retained.push(RetainedHistory { document: Document::new("archive"),
-                history: nested_history(document, placement == "archived-redo") }),
+            _ => checkpoint
+                .retained
+                .push(RetainedHistory { document: Document::new("archive"), history: nested_history(document, placement == "archived-redo") }),
         }
         checkpoint
     }
 
     #[test]
     fn cityos_retention_unions_native_and_semantic_pins_in_current_archive_nested_undo_and_redo() {
-        let hashes: Vec<_> = ['a','b','c','d','e','f','0'].iter().map(|letter| letter.to_string().repeat(64)).collect();
+        let hashes: Vec<_> = ['a', 'b', 'c', 'd', 'e', 'f', '0'].iter().map(|letter| letter.to_string().repeat(64)).collect();
         let mut checkpoint = DocumentCheckpoint::new(expanded(&hashes[0], &hashes[1]), nested_history(legacy(&hashes[2], false), false));
         let redo = nested_history(legacy(&hashes[3], false), true);
         let mut wire = serde_json::to_value(&checkpoint.history).unwrap();
         wire["redo"] = serde_json::to_value(redo).unwrap()["redo"].clone();
         checkpoint.history = serde_json::from_value(wire).unwrap();
-        checkpoint.retained.push(RetainedHistory { document: expanded(&hashes[4], &hashes[5]),
-            history: nested_history(legacy(&hashes[6], false), true) });
+        checkpoint.retained.push(RetainedHistory { document: expanded(&hashes[4], &hashes[5]), history: nested_history(legacy(&hashes[6], false), true) });
         let before = checkpoint.to_json().unwrap();
-        let mut expected = hashes; expected.sort();
+        let mut expected = hashes;
+        expected.sort();
         assert_eq!(CITYOS_STORAGE_POLICY.retention_roots(&checkpoint).unwrap(), expected);
         assert!(CITYOS_STORAGE_POLICY.check_portable(&checkpoint).is_ok());
         assert_eq!(checkpoint.to_json().unwrap(), before, "Storage policy cannot edit or qualify semantic state");
@@ -145,13 +167,26 @@ mod tests {
     #[test]
     fn missing_invalid_or_opaque_expanded_dependency_declarations_never_become_empty_roots() {
         let pin = "a".repeat(64);
-        for declaration in [None, Some(Value::Null), Some(json!(true)), Some(json!("opaque")), Some(json!({"digest":pin})),
-            Some(json!([{}])), Some(json!([{"digest":null}])), Some(json!([{"digest":5}])), Some(json!([{"digest":"invalid"}]))] {
+        for declaration in [
+            None,
+            Some(Value::Null),
+            Some(json!(true)),
+            Some(json!("opaque")),
+            Some(json!({"digest":pin})),
+            Some(json!([{}])),
+            Some(json!([{"digest":null}])),
+            Some(json!([{"digest":5}])),
+            Some(json!([{"digest":"invalid"}])),
+        ] {
             let mut document = expanded(&pin, &pin);
             let exchange = document.cityos.as_mut().unwrap().exchange_mut().unwrap();
             match declaration {
-                Some(value) => { exchange["dependencyPins"] = value; }
-                None => { exchange.as_object_mut().unwrap().remove("dependencyPins"); }
+                Some(value) => {
+                    exchange["dependencyPins"] = value;
+                }
+                None => {
+                    exchange.as_object_mut().unwrap().remove("dependencyPins");
+                }
             }
             for placement in ["current", "archived", "redo"] {
                 let checkpoint = placed(document.clone(), placement);
@@ -169,7 +204,8 @@ mod tests {
 
     #[test]
     fn only_actual_bound_exchange_pins_are_interpreted_and_invalid_wrapper_roots_fail_closed() {
-        let native_pin = "a".repeat(64); let semantic_pin = "b".repeat(64);
+        let native_pin = "a".repeat(64);
+        let semantic_pin = "b".repeat(64);
         let document = expanded(&native_pin, &semantic_pin);
         let checkpoint = placed(document.clone(), "current");
         // The helper's opaque semantic data contains a similarly named invalid
@@ -189,10 +225,15 @@ mod tests {
     impl Temp {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!("desigma-cityos-policy-{}", desigma_library::new_id()));
-            std::fs::create_dir_all(&path).unwrap(); Self(path)
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
         }
     }
-    impl Drop for Temp { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn installed_policy_preserves_native_library_retention_without_enabling_portable_export() {

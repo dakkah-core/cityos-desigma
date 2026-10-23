@@ -12,15 +12,15 @@ pub mod canvas;
 mod style;
 pub use style::{CatalogStyle, CatalogUiServices, SpecimenRenderer};
 pub mod local_library;
+mod observation;
 mod preview;
 mod support;
-mod observation;
 pub use observation::CoverageObservation;
-mod tools;
-#[cfg(test)]
-mod tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+#[cfg(test)]
+mod tests;
+mod tools;
 mod ui;
 
 const ACTIVE_REPAINT: Duration = Duration::from_millis(100);
@@ -60,8 +60,7 @@ struct CatalogBinding {
 }
 
 fn scan_cancelled(error: &str) -> bool {
-    matches!(error, "Catalog request cancelled; previous generation retained"
-        | "CityOS background work cancelled; previous generation retained")
+    matches!(error, "Catalog request cancelled; previous generation retained" | "CityOS background work cancelled; previous generation retained")
 }
 
 fn retain_cancelled_refresh(result: &Result<Value, String>, cancelled: bool, same_session: bool, had_generation: bool) -> bool {
@@ -69,20 +68,27 @@ fn retain_cancelled_refresh(result: &Result<Value, String>, cancelled: bool, sam
 }
 
 fn recover_previous_catalog(binding: &CatalogBinding, cancelled: Arc<AtomicBool>, refresh_error: &str) -> Result<(Client, Value), String> {
-    if binding.config.cache.is_none() { return Err("Saved-library recovery is unavailable without a cache".into()); }
-    let mut client=Client::connect_with_cancel(&binding.config,cancelled)?;
-    let mut summary=client.restore_cache(&binding.config,&binding.mode)?;
-    if summary["generationId"].as_str()!=Some(binding.generation.as_str()) || summary["snapshot"]["mode"].as_str()!=Some(binding.mode.as_str()) {
+    if binding.config.cache.is_none() {
+        return Err("Saved-library recovery is unavailable without a cache".into());
+    }
+    let mut client = Client::connect_with_cancel(&binding.config, cancelled)?;
+    let mut summary = client.restore_cache(&binding.config, &binding.mode)?;
+    if summary["generationId"].as_str() != Some(binding.generation.as_str()) || summary["snapshot"]["mode"].as_str() != Some(binding.mode.as_str()) {
         return Err("The saved library changed; refresh before reading a different generation".into());
     }
-    summary["stale"]=Value::Bool(true);
-    summary["refreshError"]=Value::String(refresh_error.into());
-    summary["restoredAfterRefreshFailure"]=Value::Bool(true);
-    Ok((client,summary))
+    summary["stale"] = Value::Bool(true);
+    summary["refreshError"] = Value::String(refresh_error.into());
+    summary["restoredAfterRefreshFailure"] = Value::Bool(true);
+    Ok((client, summary))
 }
 
-fn read_catalog<T>(client: &mut Option<Client>, session: &mut Option<CatalogBinding>, fence: &mut bool,
-    binding: &CatalogBinding, read: impl FnOnce(&mut Client) -> Result<T, String>) -> Result<T, String> {
+fn read_catalog<T>(
+    client: &mut Option<Client>,
+    session: &mut Option<CatalogBinding>,
+    fence: &mut bool,
+    binding: &CatalogBinding,
+    read: impl FnOnce(&mut Client) -> Result<T, String>,
+) -> Result<T, String> {
     let result = (|| {
         let current = client.as_mut().ok_or("Refresh the repository first")?;
         if session.as_ref() != Some(binding) || current.generation.as_deref() != Some(binding.generation.as_str()) {
@@ -115,10 +121,14 @@ enum Reply {
 }
 
 fn send_reply(responses: &Sender<Reply>, repaint: &Mutex<Option<egui::Context>>, reply: Reply) -> bool {
-    if responses.send(reply).is_err() { return false; }
+    if responses.send(reply).is_err() {
+        return false;
+    }
     // Notify only after queueing a result/event. Never wake egui on an empty poll.
     let context = repaint.lock().ok().and_then(|context| context.clone());
-    if let Some(context) = context { context.request_repaint(); }
+    if let Some(context) = context {
+        context.request_repaint();
+    }
     true
 }
 pub struct Browser {
@@ -130,8 +140,8 @@ pub struct Browser {
     pub local_design_error: Option<String>,
     pub has_bound_draft: bool,
     pub host_diagnostic_request: bool,
-    pub inline_preview:Option<(Value,egui::Rect)>,
-    pub inline_status:String,
+    pub inline_preview: Option<(Value, egui::Rect)>,
+    pub inline_status: String,
     repository: String,
     reader: String,
     node: String,
@@ -205,10 +215,21 @@ impl Browser {
         CoverageObservation::from_summary(self.summary.as_ref()?, self.error.is_some())
     }
     pub fn workspace_config(&self) -> crate::bridge::Config {
-        crate::bridge::Config::from_reader_options(Some(self.repository.clone().into()),Some(self.reader.clone().into()),
-            Some(self.node.clone().into()),self.cache.clone())
+        crate::bridge::Config::from_reader_options(
+            Some(self.repository.clone().into()),
+            Some(self.reader.clone().into()),
+            Some(self.node.clone().into()),
+            self.cache.clone(),
+        )
     }
-    pub fn new(repository: Option<PathBuf>, reader: Option<PathBuf>, node: Option<PathBuf>, cache: Option<PathBuf>, canonical_ref: Option<String>, services: CatalogUiServices) -> Self {
+    pub fn new(
+        repository: Option<PathBuf>,
+        reader: Option<PathBuf>,
+        node: Option<PathBuf>,
+        cache: Option<PathBuf>,
+        canonical_ref: Option<String>,
+        services: CatalogUiServices,
+    ) -> Self {
         let (jobs, requests) = mpsc::channel();
         let (responses, replies) = mpsc::channel();
         let repaint = Arc::new(Mutex::new(None));
@@ -237,36 +258,49 @@ impl Browser {
                 };
                 let reply = match job {
                     Job::Restore(epoch, config, mode) => {
-                        let result=crate::jobs::run(true,Some(&worker_cancel),|| {
-                            client=None;
-                            Client::connect_with_cancel(&config,worker_cancel.clone()).and_then(|mut current| {
-                                let result=current.restore_cache(&config,&mode);client=Some(current);result
+                        let result = crate::jobs::run(true, Some(&worker_cancel), || {
+                            client = None;
+                            Client::connect_with_cancel(&config, worker_cancel.clone()).and_then(|mut current| {
+                                let result = current.restore_cache(&config, &mode);
+                                client = Some(current);
+                                result
                             })
-                        }).and_then(|summary| {
-                            if summary["snapshot"]["mode"].as_str()!=Some(mode.as_str()) {return Err("The reader returned a different source mode".into());}
-                            let generation=summary["generationId"].as_str().filter(|id|!id.is_empty()).ok_or("Missing generation identity")?;
-                            session=Some(CatalogBinding {config,mode,generation:generation.into()});fence=false;Ok(summary)
+                        })
+                        .and_then(|summary| {
+                            if summary["snapshot"]["mode"].as_str() != Some(mode.as_str()) {
+                                return Err("The reader returned a different source mode".into());
+                            }
+                            let generation = summary["generationId"].as_str().filter(|id| !id.is_empty()).ok_or("Missing generation identity")?;
+                            session = Some(CatalogBinding { config, mode, generation: generation.into() });
+                            fence = false;
+                            Ok(summary)
                         });
-                        if result.is_err(){client=None;session=None;fence=false;}
-                        Reply::Scan(epoch,result)
+                        if result.is_err() {
+                            client = None;
+                            session = None;
+                            fence = false;
+                        }
+                        Reply::Scan(epoch, result)
                     }
                     Job::Scan(epoch, config, mode, prefer_cache) => {
                         // Preserve a healthy session for incremental refresh. Configuration
                         // changes replace the child and cannot reuse its old generations.
-                        let same_session = session.as_ref().is_some_and(|binding| binding.config == config && binding.mode == mode)
-                            && client.is_some();
-                        let had_generation = client.as_ref().is_some_and(|c| session.as_ref().is_some_and(|binding|
-                            c.generation.as_deref() == Some(binding.generation.as_str())));
-                        let previous=session.clone();
-                        let result = crate::jobs::run(false,Some(&worker_cancel),|| if same_session {
-                            client.as_mut().unwrap().scan(&config, &mode)
-                        } else {
-                            client = None;
-                            Client::connect_with_cancel(&config, worker_cancel.clone()).and_then(|mut c| {
-                                let result = c.scan_with_cache(&config, &mode, prefer_cache);
-                                client = Some(c);
-                                result
-                            })
+                        let same_session = session.as_ref().is_some_and(|binding| binding.config == config && binding.mode == mode) && client.is_some();
+                        let had_generation = client
+                            .as_ref()
+                            .is_some_and(|c| session.as_ref().is_some_and(|binding| c.generation.as_deref() == Some(binding.generation.as_str())));
+                        let previous = session.clone();
+                        let result = crate::jobs::run(false, Some(&worker_cancel), || {
+                            if same_session {
+                                client.as_mut().unwrap().scan(&config, &mode)
+                            } else {
+                                client = None;
+                                Client::connect_with_cancel(&config, worker_cancel.clone()).and_then(|mut c| {
+                                    let result = c.scan_with_cache(&config, &mode, prefer_cache);
+                                    client = Some(c);
+                                    result
+                                })
+                            }
                         });
                         let mut result = result.and_then(|summary| {
                             if summary["snapshot"]["mode"].as_str() != Some(mode.as_str()) {
@@ -277,17 +311,21 @@ impl Browser {
                             fence = false;
                             Ok(summary)
                         });
-                        if let Some(error)=result.as_ref().err().cloned() {
+                        if let Some(error) = result.as_ref().err().cloned() {
                             if same_session && had_generation && !worker_cancel.load(Ordering::Acquire) {
-                                if let Some(binding)=previous.filter(|binding|binding.config.cache.is_some()) {
+                                if let Some(binding) = previous.filter(|binding| binding.config.cache.is_some()) {
                                     // A failed remote refresh must not strand browsing. Reconnect
                                     // only to the exact validated saved generation; never rescan,
                                     // adopt a replacement pointer, or consult the remote here.
-                                    client=None;
-                                    match crate::jobs::run(true,Some(&worker_cancel),||
-                                        recover_previous_catalog(&binding,worker_cancel.clone(),&error)) {
-                                        Ok((recovered,summary))=>{client=Some(recovered);session=Some(binding);fence=false;result=Ok(summary);},
-                                        Err(recovery_error)=>result=Err(format!("{error}. Saved-library recovery failed: {recovery_error}")),
+                                    client = None;
+                                    match crate::jobs::run(true, Some(&worker_cancel), || recover_previous_catalog(&binding, worker_cancel.clone(), &error)) {
+                                        Ok((recovered, summary)) => {
+                                            client = Some(recovered);
+                                            session = Some(binding);
+                                            fence = false;
+                                            result = Ok(summary);
+                                        }
+                                        Err(recovery_error) => result = Err(format!("{error}. Saved-library recovery failed: {recovery_error}")),
                                     }
                                 }
                             }
@@ -326,8 +364,8 @@ impl Browser {
             local_design_error: None,
             has_bound_draft: false,
             host_diagnostic_request: false,
-            inline_preview:None,
-            inline_status:String::new(),
+            inline_preview: None,
+            inline_status: String::new(),
             repository: repository.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             reader: reader.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             node: node.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "node".into()),
@@ -381,13 +419,22 @@ impl Browser {
         browser
     }
     fn reader_config(&self) -> ReaderConfig {
-        ReaderConfig { node: self.node.clone().into(), reader: self.reader.clone().into(), repository: self.repository.clone().into(),
-            cache: self.cache.clone(), canonical_ref: self.canonical_ref.clone() }
+        ReaderConfig {
+            node: self.node.clone().into(),
+            reader: self.reader.clone().into(),
+            repository: self.repository.clone().into(),
+            cache: self.cache.clone(),
+            canonical_ref: self.canonical_ref.clone(),
+        }
     }
     fn usable_generation(&self) -> Option<&CatalogBinding> {
-        self.catalog_binding.as_ref().filter(|binding| binding.config == self.reader_config() && binding.mode == self.mode
-            && self.summary.as_ref().is_some_and(|summary| summary["generationId"].as_str() == Some(binding.generation.as_str())
-                && summary["snapshot"]["mode"].as_str() == Some(binding.mode.as_str())))
+        self.catalog_binding.as_ref().filter(|binding| {
+            binding.config == self.reader_config()
+                && binding.mode == self.mode
+                && self.summary.as_ref().is_some_and(|summary| {
+                    summary["generationId"].as_str() == Some(binding.generation.as_str()) && summary["snapshot"]["mode"].as_str() == Some(binding.mode.as_str())
+                })
+        })
     }
     fn yield_to_catalog_read(&self) {
         if self.busy && self.activity == "Refreshing repository" && self.usable_generation().is_some() {
@@ -407,15 +454,27 @@ impl Browser {
         self.cancelled.store(false, Ordering::Release);
         self.epoch += 1;
         self.busy = true;
-        self.activity = if cache_only { "Restoring saved library" } else if prefer_cache { "Reading repository" } else { "Refreshing repository" };
+        self.activity = if cache_only {
+            "Restoring saved library"
+        } else if prefer_cache {
+            "Reading repository"
+        } else {
+            "Refreshing repository"
+        };
         self.error = None;
         self.last_refresh = Instant::now();
         let config = self.reader_config();
         self.scanning = Some((config.clone(), self.mode.clone()));
-        let _ = self.jobs.send(if cache_only {Job::Restore(self.epoch,config,self.mode.clone())} else {Job::Scan(self.epoch, config, self.mode.clone(), prefer_cache)});
+        let _ = self.jobs.send(if cache_only {
+            Job::Restore(self.epoch, config, self.mode.clone())
+        } else {
+            Job::Scan(self.epoch, config, self.mode.clone(), prefer_cache)
+        });
     }
     pub fn yield_to_design(&self) {
-        if self.busy && matches!(self.activity,"Reading repository"|"Refreshing repository"|"Restoring saved library") {self.cancelled.store(true,Ordering::Release);}
+        if self.busy && matches!(self.activity, "Reading repository" | "Refreshing repository" | "Restoring saved library") {
+            self.cancelled.store(true, Ordering::Release);
+        }
     }
     fn query(&mut self, offset: usize) {
         if self.busy {
@@ -439,14 +498,18 @@ impl Browser {
                     self.busy = false;
                     self.last_refresh = Instant::now();
                     let scan = self.scanning.take();
-                    if self.activity=="Restoring saved library" && !self.cancelled.load(Ordering::Acquire)
-                        && scan.as_ref().is_some_and(|(config,mode)|*config==self.reader_config() && *mode==self.mode)
-                        && result.as_ref().is_err_and(|error|error.starts_with("CACHE_RESTORE_UNAVAILABLE")) {
+                    if self.activity == "Restoring saved library"
+                        && !self.cancelled.load(Ordering::Acquire)
+                        && scan.as_ref().is_some_and(|(config, mode)| *config == self.reader_config() && *mode == self.mode)
+                        && result.as_ref().is_err_and(|error| error.starts_with("CACHE_RESTORE_UNAVAILABLE"))
+                    {
                         // A cache miss/incompatible capture can only enter the
                         // pressure-aware background path, never this recovery job.
-                        self.start_refresh(false);continue;
+                        self.start_refresh(false);
+                        continue;
                     }
-                    let cancelled_refresh = self.cancelled.load(Ordering::Acquire) && self.usable_generation().is_some()
+                    let cancelled_refresh = self.cancelled.load(Ordering::Acquire)
+                        && self.usable_generation().is_some()
                         && scan.as_ref().is_some_and(|(config, mode)| *config == self.reader_config() && *mode == self.mode)
                         && result.as_ref().is_err_and(|error| scan_cancelled(error));
                     // The worker has returned from Scan (including its cancellation
@@ -456,8 +519,10 @@ impl Browser {
                         self.error = None;
                         continue;
                     }
-                    self.refresh_failures = if result.as_ref().is_ok_and(|summary| summary["refreshError"].is_null()
-                        && (summary["stale"] != true || summary["restoredCache"] == true)) {
+                    self.refresh_failures = if result
+                        .as_ref()
+                        .is_ok_and(|summary| summary["refreshError"].is_null() && (summary["stale"] != true || summary["restoredCache"] == true))
+                    {
                         0
                     } else {
                         self.refresh_failures.saturating_add(1)
@@ -465,7 +530,8 @@ impl Browser {
                     match result {
                         Ok(summary) => {
                             if summary["snapshot"]["mode"].as_str() != Some(self.mode.as_str())
-                                || scan.as_ref().is_some_and(|(config, mode)| *config != self.reader_config() || *mode != self.mode) {
+                                || scan.as_ref().is_some_and(|(config, mode)| *config != self.reader_config() || *mode != self.mode)
+                            {
                                 self.catalog_binding = None;
                                 self.error = Some("The reader returned a different source mode. The previous catalog is still shown; refresh to retry.".into());
                             } else {
@@ -474,7 +540,8 @@ impl Browser {
                                     self.error = Some("Missing generation identity; refresh to retry".into());
                                     continue;
                                 };
-                                self.catalog_binding = Some(CatalogBinding { config: self.reader_config(), mode: self.mode.clone(), generation: generation.into() });
+                                self.catalog_binding =
+                                    Some(CatalogBinding { config: self.reader_config(), mode: self.mode.clone(), generation: generation.into() });
                                 let changed = self.summary.as_ref().is_none_or(|old| old["generationId"] != summary["generationId"]);
                                 let needs_query = changed || self.displayed_filters != self.filters || self.filter_changed.is_some();
                                 self.summary = Some(summary);
@@ -488,7 +555,10 @@ impl Browser {
                                 }
                             }
                         }
-                        Err(e) => { self.catalog_binding = None; self.error = Some(e); },
+                        Err(e) => {
+                            self.catalog_binding = None;
+                            self.error = Some(e);
+                        }
                     }
                 }
                 Reply::Query(epoch, filters, offset, result) if epoch == self.epoch => {
@@ -505,15 +575,24 @@ impl Browser {
                             self.next = page.next_offset;
                         }
                         Ok(_) => {} // The user changed filters while the request was in flight.
-                        Err(e) => { self.catalog_binding = None; self.error = Some(e); },
+                        Err(e) => {
+                            self.catalog_binding = None;
+                            self.error = Some(e);
+                        }
                     }
                 }
                 Reply::Materialize(epoch, id, result) if epoch == self.epoch => {
                     self.busy = false;
-                    if result.is_err() { self.catalog_binding = None; }
-                    if let Err(error) = &result { self.error = Some(error.clone()); }
+                    if result.is_err() {
+                        self.catalog_binding = None;
+                    }
+                    if let Err(error) = &result {
+                        self.error = Some(error.clone());
+                    }
                     if self.usable_generation().is_none() || self.selected.as_ref().is_none_or(|entry| entry.id != id) {
-                        if let Err(error) = result { self.preview_error = Some(error); }
+                        if let Err(error) = result {
+                            self.preview_error = Some(error);
+                        }
                         continue;
                     }
                     match result {
@@ -532,7 +611,10 @@ impl Browser {
                             self.specimen = Some(value);
                             self.preview_error = None;
                         }
-                        Err(e) => { self.catalog_binding = None; self.preview_error = Some(e); },
+                        Err(e) => {
+                            self.catalog_binding = None;
+                            self.preview_error = Some(e);
+                        }
                     }
                 }
                 Reply::SourceChanged => self.source_changed = true,
@@ -547,7 +629,9 @@ impl Browser {
             previous.search = self.filters.search.clone();
             if self.filter_changed.is_none() || previous != self.filters {
                 self.navigation_back.push(self.location());
-                if self.navigation_back.len() > 40 { self.navigation_back.remove(0); }
+                if self.navigation_back.len() > 40 {
+                    self.navigation_back.remove(0);
+                }
             }
             self.navigation_forward.clear();
             self.location_filters = self.filters.clone();
@@ -570,14 +654,25 @@ impl Browser {
         self.inline_preview = None;
     }
     fn location(&self) -> Location {
-        Location { filters: self.location_filters.clone(), selected: self.selected.clone(), detail_tab: self.detail_tab,
-            theme_mode: self.theme_mode.clone(), results_visible: self.results_visible }
+        Location {
+            filters: self.location_filters.clone(),
+            selected: self.selected.clone(),
+            detail_tab: self.detail_tab,
+            theme_mode: self.theme_mode.clone(),
+            results_visible: self.results_visible,
+        }
     }
     fn navigate_history(&mut self, forward: bool) {
         let location = if forward { self.navigation_forward.pop() } else { self.navigation_back.pop() };
-        let Some(location) = location else { return; };
+        let Some(location) = location else {
+            return;
+        };
         let current = self.location();
-        if forward { self.navigation_back.push(current); } else { self.navigation_forward.push(current); }
+        if forward {
+            self.navigation_back.push(current);
+        } else {
+            self.navigation_forward.push(current);
+        }
         self.clear_preview();
         self.filters = location.filters.clone();
         self.location_filters = location.filters;
@@ -602,14 +697,23 @@ impl Browser {
     }
     fn refresh_delay(&self, now: Instant) -> Duration {
         let interval = Duration::from_secs((60_u64 << self.refresh_failures.min(4)).min(900));
-        interval.saturating_sub(now.saturating_duration_since(self.last_refresh))
+        interval
+            .saturating_sub(now.saturating_duration_since(self.last_refresh))
             .max(Duration::from_secs(10).saturating_sub(now.saturating_duration_since(self.last_interaction)))
     }
     fn next_repaint_after(&self, now: Instant) -> Option<Duration> {
-        if !self.open { return None; }
-        if self.busy || self.pending_selection { return Some(ACTIVE_REPAINT); }
-        if let Some(changed)=self.filter_changed { return Some(FILTER_DEBOUNCE.saturating_sub(now.saturating_duration_since(changed))); }
-        if !self.auto_refresh || self.summary.is_none() { return None; }
+        if !self.open {
+            return None;
+        }
+        if self.busy || self.pending_selection {
+            return Some(ACTIVE_REPAINT);
+        }
+        if let Some(changed) = self.filter_changed {
+            return Some(FILTER_DEBOUNCE.saturating_sub(now.saturating_duration_since(changed)));
+        }
+        if !self.auto_refresh || self.summary.is_none() {
+            return None;
+        }
         // Source notifications wake the UI through send_reply. This guard also
         // preserves the absolute refresh/backoff deadline rather than adding 5 s.
         Some(IDLE_REPAINT.min(self.refresh_delay(now)))
@@ -617,11 +721,15 @@ impl Browser {
     fn tick(&mut self) {
         self.poll();
         if self.busy {
-            if self.filter_changed.is_some() || self.pending_selection { self.yield_to_catalog_read(); }
+            if self.filter_changed.is_some() || self.pending_selection {
+                self.yield_to_catalog_read();
+            }
             return;
         }
         if let Some(changed) = self.filter_changed {
-            if changed.elapsed() < FILTER_DEBOUNCE { return; }
+            if changed.elapsed() < FILTER_DEBOUNCE {
+                return;
+            }
             self.filter_changed = None;
             if self.summary.is_some() {
                 self.query(0);
@@ -642,10 +750,7 @@ impl Browser {
         } else if self.auto_refresh && self.source_changed && self.mode == "local" {
             self.source_changed = false;
             self.refresh();
-        } else if self.auto_refresh
-            && self.summary.is_some()
-            && self.refresh_delay(Instant::now()).is_zero()
-        {
+        } else if self.auto_refresh && self.summary.is_some() && self.refresh_delay(Instant::now()).is_zero() {
             self.refresh();
         }
     }

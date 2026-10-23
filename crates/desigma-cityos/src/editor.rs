@@ -1,8 +1,8 @@
 //! The editor owns native state; CityOS owns semantic workflow and presentation.
 //!
 //! No mutable editor, history, autosave or library reference crosses this port.
-use desigma_doc::Document;
 use crate::history::CityosHistoryStep;
+use desigma_doc::Document;
 use desigma_library::SubmissionRecord;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,10 @@ pub struct BaselineRecovery {
 pub enum BaselineInstall {
     Installed,
     /// The host may have committed. Read back this exact identity before retrying.
-    Uncertain { recovery: BaselineRecovery, message: String },
+    Uncertain {
+        recovery: BaselineRecovery,
+        message: String,
+    },
 }
 
 pub trait EditorSession {

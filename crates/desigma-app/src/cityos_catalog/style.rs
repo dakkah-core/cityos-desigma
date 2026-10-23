@@ -1,6 +1,6 @@
 //! Current editor theme and UI hooks passed into the catalog extension.
-use desigma_cityos::catalog::{CatalogStyle, CatalogUiServices};
 use crate::theme;
+use desigma_cityos::catalog::{CatalogStyle, CatalogUiServices};
 
 pub(super) fn services() -> CatalogUiServices {
     CatalogUiServices {

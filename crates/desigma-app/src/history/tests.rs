@@ -57,7 +57,9 @@ fn sealed_app_with_file(t: &Tmp, portable: bool) -> App {
         let text = library.export_checkpoint(&file.id).unwrap();
         let verified = desigma_library::VerifiedPortableCheckpoint::parse(&text).unwrap();
         library.import_checkpoint_as_new(&file.project_id, None, verified).unwrap().id
-    } else { file.id };
+    } else {
+        file.id
+    };
     app.open_library_file(&id);
     crate::home::thumb::finish_library_jobs(&t.0);
     assert_eq!(count(&app), 2);
@@ -121,29 +123,41 @@ fn sealed_native_and_portable_version_restore_undo_redo_save_and_reopen_keep_bas
         assert_eq!(app.hist.baseline_id(), Some(baseline.as_str()));
         assert!(!std::sync::Arc::ptr_eq(&fence, &app.hist.change_identity()));
         assert!(!app.hist.transition_current(&transition));
-        assert!(app.hist.can_undo()); assert!(!app.hist.can_redo());
+        assert!(app.hist.can_undo());
+        assert!(!app.hist.can_redo());
         save_and_reopen_sealed_state(&mut app, 2, &baseline, &retained);
 
-        app.undo(); assert_eq!(count(&app), 3);
+        app.undo();
+        assert_eq!(count(&app), 3);
         assert!(app.hist.can_undo(), "the same-baseline pre-restore active history returns");
         save_and_reopen_sealed_state(&mut app, 3, &baseline, &retained);
-        app.redo(); assert_eq!(count(&app), 2);
+        app.redo();
+        assert_eq!(count(&app), 2);
         save_and_reopen_sealed_state(&mut app, 2, &baseline, &retained);
-        app.undo(); assert_eq!(count(&app), 3);
-        app.undo(); assert_eq!(count(&app), 2);
-        assert!(app.hist.can_redo()); assert!(!app.hist.can_undo(), "inactive archived Undo never becomes active");
+        app.undo();
+        assert_eq!(count(&app), 3);
+        app.undo();
+        assert_eq!(count(&app), 2);
+        assert!(app.hist.can_redo());
+        assert!(!app.hist.can_undo(), "inactive archived Undo never becomes active");
         save_and_reopen_sealed_state(&mut app, 2, &baseline, &retained);
-        app.redo(); assert_eq!(count(&app), 3);
+        app.redo();
+        assert_eq!(count(&app), 3);
         save_and_reopen_sealed_state(&mut app, 3, &baseline, &retained);
     }
 }
 
 fn bound_version(mut document: Document) -> Document {
     document.cityos = Some(desigma_doc::CityosBinding {
-        schema_version: "cityos.design-exchange.v1".into(), document_id: "document".into(), draft_id: "draft".into(),
+        schema_version: "cityos.design-exchange.v1".into(),
+        document_id: "document".into(),
+        draft_id: "draft".into(),
         base: desigma_doc::CityosBase::CanonicalGit { repository_id: "fixture".into(), commit: "a".repeat(40) },
-        semantic_base: serde_json::json!({"owner":"retained"}), dependency_pins: vec![], occurrences: Default::default(),
-        exchange_v2: None, exchange_v3: None,
+        semantic_base: serde_json::json!({"owner":"retained"}),
+        dependency_pins: vec![],
+        occurrences: Default::default(),
+        exchange_v2: None,
+        exchange_v3: None,
     });
     document
 }
@@ -167,8 +181,10 @@ fn ordinary_restore_undo_redo_cannot_cross_a_sealed_or_bound_baseline() {
         app.open_library_file(&file);
         let before = library.load_checkpoint(&file).unwrap().to_json().unwrap();
         let document = app.doc.to_json().unwrap();
-        assert!(!app.hist.can_undo()); assert!(!app.hist.can_redo());
-        assert!(!app.try_undo_restore()); assert!(!app.try_redo_restore());
+        assert!(!app.hist.can_undo());
+        assert!(!app.hist.can_redo());
+        assert!(!app.try_undo_restore());
+        assert!(!app.try_redo_restore());
         assert_eq!(app.doc.to_json().unwrap(), document);
         assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), before);
     }
@@ -193,8 +209,11 @@ fn bound_versions_and_parked_owner_drafts_require_reviewed_baseline_recovery() {
     app.restore_version(ordinary_version.n);
     assert_eq!(app.doc.to_json().unwrap(), bound.to_json().unwrap());
     app.doc = ordinary.clone();
-    app.history.viewing = Some(Viewing { n: ordinary_version.n, title: "Ordinary".into(),
-        saved: Snapshot { doc: bound, hist: app.hist.clone(), page: app.page, selection: vec![] } });
+    app.history.viewing = Some(Viewing {
+        n: ordinary_version.n,
+        title: "Ordinary".into(),
+        saved: Snapshot { doc: bound, hist: app.hist.clone(), page: app.page, selection: vec![] },
+    });
     app.restore_version(ordinary_version.n);
     assert!(app.history.viewing.is_some(), "a bound live state stays parked and protected");
     assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), before);

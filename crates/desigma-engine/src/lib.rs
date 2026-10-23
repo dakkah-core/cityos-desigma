@@ -141,11 +141,7 @@ mod managed_document_regressions {
             let before = doc.to_json().unwrap();
             let expected_next = doc.clone().alloc_id();
             let mut tx = Tx::new();
-            let inserted = if column {
-                table::insert_col(&mut doc, &mut tx, table, 1)
-            } else {
-                table::insert_row(&mut doc, &mut tx, table, 1)
-            };
+            let inserted = if column { table::insert_col(&mut doc, &mut tx, table, 1) } else { table::insert_row(&mut doc, &mut tx, table, 1) };
             assert!(!inserted);
             let mut history = History::default();
             assert!(!tx.commit(&mut doc, &mut history).unwrap());

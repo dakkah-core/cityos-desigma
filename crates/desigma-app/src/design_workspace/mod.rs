@@ -1,28 +1,33 @@
 //! Thin native editor adapter for the CityOS extension.
+#[cfg(test)]
+mod atlas_tests;
 mod bridge;
+mod dependencies;
+mod editor_host;
+mod history_commands;
+#[cfg(test)]
+mod horizon_tests;
 mod host;
 mod layout;
-mod dependencies;
-mod submission_recovery;
-mod repaint;
+#[cfg(test)]
+mod material_tests;
 mod native_projection;
 mod presentation;
-mod history_commands;
+mod repaint;
 mod session;
-mod editor_host;
-#[cfg(test)] mod atlas_tests;
-#[cfg(test)] mod material_tests;
-#[cfg(test)] mod horizon_tests;
+mod submission_recovery;
 use crate::app::App;
-use desigma_doc::{CityosBase,CityosBinding,CityosOccurrence,Command,Document};
-use serde_json::{json,Value};
-use std::collections::BTreeMap;
-use std::time::{Duration,Instant};
-use desigma_cityos::draft::{binding,draft,revision,local_copy};
 pub use desigma_cityos::bridge::Config;
+use desigma_cityos::draft::{binding, draft, local_copy, revision};
+use desigma_doc::{CityosBase, CityosBinding, CityosOccurrence, Command, Document};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 pub type Workspace = desigma_cityos::workspace::Workspace<App>;
-#[cfg(test)] use desigma_cityos::workspace::*;
-#[cfg(test)] use repaint::RENDER_ACK_TIMEOUT;
+#[cfg(test)]
+use desigma_cityos::workspace::*;
+#[cfg(test)]
+use repaint::RENDER_ACK_TIMEOUT;
 /// Headless delivery check through the same native document and trusted bridge paths.
 pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<Value, String> {
     let started = Instant::now();
@@ -59,11 +64,14 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     dependencies::retain(&config.cache, &library, draft(&document).ok_or("Missing binding")?, &retained)?;
     record("dependencyRetention");
     let mut app = App::new(document);
-    app.lib = Some(library.clone()); app.home = None;
+    app.lib = Some(library.clone());
+    app.home = None;
     <App as desigma_cityos::editor::EditorHost>::save_to_draft_library(&mut app)?;
     record("initialLibrarySave");
     <App as desigma_cityos::editor::EditorHost>::install_edit(&mut app, binding(result["draft"].clone(), &result["projection"])?)?;
-    if !dependencies::complete(&library, &app.doc) { return Err("Edited dependency closure is incomplete".into()); }
+    if !dependencies::complete(&library, &app.doc) {
+        return Err("Edited dependency closure is incomplete".into());
+    }
     record("installEdit");
     app.save_library_file()?;
     record("editedLibrarySave");
@@ -78,7 +86,9 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
         Ok(reopened)
     }
     app = reopen(&library, &file)?;
-    if !app.hist.can_undo() { return Err("Reopening lost the saved undo history".into()); }
+    if !app.hist.can_undo() {
+        return Err("Reopening lost the saved undo history".into());
+    }
     record("editedLibraryReopen");
     document = app.doc.clone();
     let path = crate::io::save_path(&document, &directory.join("native-resting.desigma"))?;
@@ -95,7 +105,9 @@ pub fn verify_roundtrip(config: Config, directory: &std::path::Path) -> Result<V
     app.hist.undo(&mut app.doc).map_err(|e| e.to_string())?;
     app.save_library_file()?;
     app = reopen(&library, &file)?;
-    if !app.hist.can_redo() { return Err("Reopening lost the saved redo history".into()); }
+    if !app.hist.can_redo() {
+        return Err("Reopening lost the saved redo history".into());
+    }
     record("undoSaveAndReopen");
     if ask(json!({"op":"Export","draft":draft(&app.doc)}))?["operationCount"] != 0 {
         return Err("Undo manufactured edits".into());
@@ -117,7 +129,8 @@ mod tests {
             let library = desigma_library::Library::open(&root).unwrap();
             library.put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
             let mut app = App::new(tab_document("navigation"));
-            app.home = None; app.lib = Some(library.clone());
+            app.home = None;
+            app.lib = Some(library.clone());
             Workspace::save_to_draft_library(&mut app).unwrap();
             (Self(root), app, library)
         }
@@ -134,13 +147,16 @@ mod tests {
     fn desigma_files_navigation_saves_the_bound_draft_and_preserves_undo_and_bindings() {
         let (_directory, mut app, library) = NavigationLibrary::app();
         let id = app.lib_file.as_ref().unwrap().id.clone();
-        let mut edited = app.doc.clone(); edited.name = "Edited before returning to files".into();
+        let mut edited = app.doc.clone();
+        edited.name = "Edited before returning to files".into();
         app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(edited) }).unwrap();
         app.changed();
         let document = app.doc.to_json().unwrap();
         let history = serde_json::to_value(&app.hist).unwrap();
-        let mut workspace = Workspace::default(); workspace.open = true;
-        workspace.pending = Some(Instant::now()); workspace.preview = Some(json!({"draftRevision":0}));
+        let mut workspace = Workspace::default();
+        workspace.open = true;
+        workspace.pending = Some(Instant::now());
+        workspace.preview = Some(json!({"draftRevision":0}));
         workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
         workspace.open_desigma_files(&mut app).unwrap();
         assert!(!workspace.open && !workspace.library_requested());
@@ -158,12 +174,16 @@ mod tests {
         let (_directory, mut app, library) = NavigationLibrary::app();
         let file = app.lib_file.as_ref().unwrap().clone();
         let stored = library.load_checkpoint(&file.id).unwrap().to_json().unwrap();
-        app.doc.name = "Unsaved navigation change".into(); app.changed();
-        app.autosave.changed_at = Some(0.); app.autosave.confirmed = true;
-        let document = app.doc.to_json().unwrap(); let hash = app.autosave.saved_hash;
+        app.doc.name = "Unsaved navigation change".into();
+        app.changed();
+        app.autosave.changed_at = Some(0.);
+        app.autosave.confirmed = true;
+        let document = app.doc.to_json().unwrap();
+        let hash = app.autosave.saved_hash;
         let blocker = library.path("projects").join(&file.project_id).join(".save.pending.json");
         std::fs::create_dir(&blocker).unwrap();
-        let mut workspace = Workspace::default(); workspace.open = true;
+        let mut workspace = Workspace::default();
+        workspace.open = true;
         workspace.host.url = Some("http://127.0.0.1:1/fixture".into());
         assert!(workspace.open_desigma_files(&mut app).is_err());
         assert!(workspace.open && workspace.library_requested());
@@ -181,9 +201,13 @@ mod tests {
         let file = app.lib_file.as_ref().unwrap().id.clone();
         let stored = library.load_checkpoint(&file).unwrap().to_json().unwrap();
         let document = app.doc.to_json().unwrap();
-        let mut home = crate::home::Home::new(); home.search = "Retain my file filter".into(); home.scroll = 42.;
+        let mut home = crate::home::Home::new();
+        home.search = "Retain my file filter".into();
+        home.scroll = 42.;
         app.home = Some(home);
-        let mut workspace = Workspace::default(); workspace.open = true; workspace.preview_only = true;
+        let mut workspace = Workspace::default();
+        workspace.open = true;
+        workspace.preview_only = true;
         workspace.staged = Some(Document::new("Temporary preview"));
         workspace.temporary_canvas = Some(Box::new(App::new(Document::new("Temporary canvas"))));
         workspace.open_desigma_files(&mut app).unwrap();
@@ -197,12 +221,15 @@ mod tests {
     }
     #[test]
     fn desigma_files_navigation_cannot_abandon_inflight_commands_or_uncertain_recovery() {
-        let mut app = App::new(Document::new("Current")); app.home = None;
+        let mut app = App::new(Document::new("Current"));
+        app.home = None;
         let document = app.doc.to_json().unwrap();
-        let mut workspace = Workspace::default(); workspace.open = true;
+        let mut workspace = Workspace::default();
+        workspace.open = true;
         workspace.busy = Some("Command".into());
         assert!(workspace.open_desigma_files(&mut app).unwrap_err().contains("current CityOS operation"));
-        workspace.busy = None; workspace.recovery_pending = true;
+        workspace.busy = None;
+        workspace.recovery_pending = true;
         assert!(workspace.open_desigma_files(&mut app).unwrap_err().contains("Recover"));
         assert!(workspace.open && app.home.is_none());
         assert_eq!(app.doc.to_json().unwrap(), document);
@@ -211,7 +238,8 @@ mod tests {
     fn resumed_projection_exits_file_home_only_after_the_retained_dependencies_validate() {
         let (_directory, mut app, library) = NavigationLibrary::app();
         app.home = Some(crate::home::Home::new());
-        let original = app.doc.to_json().unwrap(); let history = serde_json::to_value(&app.hist).unwrap();
+        let original = app.doc.to_json().unwrap();
+        let history = serde_json::to_value(&app.hist).unwrap();
         let mut workspace = Workspace::default();
         let document = app.doc.clone();
         assert!(workspace.install_resumed_projection(&mut app, document));
@@ -227,7 +255,8 @@ mod tests {
         let mut app = App::new(tab_document("missing-dependency"));
         app.lib = Some(desigma_library::Library::open(&root).unwrap());
         app.home = Some(crate::home::Home::new());
-        let original = app.doc.to_json().unwrap(); let document = app.doc.clone();
+        let original = app.doc.to_json().unwrap();
+        let document = app.doc.clone();
         let mut workspace = Workspace::default();
         assert!(!workspace.install_resumed_projection(&mut app, document));
         assert!(app.home.is_some() && workspace.resume_document.is_some());
@@ -241,8 +270,7 @@ mod tests {
         workspace.render_started = Some(started);
         for seconds in [0, 1, 15, 29, 30, 31] {
             let elapsed = Duration::from_secs(seconds);
-            assert_eq!(workspace.progress_repaint_delay_at(started + elapsed),
-                Some(RENDER_ACK_TIMEOUT.saturating_sub(elapsed)));
+            assert_eq!(workspace.progress_repaint_delay_at(started + elapsed), Some(RENDER_ACK_TIMEOUT.saturating_sub(elapsed)));
             assert_eq!(workspace.render_started, Some(started), "An unrelated UI pass must not postpone the deadline");
         }
         // A matching IPC receipt clears this field in poll(), waking the UI
@@ -388,19 +416,13 @@ mod tests {
             json!({"resource":{"id":"other","revision":"1"},"nodeId":"material","pointer":"/root/props/elevation"}),
             json!({"resource":{"id":"frame","revision":"2"},"nodeId":"material","pointer":"/root/props/elevation"}),
         ] {
-            assert_eq!(semantic_change_value_text(Some(&reference), Some(&document)),
-                format!("Unavailable (unresolved reference: {reference})"));
+            assert_eq!(semantic_change_value_text(Some(&reference), Some(&document)), format!("Unavailable (unresolved reference: {reference})"));
         }
         assert_eq!(semantic_change_value_text(None, Some(&document)), "Unavailable (value not provided)");
     }
     #[test]
     fn global_design_chooser_exits_changes_and_preserves_design_toggle() {
-        for (changes_mode, picker_open, expected_open) in [
-            (true, false, true),
-            (true, true, true),
-            (false, false, true),
-            (false, true, false),
-        ] {
+        for (changes_mode, picker_open, expected_open) in [(true, false, true), (true, true, true), (false, false, true), (false, true, false)] {
             let mut workspace = Workspace::default();
             workspace.changes_mode = changes_mode;
             workspace.picker_open = picker_open;
@@ -461,13 +483,17 @@ mod tests {
         let root = std::env::temp_dir().join(format!("desigma-specimen-{}", uuid::Uuid::new_v4()));
         let library = desigma_library::Library::open(&root).unwrap();
         library.put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
-        let mut app = App::new(tab_document("persistent")); app.home = None; app.lib = Some(library.clone());
-        let mut edited = app.doc.clone(); edited.name = "Saved draft with undo".into();
+        let mut app = App::new(tab_document("persistent"));
+        app.home = None;
+        app.lib = Some(library.clone());
+        let mut edited = app.doc.clone();
+        edited.name = "Saved draft with undo".into();
         app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(edited) }).unwrap();
         Workspace::save_to_draft_library(&mut app).unwrap();
         let file_id = app.lib_file.as_ref().unwrap().id.clone();
         let stored_before = library.load_checkpoint(&file_id).unwrap();
-        app.doc.name = "Existing unsaved work".into(); app.changed();
+        app.doc.name = "Existing unsaved work".into();
+        app.changed();
         let before = app.doc.to_json().unwrap();
         let history = serde_json::to_value(&app.hist).unwrap();
         let pending = app.autosave.pending();
@@ -598,8 +624,7 @@ mod tests {
                 workspace.local_specimen_request = workspace.captured_specimen_request();
                 bridge.jobs.send(json!({"op":"Fixtures","fixture":workspace.local_specimen_request.as_ref().unwrap().locator,"locale":locale})).unwrap();
                 let projected = bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
-                let copy = workspace.local_specimen_document(projected).unwrap_or_else(|error|
-                    panic!("{} / {locale}: {error}", selected["resourceId"]));
+                let copy = workspace.local_specimen_document(projected).unwrap_or_else(|error| panic!("{} / {locale}: {error}", selected["resourceId"]));
                 assert!(copy.cityos.is_none(), "Explicit copies never gain submission authority");
                 assert!(copy.nodes.values().all(|node| !node.locked && node.source_id.is_none()));
                 receipts.push(json!({"resourceId":receipt["resource"]["resourceId"],"locale":locale,
@@ -633,7 +658,9 @@ mod tests {
         workspace.set_preview_theme("repository-theme-must-not-load".into());
         assert!(workspace.theme_id.is_empty());
         let mut app = App::new(Document::new("Underlying document"));
-        workspace.pending = None; workspace.error = None; workspace.themes_loaded = false;
+        workspace.pending = None;
+        workspace.error = None;
+        workspace.themes_loaded = false;
         workspace.poll(&mut app);
         assert!(workspace.busy.is_none() && workspace.error.is_none());
         assert!(workspace.themes.is_empty() && !workspace.themes_loaded);
@@ -645,7 +672,8 @@ mod tests {
         let receipt = specimen_receipt(&workspace);
         assert!(workspace.accept_specimen_preview(receipt.clone(), "FixturePreview"));
         for key in ["sessionId", "requestId", "draftId", "draftRevision", "semanticDigest", "scenario"] {
-            let mut stale = receipt.clone(); stale[key] = json!("obsolete");
+            let mut stale = receipt.clone();
+            stale[key] = json!("obsolete");
             assert!(!workspace.matches_preview_event(&app, &stale), "{key}");
         }
         workspace.busy = Some("FixturePreview".into());
@@ -660,13 +688,13 @@ mod tests {
         workspace.resource = Some(registered_specimen("other.component", "ar"));
         assert!(!workspace.matches_preview_event(&app, &receipt));
     }
-    pub(super) fn tab_document(id:&str)->Document{
-        tab_document_node(id,"material")
+    pub(super) fn tab_document(id: &str) -> Document {
+        tab_document_node(id, "material")
     }
-    fn tab_document_node(id:&str,node:&str)->Document{
-        let source_digest=desigma_library::payload_digest(b"fixture");
-        let semantic=json!({"id":id,"revision":"1","root":{"id":node,"props":{}}});
-        let draft=json!({"schemaVersion":"cityos.design-exchange.v3","semanticContract":"fixture.component","profileRef":"fixture","draftId":id,"documentId":id,
+    fn tab_document_node(id: &str, node: &str) -> Document {
+        let source_digest = desigma_library::payload_digest(b"fixture");
+        let semantic = json!({"id":id,"revision":"1","root":{"id":node,"props":{}}});
+        let draft = json!({"schemaVersion":"cityos.design-exchange.v3","semanticContract":"fixture.component","profileRef":"fixture","draftId":id,"documentId":id,
             "draftRevision":0,"base":{"kind":"canonical-git","repositoryId":"fixture","commit":"a".repeat(40),"sourcePath":"fixture.json","sourceDigest":source_digest},
             "semanticBase":semantic,"semanticDraft":semantic,"semanticDigest":"c".repeat(64),"dependencyPins":[{"path":"fixture.json","digest":source_digest}],"commandReceipts":[]});
         binding(draft,&json!({"schemaVersion":"cityos.desigma-canvas.v1","draftId":id,"draftRevision":0,"semanticDigest":"c".repeat(64),"nodes":[{"id":"native","sourceNodeId":node,"definitionId":"fixture","parent":null,"slot":null,"x":0,"y":0,"width":100,"height":100,"label":id,"fill":"#ffffff"}]})).unwrap()
@@ -681,79 +709,138 @@ mod tests {
         assert_eq!(source.to_json().unwrap(), before);
         assert_eq!(copy.nodes.len(), source.nodes.len());
     }
-    fn submitted_fixture() -> (std::path::PathBuf,App,desigma_library::SubmissionRecord) {
-        let root=std::env::temp_dir().join(format!("desigma-submission-ui-{}",uuid::Uuid::new_v4()));
-        let library=desigma_library::Library::open(&root).unwrap();
+    fn submitted_fixture() -> (std::path::PathBuf, App, desigma_library::SubmissionRecord) {
+        let root = std::env::temp_dir().join(format!("desigma-submission-ui-{}", uuid::Uuid::new_v4()));
+        let library = desigma_library::Library::open(&root).unwrap();
         library.retain_cityos_payload(b"fixture").unwrap();
-        let mut app=App::new(tab_document("submitted"));app.lib=Some(library.clone());
-        let mut edited=app.doc.clone();edited.name="Submitted design".into();
-        app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(edited)}).unwrap();
+        let mut app = App::new(tab_document("submitted"));
+        app.lib = Some(library.clone());
+        let mut edited = app.doc.clone();
+        edited.name = "Submitted design".into();
+        app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(edited) }).unwrap();
         Workspace::save_to_draft_library(&mut app).unwrap();
-        let binding=app.doc.cityos.as_ref().unwrap();let exchange=binding.exchange().unwrap();
-        let command=desigma_library::SubmissionCommand{intent_id:"fixture-intent".into(),operation_id:"fixture-operation".into(),predecessor:None,
-            owner:"fixture-owner".into(),resource:"submitted".into(),scope:BTreeMap::from([("tenantId".into(),"fixture-tenant".into()),("actorId".into(),"fixture-actor".into())]),
-            base:binding.base.clone(),expected_revision:exchange["base"]["sourceDigest"].as_str().unwrap().into(),semantic_base:binding.semantic_base.clone(),
-            submitted_snapshot:exchange["semanticDraft"].clone(),dependency_pins:binding.dependency_pins.clone()};
-        let record=library.prepare_submission_for_file_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &app.lib_file.as_ref().unwrap().id,command).unwrap();
-        (root,app,record)
+        let binding = app.doc.cityos.as_ref().unwrap();
+        let exchange = binding.exchange().unwrap();
+        let command = desigma_library::SubmissionCommand {
+            intent_id: "fixture-intent".into(),
+            operation_id: "fixture-operation".into(),
+            predecessor: None,
+            owner: "fixture-owner".into(),
+            resource: "submitted".into(),
+            scope: BTreeMap::from([("tenantId".into(), "fixture-tenant".into()), ("actorId".into(), "fixture-actor".into())]),
+            base: binding.base.clone(),
+            expected_revision: exchange["base"]["sourceDigest"].as_str().unwrap().into(),
+            semantic_base: binding.semantic_base.clone(),
+            submitted_snapshot: exchange["semanticDraft"].clone(),
+            dependency_pins: binding.dependency_pins.clone(),
+        };
+        let record = library
+            .prepare_submission_for_file_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &app.lib_file.as_ref().unwrap().id, command)
+            .unwrap();
+        (root, app, record)
     }
     #[test]
     fn prepared_submissions_restore_freezing_and_block_semantic_and_undo_input_paths() {
-        let(root,mut app,record)=submitted_fixture();let original=app.doc.to_json().unwrap();
-        let mut workspace=Workspace::default();workspace.submissions.refresh_if_changed(&mut app);
-        assert_eq!(workspace.submissions.records,vec![record]);assert!(app.cityos_submission_frozen());
-        assert!(app.hist.can_undo());app.undo();app.redo();assert_eq!(app.doc.to_json().unwrap(),original);
-        workspace.send(json!({"op":"Command"}));assert!(workspace.busy.is_none());
+        let (root, mut app, record) = submitted_fixture();
+        let original = app.doc.to_json().unwrap();
+        let mut workspace = Workspace::default();
+        workspace.submissions.refresh_if_changed(&mut app);
+        assert_eq!(workspace.submissions.records, vec![record]);
+        assert!(app.cityos_submission_frozen());
+        assert!(app.hist.can_undo());
+        app.undo();
+        app.redo();
+        assert_eq!(app.doc.to_json().unwrap(), original);
+        workspace.send(json!({"op":"Command"}));
+        assert!(workspace.busy.is_none());
         assert!(workspace.error.as_ref().unwrap().contains("frozen"));
-        app.lib=Some(desigma_library::Library::open(&root).unwrap());workspace.submissions=Default::default();
-        workspace.submissions.refresh_if_changed(&mut app);assert!(app.cityos_submission_frozen());
-        assert_eq!(app.doc.to_json().unwrap(),original);std::fs::remove_dir_all(root).unwrap();
+        app.lib = Some(desigma_library::Library::open(&root).unwrap());
+        workspace.submissions = Default::default();
+        workspace.submissions.refresh_if_changed(&mut app);
+        assert!(app.cityos_submission_frozen());
+        assert_eq!(app.doc.to_json().unwrap(), original);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn accepted_generation_resumes_by_original_identity_and_seals_the_old_undo_baseline() {
-        let(root,mut app,record)=submitted_fixture();let library=app.lib.as_ref().unwrap().clone();
-        let mut accepted=app.doc.clone();
-        let new_digest=library.retain_cityos_payload(b"accepted source").unwrap();
-        let binding=accepted.cityos.as_mut().unwrap();binding.base=CityosBase::CanonicalGit{repository_id:"fixture".into(),commit:"b".repeat(40)};
-        binding.semantic_base["revision"]=json!("accepted-concurrent-revision");binding.dependency_pins=vec![new_digest.clone()];
-        let semantic=binding.semantic_base.clone();let value=binding.exchange_mut().unwrap();
-        value["base"]["commit"]=json!("b".repeat(40));value["base"]["sourceDigest"]=json!(new_digest);
-        value["dependencyPins"]=json!([{"path":"fixture.json","digest":new_digest}]);
-        value["semanticBase"]=semantic.clone();value["semanticDraft"]=semantic.clone();
-        value["draftRevision"]=json!(value["draftRevision"].as_u64().unwrap()+1);
-        value["semanticDigest"]=json!(desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap()));
-        let accepted_record=library.record_submission_observation_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, desigma_library::SubmissionObservation{
-            operation_id:record.command.operation_id.clone(),request_digest:record.request_digest.clone(),owner:record.command.owner.clone(),resource:record.command.resource.clone(),scope:record.command.scope.clone(),
-            state:desigma_library::SubmissionState::AcceptedSyncPending,receipt_ref:"fixture-authenticated-owner-observation".into(),owner_revision:Some("b".repeat(40)),conclusively_ineligible:false,
-            details:json!({"acceptedSemanticDigest":desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap())})}).unwrap();
-        let file=app.lib_file.as_ref().unwrap().id.clone();let mut checkpoint=library.load_checkpoint(&file).unwrap();checkpoint.install_baseline(accepted.clone());
-        library.prepare_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file,&accepted_record,&checkpoint).unwrap();
+        let (root, mut app, record) = submitted_fixture();
+        let library = app.lib.as_ref().unwrap().clone();
+        let mut accepted = app.doc.clone();
+        let new_digest = library.retain_cityos_payload(b"accepted source").unwrap();
+        let binding = accepted.cityos.as_mut().unwrap();
+        binding.base = CityosBase::CanonicalGit { repository_id: "fixture".into(), commit: "b".repeat(40) };
+        binding.semantic_base["revision"] = json!("accepted-concurrent-revision");
+        binding.dependency_pins = vec![new_digest.clone()];
+        let semantic = binding.semantic_base.clone();
+        let value = binding.exchange_mut().unwrap();
+        value["base"]["commit"] = json!("b".repeat(40));
+        value["base"]["sourceDigest"] = json!(new_digest);
+        value["dependencyPins"] = json!([{"path":"fixture.json","digest":new_digest}]);
+        value["semanticBase"] = semantic.clone();
+        value["semanticDraft"] = semantic.clone();
+        value["draftRevision"] = json!(value["draftRevision"].as_u64().unwrap() + 1);
+        value["semanticDigest"] = json!(desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap()));
+        let accepted_record = library
+            .record_submission_observation_with_policy(
+                &desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY,
+                desigma_library::SubmissionObservation {
+                    operation_id: record.command.operation_id.clone(),
+                    request_digest: record.request_digest.clone(),
+                    owner: record.command.owner.clone(),
+                    resource: record.command.resource.clone(),
+                    scope: record.command.scope.clone(),
+                    state: desigma_library::SubmissionState::AcceptedSyncPending,
+                    receipt_ref: "fixture-authenticated-owner-observation".into(),
+                    owner_revision: Some("b".repeat(40)),
+                    conclusively_ineligible: false,
+                    details: json!({"acceptedSemanticDigest":desigma_library::payload_digest(&serde_json::to_vec(&semantic).unwrap())}),
+                },
+            )
+            .unwrap();
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let mut checkpoint = library.load_checkpoint(&file).unwrap();
+        checkpoint.install_baseline(accepted.clone());
+        library.prepare_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file, &accepted_record, &checkpoint).unwrap();
         // Restart before any accepted projection is installed; recover the durable
         // generation without requesting a new proposal or owner operation.
-        app.lib=Some(desigma_library::Library::open(&root).unwrap());
-        let mut recovery=submission_recovery::Recovery::default();recovery.reload(&mut app);
-        assert!(app.cityos_submission_frozen());assert!(recovery.recover_existing(&mut app,&accepted_record).unwrap());
-        assert_eq!(app.doc.to_json().unwrap(),accepted.to_json().unwrap());assert!(!app.hist.can_undo());assert!(!app.cityos_submission_frozen());
-        assert_eq!(draft(&app.doc).unwrap()["semanticBase"],draft(&app.doc).unwrap()["semanticDraft"]);
-        let stored=app.lib.as_ref().unwrap().load_checkpoint(&file).unwrap();assert!(stored.retained[0].history.can_undo());
-        assert_eq!(recovery.records[0].state,desigma_library::SubmissionState::Synchronized);
-        let before=app.doc.to_json().unwrap();app.undo();assert_eq!(app.doc.to_json().unwrap(),before);
+        app.lib = Some(desigma_library::Library::open(&root).unwrap());
+        let mut recovery = submission_recovery::Recovery::default();
+        recovery.reload(&mut app);
+        assert!(app.cityos_submission_frozen());
+        assert!(recovery.recover_existing(&mut app, &accepted_record).unwrap());
+        assert_eq!(app.doc.to_json().unwrap(), accepted.to_json().unwrap());
+        assert!(!app.hist.can_undo());
+        assert!(!app.cityos_submission_frozen());
+        assert_eq!(draft(&app.doc).unwrap()["semanticBase"], draft(&app.doc).unwrap()["semanticDraft"]);
+        let stored = app.lib.as_ref().unwrap().load_checkpoint(&file).unwrap();
+        assert!(stored.retained[0].history.can_undo());
+        assert_eq!(recovery.records[0].state, desigma_library::SubmissionState::Synchronized);
+        let before = app.doc.to_json().unwrap();
+        app.undo();
+        assert_eq!(app.doc.to_json().unwrap(), before);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn unreadable_retained_submission_never_unlocks_the_current_draft() {
-        let(root,mut app,record)=submitted_fixture();let library=app.lib.as_ref().unwrap();
-        std::fs::write(library.path("cityos/submissions").join(format!("{}.json",record.command.operation_id)),b"incomplete receipt").unwrap();
-        let mut workspace=Workspace::default();workspace.submissions.refresh_if_changed(&mut app);
-        assert!(app.cityos_submission_frozen());assert!(workspace.submissions.error.is_some());
-        let before=app.doc.to_json().unwrap();app.undo();workspace.send(json!({"op":"Command"}));
-        assert_eq!(app.doc.to_json().unwrap(),before);assert!(workspace.busy.is_none());
+        let (root, mut app, record) = submitted_fixture();
+        let library = app.lib.as_ref().unwrap();
+        std::fs::write(library.path("cityos/submissions").join(format!("{}.json", record.command.operation_id)), b"incomplete receipt").unwrap();
+        let mut workspace = Workspace::default();
+        workspace.submissions.refresh_if_changed(&mut app);
+        assert!(app.cityos_submission_frozen());
+        assert!(workspace.submissions.error.is_some());
+        let before = app.doc.to_json().unwrap();
+        app.undo();
+        workspace.send(json!({"op":"Command"}));
+        assert_eq!(app.doc.to_json().unwrap(), before);
+        assert!(workspace.busy.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
     fn specimen_projection(workspace: &Workspace) -> Value {
-        let mut receipt=specimen_receipt(workspace);
-        receipt["state"]=json!("projected");receipt["locale"]=json!(workspace.locale);
-        receipt["projection"]=json!({"schemaVersion":"cityos.desigma-canvas.v1","draftId":receipt["draftId"],"draftRevision":0,
+        let mut receipt = specimen_receipt(workspace);
+        receipt["state"] = json!("projected");
+        receipt["locale"] = json!(workspace.locale);
+        receipt["projection"] = json!({"schemaVersion":"cityos.desigma-canvas.v1","draftId":receipt["draftId"],"draftRevision":0,
             "semanticDigest":receipt["semanticDigest"],"nodes":[{"id":"fixture-occurrence","sourceNodeId":"specimen-root","definitionId":"fixture.component",
                 "parent":null,"slot":null,"x":0,"y":0,"width":360,"height":180,"label":"Declared registered default","fill":"#ffffff","protected":true}]});
         receipt
@@ -779,63 +866,84 @@ mod tests {
     }
     #[test]
     fn explicit_registered_local_copy_has_native_objects_and_no_canonical_or_submission_binding() {
-        let(root,mut app,record)=submitted_fixture();let library=app.lib.as_ref().unwrap().clone();
-        let file=app.lib_file.as_ref().unwrap().id.clone();let saved=library.load_checkpoint(&file).unwrap().to_json().unwrap();
-        let count=library.all_files().len();let mut workspace=specimen_workspace();
-        workspace.local_specimen_request=workspace.captured_specimen_request();
-        let receipt=specimen_projection(&workspace);let document=workspace.local_specimen_document(receipt).unwrap();
-        assert!(document.cityos.is_none());assert!(document.nodes.values().all(|node|!node.locked&&node.source_id.is_none()));
-        assert!(document.nodes.values().any(|node|node.name=="Declared registered default"));
-        assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(),saved,"projection alone never persists a document");
-        workspace.open_local_document(&mut app,document);
-        assert!(!workspace.open);assert!(app.doc.cityos.is_none());assert!(app.lib_file.is_none());
-        assert_eq!(library.all_files().len(),count);assert_eq!(library.load_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id).unwrap(),record);
-        crate::home::thumb::finish_library_jobs(&root);std::fs::remove_dir_all(root).unwrap();
+        let (root, mut app, record) = submitted_fixture();
+        let library = app.lib.as_ref().unwrap().clone();
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let saved = library.load_checkpoint(&file).unwrap().to_json().unwrap();
+        let count = library.all_files().len();
+        let mut workspace = specimen_workspace();
+        workspace.local_specimen_request = workspace.captured_specimen_request();
+        let receipt = specimen_projection(&workspace);
+        let document = workspace.local_specimen_document(receipt).unwrap();
+        assert!(document.cityos.is_none());
+        assert!(document.nodes.values().all(|node| !node.locked && node.source_id.is_none()));
+        assert!(document.nodes.values().any(|node| node.name == "Declared registered default"));
+        assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), saved, "projection alone never persists a document");
+        workspace.open_local_document(&mut app, document);
+        assert!(!workspace.open);
+        assert!(app.doc.cityos.is_none());
+        assert!(app.lib_file.is_none());
+        assert_eq!(library.all_files().len(), count);
+        assert_eq!(library.load_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id).unwrap(), record);
+        crate::home::thumb::finish_library_jobs(&root);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn local_copy_rejects_substituted_or_stale_registered_projections_before_touching_the_document() {
-        for variant in ["selection","commit","locale","digest","authority","parent","extent"] {
-            let mut workspace=specimen_workspace();workspace.local_specimen_request=workspace.captured_specimen_request();
-            let mut receipt=specimen_projection(&workspace);
+        for variant in ["selection", "commit", "locale", "digest", "authority", "parent", "extent"] {
+            let mut workspace = specimen_workspace();
+            workspace.local_specimen_request = workspace.captured_specimen_request();
+            let mut receipt = specimen_projection(&workspace);
             match variant {
-                "selection"=>receipt["resource"]["componentId"]=json!("other"),
-                "commit"=>receipt["provenance"]["sourceCommit"]=json!("d".repeat(40)),
-                "locale"=>receipt["locale"]=json!("en"),
-                "digest"=>receipt["projection"]["semanticDigest"]=json!("d".repeat(64)),
-                "authority"=>receipt["ownerWrites"]=json!(true),
-                "parent"=>receipt["projection"]["nodes"][0]["parent"]=json!("missing"),
-                "extent"=>receipt["projection"]["nodes"][0]["width"]=json!(-1),
-                _=>unreachable!(),
+                "selection" => receipt["resource"]["componentId"] = json!("other"),
+                "commit" => receipt["provenance"]["sourceCommit"] = json!("d".repeat(40)),
+                "locale" => receipt["locale"] = json!("en"),
+                "digest" => receipt["projection"]["semanticDigest"] = json!("d".repeat(64)),
+                "authority" => receipt["ownerWrites"] = json!(true),
+                "parent" => receipt["projection"]["nodes"][0]["parent"] = json!("missing"),
+                "extent" => receipt["projection"]["nodes"][0]["width"] = json!(-1),
+                _ => unreachable!(),
             }
-            assert!(workspace.local_specimen_document(receipt).is_err(),"{variant}");
-            assert!(workspace.preview_only);assert!(workspace.staged.is_none());assert!(workspace.tabs.is_empty());
+            assert!(workspace.local_specimen_document(receipt).is_err(), "{variant}");
+            assert!(workspace.preview_only);
+            assert!(workspace.staged.is_none());
+            assert!(workspace.tabs.is_empty());
         }
     }
     #[test]
     fn reviewed_baseline_is_durable_before_display_and_previous_undo_is_retained_inactively() {
-        let root=std::env::temp_dir().join(format!("desigma-incoming-{}",uuid::Uuid::new_v4()));
-        let library=desigma_library::Library::open(&root).unwrap();
-        library.put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
-        let mut app=App::new(tab_document("incoming")); app.lib=Some(library.clone()); app.home=None;
-        let mut edited=app.doc.clone();edited.name="My draft".into();
-        app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(edited)}).unwrap();
+        let root = std::env::temp_dir().join(format!("desigma-incoming-{}", uuid::Uuid::new_v4()));
+        let library = desigma_library::Library::open(&root).unwrap();
+        library.put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
+        let mut app = App::new(tab_document("incoming"));
+        app.lib = Some(library.clone());
+        app.home = None;
+        let mut edited = app.doc.clone();
+        edited.name = "My draft".into();
+        app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(edited) }).unwrap();
         Workspace::save_to_draft_library(&mut app).unwrap();
-        let file=app.lib_file.as_ref().unwrap().id.clone();
-        let mut candidate=draft(&app.doc).unwrap().clone();
-        let next_revision=candidate["draftRevision"].as_u64().unwrap()+1;
-        candidate["base"]["commit"]=json!("b".repeat(40));candidate["draftRevision"]=json!(next_revision);
-        candidate["semanticDigest"]=json!("d".repeat(64));
-        let bundle=json!({"draft":candidate,"historyBoundary":true,"resource":{"resourceId":"incoming"},
+        let file = app.lib_file.as_ref().unwrap().id.clone();
+        let mut candidate = draft(&app.doc).unwrap().clone();
+        let next_revision = candidate["draftRevision"].as_u64().unwrap() + 1;
+        candidate["base"]["commit"] = json!("b".repeat(40));
+        candidate["draftRevision"] = json!(next_revision);
+        candidate["semanticDigest"] = json!("d".repeat(64));
+        let bundle = json!({"draft":candidate,"historyBoundary":true,"resource":{"resourceId":"incoming"},
             "projection":{"schemaVersion":"cityos.desigma-canvas.v1","draftId":"incoming","draftRevision":next_revision,"semanticDigest":"d".repeat(64),
                 "nodes":[{"id":"native","sourceNodeId":"material","definitionId":"fixture","parent":null,"x":0,"y":0,"width":100,"height":100,"label":"incoming","fill":"#ffffff"}]}});
-        let mut workspace=Workspace::default();workspace.install_reconciliation(&mut app,bundle.clone());
-        assert!(workspace.error.is_none(),"{:?}",workspace.error);assert!(!app.hist.can_undo());assert_eq!(app.doc.name,"My draft");
-        let stored=library.load_checkpoint(&file).unwrap();
-        assert_eq!(stored.document.to_json().unwrap(),app.doc.to_json().unwrap());
-        assert_eq!(stored.retained.len(),1);assert!(stored.retained[0].history.can_undo());
-        let before=app.doc.to_json().unwrap();workspace.install_reconciliation(&mut app,bundle);
+        let mut workspace = Workspace::default();
+        workspace.install_reconciliation(&mut app, bundle.clone());
+        assert!(workspace.error.is_none(), "{:?}", workspace.error);
+        assert!(!app.hist.can_undo());
+        assert_eq!(app.doc.name, "My draft");
+        let stored = library.load_checkpoint(&file).unwrap();
+        assert_eq!(stored.document.to_json().unwrap(), app.doc.to_json().unwrap());
+        assert_eq!(stored.retained.len(), 1);
+        assert!(stored.retained[0].history.can_undo());
+        let before = app.doc.to_json().unwrap();
+        workspace.install_reconciliation(&mut app, bundle);
         assert!(workspace.error.as_ref().unwrap().contains("Obsolete"));
-        assert_eq!(app.doc.to_json().unwrap(),before);
+        assert_eq!(app.doc.to_json().unwrap(), before);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -849,172 +957,270 @@ mod tests {
         app.doc = document;
         app.file_path = Some(path.clone());
         app.home = None;
-        app.autosave = crate::home::Autosave { seen_rev: app.canvas.tiles.rev(), saved_hash: crate::home::doc_hash(&app.doc),
-            external_fingerprint: Some(fingerprint), ..Default::default() };
-        app.doc.name = "Edited external".into(); app.changed();
+        app.autosave = crate::home::Autosave {
+            seen_rev: app.canvas.tiles.rev(),
+            saved_hash: crate::home::doc_hash(&app.doc),
+            external_fingerprint: Some(fingerprint),
+            ..Default::default()
+        };
+        app.doc.name = "Edited external".into();
+        app.changed();
         let ctx = egui::Context::default();
-        app.now = 1.; app.autosave_tick(&ctx);
-        app.now = 1.5; app.autosave_tick(&ctx);
+        app.now = 1.;
+        app.autosave_tick(&ctx);
+        app.now = 1.5;
+        app.autosave_tick(&ctx);
         assert_ne!(crate::io::load_path(&path).unwrap().name, app.doc.name);
-        app.now = 3.1; app.autosave_tick(&ctx);
+        app.now = 3.1;
+        app.autosave_tick(&ctx);
         assert_eq!(crate::io::load_path(&path).unwrap().name, "Edited external");
         assert!(!app.autosave.pending());
-        let blocker = root.join("blocked"); std::fs::write(&blocker, b"file").unwrap();
+        let blocker = root.join("blocked");
+        std::fs::write(&blocker, b"file").unwrap();
         app.file_path = Some(blocker.join("draft.desigma"));
         app.autosave.external_fingerprint = None; // This intentionally invalid target has never been observed.
-        app.doc.name = "Unsaved external".into(); app.changed();
-        assert!(!app.flush_autosave()); assert!(app.autosave.pending());
+        app.doc.name = "Unsaved external".into();
+        app.changed();
+        assert!(!app.flush_autosave());
+        assert!(app.autosave.pending());
         assert!(!app.replace_document(Document::new("Replacement"), None));
         assert_eq!(app.doc.name, "Unsaved external");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn draft_tabs_save_before_switch_and_restore_undo_with_the_correct_library_file(){
-        let root=std::env::temp_dir().join(format!("desigma-tabs-{}",uuid::Uuid::new_v4()));
-        let mut app=App::new(tab_document("first"));app.lib=Some(desigma_library::Library::open(&root).unwrap());app.home=None;
-        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
-        let mut next=app.doc.clone();next.name="First edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
-        let mut workspace=Workspace::default();workspace.selected="material".into();workspace.replace_active(&mut app,tab_document_node("second","accordion"),None).unwrap();
-        let first_file=workspace.tabs["first"].session.as_ref().unwrap().file_id().unwrap().to_owned();
-        app.home=None;workspace.selected="accordion".into();
-        workspace.activate_tab(&mut app,"first");assert_eq!(draft(&app.doc).unwrap()["draftId"],"first");assert_eq!(app.lib_file.as_ref().unwrap().id,first_file);assert!(app.hist.can_undo());
-        assert_eq!(workspace.selected,"material");assert_eq!(workspace.tabs["second"].selected,"accordion");
-        assert_ne!(workspace.tabs["second"].session.as_ref().unwrap().file_id().unwrap(),first_file);app.hist.undo(&mut app.doc).unwrap();
-        assert_eq!(app.lib.as_ref().unwrap().load_file(&first_file).unwrap().name,"First edited");
-        workspace.activate_tab(&mut app,"second");assert_eq!(workspace.selected,"accordion");
+    fn draft_tabs_save_before_switch_and_restore_undo_with_the_correct_library_file() {
+        let root = std::env::temp_dir().join(format!("desigma-tabs-{}", uuid::Uuid::new_v4()));
+        let mut app = App::new(tab_document("first"));
+        app.lib = Some(desigma_library::Library::open(&root).unwrap());
+        app.home = None;
+        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
+        let mut next = app.doc.clone();
+        next.name = "First edited".into();
+        app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(next) }).unwrap();
+        let mut workspace = Workspace::default();
+        workspace.selected = "material".into();
+        workspace.replace_active(&mut app, tab_document_node("second", "accordion"), None).unwrap();
+        let first_file = workspace.tabs["first"].session.as_ref().unwrap().file_id().unwrap().to_owned();
+        app.home = None;
+        workspace.selected = "accordion".into();
+        workspace.activate_tab(&mut app, "first");
+        assert_eq!(draft(&app.doc).unwrap()["draftId"], "first");
+        assert_eq!(app.lib_file.as_ref().unwrap().id, first_file);
+        assert!(app.hist.can_undo());
+        assert_eq!(workspace.selected, "material");
+        assert_eq!(workspace.tabs["second"].selected, "accordion");
+        assert_ne!(workspace.tabs["second"].session.as_ref().unwrap().file_id().unwrap(), first_file);
+        app.hist.undo(&mut app.doc).unwrap();
+        assert_eq!(app.lib.as_ref().unwrap().load_file(&first_file).unwrap().name, "First edited");
+        workspace.activate_tab(&mut app, "second");
+        assert_eq!(workspace.selected, "accordion");
         crate::home::thumb::finish_library_jobs(&root);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn opening_a_different_projection_selects_its_own_root_without_authored_changes(){
-        let root=std::env::temp_dir().join(format!("desigma-selection-{}",uuid::Uuid::new_v4()));
-        let mut app=App::new(Document::new("Empty"));app.lib=Some(desigma_library::Library::open(&root).unwrap());app.home=None;
-        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
-        let document=tab_document_node("accordion-draft","accordion");let before=document.to_json().unwrap();
-        let mut workspace=Workspace::default();workspace.selected="material".into();workspace.preview_only=true;workspace.staged=Some(document);
+    fn opening_a_different_projection_selects_its_own_root_without_authored_changes() {
+        let root = std::env::temp_dir().join(format!("desigma-selection-{}", uuid::Uuid::new_v4()));
+        let mut app = App::new(Document::new("Empty"));
+        app.lib = Some(desigma_library::Library::open(&root).unwrap());
+        app.home = None;
+        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
+        let document = tab_document_node("accordion-draft", "accordion");
+        let before = document.to_json().unwrap();
+        let mut workspace = Workspace::default();
+        workspace.selected = "material".into();
+        workspace.preview_only = true;
+        workspace.staged = Some(document);
         workspace.install_staged(&mut app);
-        assert!(workspace.error.is_none(),"{:?}",workspace.error);assert_eq!(workspace.selected,"accordion");
-        assert_eq!(app.doc.to_json().unwrap(),before);assert!(!app.hist.can_undo());
-        assert_eq!(document_selection(&app.doc,"stale-node"),"accordion");
-        crate::home::thumb::finish_library_jobs(&root);std::fs::remove_dir_all(root).unwrap();
+        assert!(workspace.error.is_none(), "{:?}", workspace.error);
+        assert_eq!(workspace.selected, "accordion");
+        assert_eq!(app.doc.to_json().unwrap(), before);
+        assert!(!app.hist.can_undo());
+        assert_eq!(document_selection(&app.doc, "stale-node"), "accordion");
+        crate::home::thumb::finish_library_jobs(&root);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn design_file_picker_only_builds_visible_rows_for_a_large_estate(){
-        let resources:Vec<_>=(0..10_000).map(|index|json!({"label":format!("Design {index}"),"sourcePath":format!("designs/{index}.json"),"actualWebPreview":true})).collect();
-        let ctx=egui::Context::default();
-        let output=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(320.,400.))),..Default::default()},|ui|{
-            assert!(resource_picker(ui,&resources,None,"",false).is_none());
-        });
-        assert!(output.shapes.len()<150,"Offscreen design rows produced {} shapes",output.shapes.len());
+    fn design_file_picker_only_builds_visible_rows_for_a_large_estate() {
+        let resources: Vec<_> =
+            (0..10_000).map(|index| json!({"label":format!("Design {index}"),"sourcePath":format!("designs/{index}.json"),"actualWebPreview":true})).collect();
+        let ctx = egui::Context::default();
+        let output =
+            ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320., 400.))), ..Default::default() }, |ui| {
+                assert!(resource_picker(ui, &resources, None, "", false).is_none());
+            });
+        assert!(output.shapes.len() < 150, "Offscreen design rows produced {} shapes", output.shapes.len());
     }
     #[test]
-    fn preview_panel_geometry_stays_stable_across_render_status_changes(){
-        for width in [1523.,1707.] {
-            let ctx=egui::Context::default();let frame=eframe::Frame::_new_kittest();
-            let mut app=App::new(tab_document_node("accordion-draft","accordion"));app.home=None;
-            app.autosave.saved_hash=crate::home::doc_hash(&app.doc);
-            let mut workspace=Workspace::default();workspace.open=true;workspace.validated=true;workspace.themes_loaded=true;
-            workspace.observed=revision(&app.doc);workspace.resource=Some(json!({"label":"Accordion","actualWebPreview":true,"fixture":"cityos-accordion","editable":false}));
-            workspace.preview=Some(json!({"draftRevision":0,"observedViewport":{"width":540,"height":608},"scenario":{"fixture":"cityos-accordion"}}));
-            let mut sizes=Vec::new();
+    fn preview_panel_geometry_stays_stable_across_render_status_changes() {
+        for width in [1523., 1707.] {
+            let ctx = egui::Context::default();
+            let frame = eframe::Frame::_new_kittest();
+            let mut app = App::new(tab_document_node("accordion-draft", "accordion"));
+            app.home = None;
+            app.autosave.saved_hash = crate::home::doc_hash(&app.doc);
+            let mut workspace = Workspace::default();
+            workspace.open = true;
+            workspace.validated = true;
+            workspace.themes_loaded = true;
+            workspace.observed = revision(&app.doc);
+            workspace.resource = Some(json!({"label":"Accordion","actualWebPreview":true,"fixture":"cityos-accordion","editable":false}));
+            workspace.preview = Some(json!({"draftRevision":0,"observedViewport":{"width":540,"height":608},"scenario":{"fixture":"cityos-accordion"}}));
+            let mut sizes = Vec::new();
             for iteration in 0..20 {
-                app.toast=if iteration%4==3 {Some(crate::app::Toast {text:"Save failed: the current draft remains local and can be retried without discarding changes.".into(),error:true,until:100.})} else {None};
-                workspace.current=iteration%4==0;workspace.busy=if iteration%4==1 {Some("Preview".into())}else{None};
-                workspace.render_started=if iteration%4==2 {Some(Instant::now())}else{None};workspace.pending=None;
-                let _=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(width,1019.))),..Default::default()},|ui|workspace.show(&mut app,ui,&frame));
-                if iteration>=4 {sizes.push(workspace.panel_size);}
+                app.toast = if iteration % 4 == 3 {
+                    Some(crate::app::Toast {
+                        text: "Save failed: the current draft remains local and can be retried without discarding changes.".into(),
+                        error: true,
+                        until: 100.,
+                    })
+                } else {
+                    None
+                };
+                workspace.current = iteration % 4 == 0;
+                workspace.busy = if iteration % 4 == 1 { Some("Preview".into()) } else { None };
+                workspace.render_started = if iteration % 4 == 2 { Some(Instant::now()) } else { None };
+                workspace.pending = None;
+                let _ = ctx.run_ui(
+                    egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1019.))), ..Default::default() },
+                    |ui| workspace.show(&mut app, ui, &frame),
+                );
+                if iteration >= 4 {
+                    sizes.push(workspace.panel_size);
+                }
             }
-            assert!(sizes.windows(2).all(|pair|pair[0]==pair[1]),"Preview geometry alternates at width {width}: {sizes:?}");
+            assert!(sizes.windows(2).all(|pair| pair[0] == pair[1]), "Preview geometry alternates at width {width}: {sizes:?}");
         }
     }
     #[test]
-    fn failed_tab_save_preserves_the_current_document_and_history(){
-        let mut app=App::new(tab_document("first"));app.home=None;app.lib=None;
-        let mut next=app.doc.clone();next.name="Edited".into();app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(next)}).unwrap();
-        let before=app.doc.to_json().unwrap();let workspace=Workspace::default();assert!(workspace.prepare_switch(&mut app,false).is_err());
-        assert_eq!(app.doc.to_json().unwrap(),before);assert!(app.hist.can_undo());assert!(workspace.tabs.is_empty());
+    fn failed_tab_save_preserves_the_current_document_and_history() {
+        let mut app = App::new(tab_document("first"));
+        app.home = None;
+        app.lib = None;
+        let mut next = app.doc.clone();
+        next.name = "Edited".into();
+        app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(next) }).unwrap();
+        let before = app.doc.to_json().unwrap();
+        let workspace = Workspace::default();
+        assert!(workspace.prepare_switch(&mut app, false).is_err());
+        assert_eq!(app.doc.to_json().unwrap(), before);
+        assert!(app.hist.can_undo());
+        assert!(workspace.tabs.is_empty());
     }
     #[test]
-    fn unsaved_ordinary_notes_are_finalized_before_the_workspace_allows_a_switch(){
-        let mut app=App::new(crate::decks::new_document("Unsaved ordinary design"));app.home=None;
-        let slide=app.deck_slides()[0];app.decks.notes_for=Some(slide);app.decks.notes_draft="Keep these pending notes".into();
+    fn unsaved_ordinary_notes_are_finalized_before_the_workspace_allows_a_switch() {
+        let mut app = App::new(crate::decks::new_document("Unsaved ordinary design"));
+        app.home = None;
+        let slide = app.deck_slides()[0];
+        app.decks.notes_for = Some(slide);
+        app.decks.notes_draft = "Keep these pending notes".into();
         assert!(!app.hist.can_undo());
-        assert!(Workspace::save_before_switch(&mut app).is_err(),"Pending ordinary edits require a save before replacement");
-        assert_eq!(app.doc.get(slide).unwrap().slide.as_ref().unwrap().notes,"Keep these pending notes");
+        assert!(Workspace::save_before_switch(&mut app).is_err(), "Pending ordinary edits require a save before replacement");
+        assert_eq!(app.doc.get(slide).unwrap().slide.as_ref().unwrap().notes, "Keep these pending notes");
         assert!(app.hist.can_undo());
     }
     #[test]
-    fn external_ordinary_notes_are_finalized_before_the_workspace_saves_a_switch(){
-        let root=std::env::temp_dir().join(format!("desigma-switch-notes-{}",uuid::Uuid::new_v4()));
+    fn external_ordinary_notes_are_finalized_before_the_workspace_saves_a_switch() {
+        let root = std::env::temp_dir().join(format!("desigma-switch-notes-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let mut app=App::new(crate::decks::new_document("External ordinary design"));app.home=None;
-        let path=root.join("ordinary.desigma");crate::io::save_path(&app.doc,&path).unwrap();
-        let (document,fingerprint)=crate::io::load_path_observed(&path).unwrap();app.doc=document;
-        app.file_path=Some(path.clone());
-        app.autosave=crate::home::Autosave { seen_rev:app.canvas.tiles.rev(),saved_hash:crate::home::doc_hash(&app.doc),
-            external_fingerprint:Some(fingerprint),..Default::default() };
-        let slide=app.deck_slides()[0];app.decks.notes_for=Some(slide);app.decks.notes_draft="Persist these pending notes".into();
+        let mut app = App::new(crate::decks::new_document("External ordinary design"));
+        app.home = None;
+        let path = root.join("ordinary.desigma");
+        crate::io::save_path(&app.doc, &path).unwrap();
+        let (document, fingerprint) = crate::io::load_path_observed(&path).unwrap();
+        app.doc = document;
+        app.file_path = Some(path.clone());
+        app.autosave = crate::home::Autosave {
+            seen_rev: app.canvas.tiles.rev(),
+            saved_hash: crate::home::doc_hash(&app.doc),
+            external_fingerprint: Some(fingerprint),
+            ..Default::default()
+        };
+        let slide = app.deck_slides()[0];
+        app.decks.notes_for = Some(slide);
+        app.decks.notes_draft = "Persist these pending notes".into();
         Workspace::save_before_switch(&mut app).unwrap();
-        let saved=crate::io::load_path(&path).unwrap();
-        assert_eq!(saved.get(slide).unwrap().slide.as_ref().unwrap().notes,"Persist these pending notes");
+        let saved = crate::io::load_path(&path).unwrap();
+        assert_eq!(saved.get(slide).unwrap().slide.as_ref().unwrap().notes, "Persist these pending notes");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn failure_after_switch_preparation_keeps_the_incoming_tab_and_active_history(){
-        let root=std::env::temp_dir().join(format!("desigma-final-switch-{}",uuid::Uuid::new_v4()));
-        let mut app=App::new(tab_document("first"));app.home=None;
-        app.lib=Some(desigma_library::Library::open(&root).unwrap());
-        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"),b"fixture").unwrap();
-        let mut workspace=Workspace::default();
-        workspace.replace_active(&mut app,tab_document("second"),None).unwrap();
-        workspace.prepare_switch(&mut app,true).unwrap();
+    fn failure_after_switch_preparation_keeps_the_incoming_tab_and_active_history() {
+        let root = std::env::temp_dir().join(format!("desigma-final-switch-{}", uuid::Uuid::new_v4()));
+        let mut app = App::new(tab_document("first"));
+        app.home = None;
+        app.lib = Some(desigma_library::Library::open(&root).unwrap());
+        app.lib.as_ref().unwrap().put_cityos_payload(&desigma_library::payload_digest(b"fixture"), b"fixture").unwrap();
+        let mut workspace = Workspace::default();
+        workspace.replace_active(&mut app, tab_document("second"), None).unwrap();
+        workspace.prepare_switch(&mut app, true).unwrap();
         crate::home::thumb::finish_library_jobs(&root);
-        let manifest=root.join("projects").join(&app.lib_file.as_ref().unwrap().project_id).join("project.json");
-        let manifest_bytes=std::fs::read(&manifest).unwrap();
-        let mut edited=app.doc.clone();edited.name="Second remains unsaved".into();
-        app.hist.exec(&mut app.doc,Command::CityosInstall{document:Box::new(edited)}).unwrap();app.changed();
-        std::fs::write(&manifest,b"{invalid manifest").unwrap();
-        let before=app.doc.to_json().unwrap();let history=serde_json::to_value(&app.hist).unwrap();
-        let target=workspace.tabs["first"].session.as_ref().unwrap().name().to_owned();
-        workspace.activate_prepared_tab(&mut app,"first");
-        assert!(workspace.error.is_some());assert_eq!(app.doc.to_json().unwrap(),before);
-        assert_eq!(serde_json::to_value(&app.hist).unwrap(),history);assert!(app.hist.can_undo());
-        assert_eq!(workspace.tabs["first"].session.as_ref().unwrap().name(),target);
-        assert!(!workspace.tabs.contains_key("second"));assert!(app.autosave.pending());
-        std::fs::write(manifest,manifest_bytes).unwrap();
-        crate::home::thumb::finish_library_jobs(&root);std::fs::remove_dir_all(root).unwrap();
+        let manifest = root.join("projects").join(&app.lib_file.as_ref().unwrap().project_id).join("project.json");
+        let manifest_bytes = std::fs::read(&manifest).unwrap();
+        let mut edited = app.doc.clone();
+        edited.name = "Second remains unsaved".into();
+        app.hist.exec(&mut app.doc, Command::CityosInstall { document: Box::new(edited) }).unwrap();
+        app.changed();
+        std::fs::write(&manifest, b"{invalid manifest").unwrap();
+        let before = app.doc.to_json().unwrap();
+        let history = serde_json::to_value(&app.hist).unwrap();
+        let target = workspace.tabs["first"].session.as_ref().unwrap().name().to_owned();
+        workspace.activate_prepared_tab(&mut app, "first");
+        assert!(workspace.error.is_some());
+        assert_eq!(app.doc.to_json().unwrap(), before);
+        assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
+        assert!(app.hist.can_undo());
+        assert_eq!(workspace.tabs["first"].session.as_ref().unwrap().name(), target);
+        assert!(!workspace.tabs.contains_key("second"));
+        assert!(app.autosave.pending());
+        std::fs::write(manifest, manifest_bytes).unwrap();
+        crate::home::thumb::finish_library_jobs(&root);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    #[ignore="requires the packaged canonical Accordion bundle; exercised by the Windows delivery check"]
-    fn canonical_accordion_native_save_reopen_and_boolean_export(){
-        let directory=std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_EVIDENCE").unwrap());
-        let bundle:Value=serde_json::from_slice(&std::fs::read(directory.join("accordion-bundle.json")).unwrap()).unwrap();
-        let edited:Value=serde_json::from_slice(&std::fs::read(directory.join("accordion-edited-bundle.json")).unwrap()).unwrap();
-        let document=binding(bundle["draft"].clone(),&bundle["projection"]).unwrap();
-        assert_eq!(document.cityos.as_ref().unwrap().occurrences.len(),9,"Requires actual native visual parts");
-        assert_eq!(document.nodes.values().filter(|node|matches!(node.kind,desigma_doc::NodeKind::Text(_))).count(),2);
-        assert_eq!(document.nodes.values().filter(|node|matches!(node.kind,desigma_doc::NodeKind::Vector {..})).count(),2);
-        for node in document.nodes.values().filter(|node|!document.pages.contains(&node.id)) {assert!(node.locked);}
-        let path=crate::io::save_path(&document,&directory.join("native-accordion.desigma")).unwrap();
-        let mut reopened=crate::io::load_path(&path).unwrap();let mut history=desigma_doc::History::default();
-        history.exec(&mut reopened,Command::CityosInstall{document:Box::new(binding(edited["draft"].clone(),&edited["projection"]).unwrap())}).unwrap();
-        crate::io::save_path(&reopened,&path).unwrap();let reopened=crate::io::load_path(&path).unwrap();
-        let bridge=bridge::Bridge::spawn(Config{node:std::env::var("CITYOS_DESIGN_WORKSPACE_NODE").unwrap().into(),bridge:std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_PACKAGE").unwrap()).join("workspace.mjs"),
-            repository:std::env::var("CITYOS_DESIGN_WORKSPACE_REPOSITORY").unwrap().into(),cache:directory.join("canonical-cache")});
+    #[ignore = "requires the packaged canonical Accordion bundle; exercised by the Windows delivery check"]
+    fn canonical_accordion_native_save_reopen_and_boolean_export() {
+        let directory = std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_EVIDENCE").unwrap());
+        let bundle: Value = serde_json::from_slice(&std::fs::read(directory.join("accordion-bundle.json")).unwrap()).unwrap();
+        let edited: Value = serde_json::from_slice(&std::fs::read(directory.join("accordion-edited-bundle.json")).unwrap()).unwrap();
+        let document = binding(bundle["draft"].clone(), &bundle["projection"]).unwrap();
+        assert_eq!(document.cityos.as_ref().unwrap().occurrences.len(), 9, "Requires actual native visual parts");
+        assert_eq!(document.nodes.values().filter(|node| matches!(node.kind, desigma_doc::NodeKind::Text(_))).count(), 2);
+        assert_eq!(document.nodes.values().filter(|node| matches!(node.kind, desigma_doc::NodeKind::Vector { .. })).count(), 2);
+        for node in document.nodes.values().filter(|node| !document.pages.contains(&node.id)) {
+            assert!(node.locked);
+        }
+        let path = crate::io::save_path(&document, &directory.join("native-accordion.desigma")).unwrap();
+        let mut reopened = crate::io::load_path(&path).unwrap();
+        let mut history = desigma_doc::History::default();
+        history.exec(&mut reopened, Command::CityosInstall { document: Box::new(binding(edited["draft"].clone(), &edited["projection"]).unwrap()) }).unwrap();
+        crate::io::save_path(&reopened, &path).unwrap();
+        let reopened = crate::io::load_path(&path).unwrap();
+        let bridge = bridge::Bridge::spawn(Config {
+            node: std::env::var("CITYOS_DESIGN_WORKSPACE_NODE").unwrap().into(),
+            bridge: std::path::PathBuf::from(std::env::var("CITYOS_DESIGN_WORKSPACE_PACKAGE").unwrap()).join("workspace.mjs"),
+            repository: std::env::var("CITYOS_DESIGN_WORKSPACE_REPOSITORY").unwrap().into(),
+            cache: directory.join("canonical-cache"),
+        });
         bridge.jobs.send(json!({"op":"Export","draft":draft(&reopened).unwrap()})).unwrap();
-        let exported=bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();assert_eq!(exported["operationCount"],1);assert_eq!(exported["ownerSubmission"],false);
-        assert_eq!(exported["changeset"]["changes"][0]["sourcePointer"],"/root/props/allowMultiple");
+        let exported = bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        assert_eq!(exported["operationCount"], 1);
+        assert_eq!(exported["ownerSubmission"], false);
+        assert_eq!(exported["changeset"]["changes"][0]["sourcePointer"], "/root/props/allowMultiple");
         bridge.jobs.send(json!({"op":"Export","draft":draft(&document).unwrap()})).unwrap();
-        assert_eq!(bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap()["operationCount"],0);
-        let d=draft(&reopened).unwrap();
-        bridge.jobs.send(json!({"op":"Command","draft":d,"command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],
-            "operationId":"native-accordion-return","operation":"set-property","nodeId":"accordion","property":"allowMultiple","value":false}})).unwrap();
-        let returned=bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
-        assert_eq!(returned["draft"]["semanticDraft"]["root"]["items"],bundle["draft"]["semanticBase"]["root"]["items"]);
-        let returned=binding(returned["draft"].clone(),&returned["projection"]).unwrap();
-        let path=crate::io::save_path(&returned,&directory.join("native-accordion-returned.desigma")).unwrap();let returned=crate::io::load_path(&path).unwrap();
+        assert_eq!(bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap()["operationCount"], 0);
+        let d = draft(&reopened).unwrap();
+        bridge
+            .jobs
+            .send(json!({"op":"Command","draft":d,"command":{"draftId":d["draftId"],"expectedRevision":d["draftRevision"],
+            "operationId":"native-accordion-return","operation":"set-property","nodeId":"accordion","property":"allowMultiple","value":false}}))
+            .unwrap();
+        let returned = bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        assert_eq!(returned["draft"]["semanticDraft"]["root"]["items"], bundle["draft"]["semanticBase"]["root"]["items"]);
+        let returned = binding(returned["draft"].clone(), &returned["projection"]).unwrap();
+        let path = crate::io::save_path(&returned, &directory.join("native-accordion-returned.desigma")).unwrap();
+        let returned = crate::io::load_path(&path).unwrap();
         bridge.jobs.send(json!({"op":"Export","draft":draft(&returned).unwrap()})).unwrap();
-        assert_eq!(bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap()["operationCount"],0);
+        assert_eq!(bridge.replies.recv_timeout(Duration::from_secs(30)).unwrap().unwrap()["operationCount"], 0);
     }
     #[test]
     fn resource_preview_never_replaces_the_current_document_or_starts_its_autosave() {

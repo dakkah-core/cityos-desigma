@@ -23,8 +23,7 @@ fn resource() -> Value {
 }
 
 fn horizon_field() -> Value {
-    resource()["fields"].as_array().unwrap().iter().find(|field|
-        field["nodeId"] == "horizon" && field["property"] == "copilotLayout").unwrap().clone()
+    resource()["fields"].as_array().unwrap().iter().find(|field| field["nodeId"] == "horizon" && field["property"] == "copilotLayout").unwrap().clone()
 }
 
 fn composition_fixture(layout: &str) -> Value {
@@ -65,8 +64,7 @@ fn document(layout: &str) -> Document {
 
 fn workspace() -> (Workspace, std::sync::mpsc::Receiver<Value>, std::sync::mpsc::Sender<Result<Value, String>>) {
     let (bridge, requests, responses) = bridge::Bridge::test_transport();
-    (Workspace { bridge:Some(bridge), validated:true, themes_loaded:true,
-        resource:Some(resource()), ..Default::default() }, requests, responses)
+    (Workspace { bridge: Some(bridge), validated: true, themes_loaded: true, resource: Some(resource()), ..Default::default() }, requests, responses)
 }
 
 fn prepared(workspace: &Workspace, document: &Document) -> Value {
@@ -118,8 +116,12 @@ fn assert_preserved(document: &Document, original: &Value, layout: &str) {
 }
 
 fn unchanged_state(app: &App) -> (String, Value, Vec<desigma_doc::NodeId>, (u64, u32, bool)) {
-    (app.doc.to_json().unwrap(), serde_json::to_value(&app.hist).unwrap(), app.selection.clone(),
-        (app.autosave.saved_hash, app.autosave.saves, app.autosave.pending()))
+    (
+        app.doc.to_json().unwrap(),
+        serde_json::to_value(&app.hist).unwrap(),
+        app.selection.clone(),
+        (app.autosave.saved_hash, app.autosave.saves, app.autosave.pending()),
+    )
 }
 
 #[test]
@@ -130,12 +132,14 @@ fn selecting_horizon_dispatches_each_schema_layout_without_authoring_or_targetin
     assert_eq!(field["sourcePointer"], HORIZON);
     assert_eq!(field["values"], json!(LAYOUTS));
     for layout in LAYOUTS {
-        let mut app = App::new(document(if layout == "split" { "conversation" } else { "split" })); app.home = None;
+        let mut app = App::new(document(if layout == "split" { "conversation" } else { "split" }));
+        app.home = None;
         let (mut workspace, requests, _responses) = workspace();
         workspace.select(&mut app, "material");
         let mut event = prepared(&workspace, &app.doc);
         workspace.preview = Some(event.clone());
-        event["kind"] = json!("selection"); event["nodeId"] = json!("horizon");
+        event["kind"] = json!("selection");
+        event["nodeId"] = json!("horizon");
         workspace.handle_preview_event(&mut app, &event);
         assert_eq!(workspace.selected, "horizon");
         assert_eq!(app.selection.len(), 1);
@@ -151,7 +155,8 @@ fn selecting_horizon_dispatches_each_schema_layout_without_authoring_or_targetin
 #[test]
 fn blocked_horizon_controls_and_material_controls_on_horizon_cannot_mutate_or_dispatch() {
     for fault in ["busy", "unvalidated", "material-selected", "frame-selected", "frozen", "material-control"] {
-        let mut app = App::new(document("split")); app.home = None;
+        let mut app = App::new(document("split"));
+        app.home = None;
         let (mut workspace, requests, _responses) = workspace();
         workspace.select(&mut app, "horizon");
         let mut field = horizon_field();
@@ -174,12 +179,14 @@ fn blocked_horizon_controls_and_material_controls_on_horizon_cannot_mutate_or_di
 #[test]
 fn invalid_horizon_values_rejected_by_boundary_preserve_the_last_accepted_draft_and_history() {
     for invalid in [json!("compact"), Value::Null, json!(42), json!({"layout":"canvas"})] {
-        let mut app = App::new(document("split")); app.home = None;
+        let mut app = App::new(document("split"));
+        app.home = None;
         let (mut workspace, requests, responses) = workspace();
         workspace.select(&mut app, "horizon");
         workspace.send_property_command(&app, &horizon_field(), json!("canvas"));
         let edit = requests.try_recv().unwrap();
-        responses.send(Ok(accepted_fixture(&edit, composition_fixture("canvas")))).unwrap(); workspace.poll(&mut app);
+        responses.send(Ok(accepted_fixture(&edit, composition_fixture("canvas")))).unwrap();
+        workspace.poll(&mut app);
         assert!(workspace.error.is_none() && app.hist.can_undo());
         let before = unchanged_state(&app);
         workspace.send_property_command(&app, &horizon_field(), invalid.clone());
@@ -188,7 +195,8 @@ fn invalid_horizon_values_rejected_by_boundary_preserve_the_last_accepted_draft_
         assert_eq!(unchanged_state(&app), before);
         // Invalid intent remains the compiler/profile's decision, not a local
         // mock validator. This explicit error fixture must never install state.
-        responses.send(Err("DESIGN_FIELD_UNSUPPORTED".into())).unwrap(); workspace.poll(&mut app);
+        responses.send(Err("DESIGN_FIELD_UNSUPPORTED".into())).unwrap();
+        workspace.poll(&mut app);
         assert_eq!(workspace.error.as_deref(), Some("DESIGN_FIELD_UNSUPPORTED"));
         assert_eq!(unchanged_state(&app), before);
         assert!(app.hist.can_undo() && !app.hist.can_redo());
@@ -200,7 +208,8 @@ fn invalid_horizon_values_rejected_by_boundary_preserve_the_last_accepted_draft_
 fn horizon_undo_redo_and_native_save_reopen_preserve_intent_material_and_immutable_base() {
     for layout in LAYOUTS {
         let baseline = if layout == "split" { "conversation" } else { "split" };
-        let mut app = App::new(document(baseline)); app.home = None;
+        let mut app = App::new(document(baseline));
+        app.home = None;
         let (mut workspace, requests, responses) = workspace();
         workspace.select(&mut app, "horizon");
         let original = draft(&app.doc).unwrap().clone();
@@ -219,8 +228,10 @@ fn horizon_undo_redo_and_native_save_reopen_preserve_intent_material_and_immutab
             assert_eq!(request["command"]["expectedRevision"], revision - 1);
             assert_eq!(unchanged_state(&app), before, "history must wait for a fresh boundary reply");
             let operation_id = request["command"]["operationId"].clone();
-            assert!(!operation_ids.contains(&operation_id)); operation_ids.push(operation_id);
-            responses.send(Ok(accepted_fixture(&request, composition_fixture(expected)))).unwrap(); workspace.poll(&mut app);
+            assert!(!operation_ids.contains(&operation_id));
+            operation_ids.push(operation_id);
+            responses.send(Ok(accepted_fixture(&request, composition_fixture(expected)))).unwrap();
+            workspace.poll(&mut app);
             assert!(workspace.error.is_none(), "{:?}", workspace.error);
             assert_preserved(&app.doc, &original, expected);
             let current = draft(&app.doc).unwrap();
@@ -248,7 +259,8 @@ fn horizon_undo_redo_and_native_save_reopen_preserve_intent_material_and_immutab
 
 fn rendered_fixture(receipt: &Value, layout: &str) -> Value {
     let mut event = receipt.clone();
-    event["kind"] = json!("rendered"); event["horizonLayout"] = json!(layout);
+    event["kind"] = json!("rendered");
+    event["horizonLayout"] = json!(layout);
     event
 }
 
@@ -269,7 +281,8 @@ fn assert_ignored(workspace: &mut Workspace, app: &mut App, event: &Value) {
 #[test]
 fn current_horizon_layout_observations_update_only_telemetry_without_authoring_intent() {
     for layout in LAYOUTS {
-        let mut app = App::new(document("split")); app.home = None;
+        let mut app = App::new(document("split"));
+        app.home = None;
         let (mut workspace, requests, _responses) = workspace();
         let receipt = prepared(&workspace, &app.doc);
         workspace.preview = Some(receipt.clone());
@@ -286,7 +299,8 @@ fn current_horizon_layout_observations_update_only_telemetry_without_authoring_i
 
 #[test]
 fn stale_horizon_layout_cannot_replace_current_observations_or_newer_native_intent() {
-    let mut app = App::new(document("split")); app.home = None;
+    let mut app = App::new(document("split"));
+    app.home = None;
     let (mut workspace, requests, responses) = workspace();
     let receipt = prepared(&workspace, &app.doc);
     workspace.preview = Some(receipt.clone());
@@ -305,7 +319,8 @@ fn stale_horizon_layout_cannot_replace_current_observations_or_newer_native_inte
     workspace.select(&mut app, "horizon");
     workspace.send_property_command(&app, &horizon_field(), json!("canvas"));
     let edit = requests.try_recv().unwrap();
-    responses.send(Ok(accepted_fixture(&edit, composition_fixture("canvas")))).unwrap(); workspace.poll(&mut app);
+    responses.send(Ok(accepted_fixture(&edit, composition_fixture("canvas")))).unwrap();
+    workspace.poll(&mut app);
     assert!(workspace.error.is_none());
     let stale = rendered_fixture(&receipt, "operations");
     assert_ignored(&mut workspace, &mut app, &stale);

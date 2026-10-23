@@ -47,7 +47,13 @@ pub struct CatalogUiServices {
     pub pick_reader: fn() -> Option<PathBuf>,
 }
 impl CatalogUiServices {
-    pub(super) fn theme(self) -> CatalogStyle { (self.style)() }
-    pub(super) fn record(self, ui: &Ui, name: &str, rect: Rect) { (self.record)(ui, name, rect); }
-    pub(super) fn renderer(self, document: Document) -> Box<dyn SpecimenRenderer> { (self.specimen_renderer)(document) }
+    pub(super) fn theme(self) -> CatalogStyle {
+        (self.style)()
+    }
+    pub(super) fn record(self, ui: &Ui, name: &str, rect: Rect) {
+        (self.record)(ui, name, rect);
+    }
+    pub(super) fn renderer(self, document: Document) -> Box<dyn SpecimenRenderer> {
+        (self.specimen_renderer)(document)
+    }
 }

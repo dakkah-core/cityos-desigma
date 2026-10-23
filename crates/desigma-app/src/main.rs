@@ -1,15 +1,15 @@
 mod app;
 mod board;
 mod canvas;
-mod cli;
 mod cityos_catalog;
 mod cityos_jobs;
-mod design_workspace;
+mod cli;
 mod clipboard;
 mod comments;
 mod comp_ops;
 mod decks;
 mod demo;
+mod design_workspace;
 mod dev;
 mod edit;
 mod find;
@@ -80,9 +80,20 @@ fn main() {
         println!("desigma {VERSION}");
         return;
     }
-    if let Some(directory)=&opts.cityos_verify_workspace {
-        let config=design_workspace::Config::from_reader_options(opts.cityos_repository.clone(),opts.cityos_reader.clone(),opts.cityos_node.clone(),opts.cityos_cache.clone());
-        match design_workspace::verify_roundtrip(config,directory){Ok(report)=>println!("{report}"),Err(error)=>{eprintln!("Native workspace verification failed: {error}");std::process::exit(1);}}
+    if let Some(directory) = &opts.cityos_verify_workspace {
+        let config = design_workspace::Config::from_reader_options(
+            opts.cityos_repository.clone(),
+            opts.cityos_reader.clone(),
+            opts.cityos_node.clone(),
+            opts.cityos_cache.clone(),
+        );
+        match design_workspace::verify_roundtrip(config, directory) {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                eprintln!("Native workspace verification failed: {error}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     if let Some(dir) = &opts.seed_library {

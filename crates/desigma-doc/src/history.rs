@@ -86,23 +86,33 @@ pub enum Command {
 impl Command {
     /// Applies the command and returns the command that undoes it.
     pub fn apply(self, doc: &mut Document) -> Result<Command, DocError> {
-        if doc.cityos.is_some() && !matches!(self, Command::CityosInstall { .. }) { return Err(DocError::CityosProtected); }
+        if doc.cityos.is_some() && !matches!(self, Command::CityosInstall { .. }) {
+            return Err(DocError::CityosProtected);
+        }
         Ok(match self {
             Command::RestoreDocument { document } => {
-                if document.is_managed() { return Err(DocError::CityosProtected); }
+                if document.is_managed() {
+                    return Err(DocError::CityosProtected);
+                }
                 let previous = std::mem::replace(doc, *document);
                 Command::RestoreDocument { document: Box::new(previous) }
             }
             Command::CityosInstall { mut document } => {
-                let current=doc.cityos.as_ref().ok_or(DocError::CityosProtected)?;
-                let next=document.cityos.as_mut().ok_or(DocError::CityosProtected)?;
-                if current.validate().is_err() || next.validate().is_err() || current.draft_id!=next.draft_id || current.base!=next.base || current.semantic_base!=next.semantic_base {
+                let current = doc.cityos.as_ref().ok_or(DocError::CityosProtected)?;
+                let next = document.cityos.as_mut().ok_or(DocError::CityosProtected)?;
+                if current.validate().is_err()
+                    || next.validate().is_err()
+                    || current.draft_id != next.draft_id
+                    || current.base != next.base
+                    || current.semantic_base != next.semantic_base
+                {
                     return Err(DocError::CityosProtected);
                 }
                 // Undo/redo also creates a new local revision; no stale preview identity is reused.
-                let revision=current.exchange().and_then(|d| d["draftRevision"].as_u64()).ok_or(DocError::CityosProtected)?;
-                next.exchange_mut().ok_or(DocError::CityosProtected)?["draftRevision"] = serde_json::json!(revision.checked_add(1).ok_or(DocError::CityosProtected)?);
-                let old=std::mem::replace(doc,*document);
+                let revision = current.exchange().and_then(|d| d["draftRevision"].as_u64()).ok_or(DocError::CityosProtected)?;
+                next.exchange_mut().ok_or(DocError::CityosProtected)?["draftRevision"] =
+                    serde_json::json!(revision.checked_add(1).ok_or(DocError::CityosProtected)?);
+                let old = std::mem::replace(doc, *document);
                 Command::CityosInstall { document: Box::new(old) }
             }
             Command::Insert { parent, index, nodes } => {
@@ -184,12 +194,12 @@ impl Command {
                 collections: std::mem::replace(&mut doc.variable_collections, collections),
             },
             Command::Batch(cmds) => {
-                let mut staged=doc.clone();
+                let mut staged = doc.clone();
                 let mut inv = Vec::with_capacity(cmds.len());
                 for c in cmds {
                     inv.push(c.apply(&mut staged)?);
                 }
-                *doc=staged;
+                *doc = staged;
                 inv.reverse();
                 Command::Batch(inv)
             }
@@ -232,36 +242,55 @@ pub struct HistoryTransition {
     command: Command,
 }
 impl HistoryTransition {
-    pub fn command(&self) -> &Command { &self.command }
+    pub fn command(&self) -> &Command {
+        &self.command
+    }
 }
 
 impl History {
     /// Cheap process-local observation of stack changes. Keep the Arc alive and
     /// compare with Arc::ptr_eq; this is neither serialized nor owner authority.
-    pub fn change_identity(&self) -> Arc<()> { self.transition_fence.clone() }
+    pub fn change_identity(&self) -> Arc<()> {
+        self.transition_fence.clone()
+    }
 
     /// Inspect one stack entry without replaying a historical payload. The caller
     /// can validate an extension operation asynchronously before committing it.
     pub fn prepare_transition(&self, redo: bool) -> Option<HistoryTransition> {
         let command = (if redo { &self.redo } else { &self.undo }).last()?;
-        Some(HistoryTransition { redo, baseline_id: self.baseline_id.clone(),
-            undo_len: self.undo.len(), redo_len: self.redo.len(), fence: self.transition_fence.clone(), command: command.clone() })
+        Some(HistoryTransition {
+            redo,
+            baseline_id: self.baseline_id.clone(),
+            undo_len: self.undo.len(),
+            redo_len: self.redo.len(),
+            fence: self.transition_fence.clone(),
+            command: command.clone(),
+        })
     }
 
     pub fn transition_current(&self, step: &HistoryTransition) -> bool {
-        Arc::ptr_eq(&self.transition_fence, &step.fence) && self.baseline_id == step.baseline_id
-            && self.undo.len() == step.undo_len && self.redo.len() == step.redo_len
+        Arc::ptr_eq(&self.transition_fence, &step.fence)
+            && self.baseline_id == step.baseline_id
+            && self.undo.len() == step.undo_len
+            && self.redo.len() == step.redo_len
     }
 
     /// Install a separately validated command and move the exact prepared stack
     /// entry atomically. No extension-specific revisions or payloads are interpreted.
     pub fn commit_transition(&mut self, doc: &mut Document, step: HistoryTransition, validated: Command) -> Result<(), DocError> {
-        if !self.transition_current(&step) { return Err(DocError::HistoryChanged); }
+        if !self.transition_current(&step) {
+            return Err(DocError::HistoryChanged);
+        }
         let mut staged = doc.clone();
         let inverse = validated.apply(&mut staged)?;
         *doc = staged;
-        if step.redo { self.redo.pop(); self.undo.push(inverse); }
-        else { self.undo.pop(); self.redo.push(inverse); }
+        if step.redo {
+            self.redo.pop();
+            self.undo.push(inverse);
+        } else {
+            self.undo.pop();
+            self.redo.push(inverse);
+        }
         self.transition_fence = Arc::new(());
         Ok(())
     }
@@ -314,9 +343,9 @@ impl History {
     }
     pub fn undo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
         let Some(c) = self.undo.last().cloned() else { return Ok(false) };
-        let mut staged=doc.clone();
-        let inverse=c.apply(&mut staged)?;
-        *doc=staged;
+        let mut staged = doc.clone();
+        let inverse = c.apply(&mut staged)?;
+        *doc = staged;
         self.undo.pop();
         self.redo.push(inverse);
         self.transition_fence = Arc::new(());
@@ -324,9 +353,9 @@ impl History {
     }
     pub fn redo(&mut self, doc: &mut Document) -> Result<bool, DocError> {
         let Some(c) = self.redo.last().cloned() else { return Ok(false) };
-        let mut staged=doc.clone();
-        let inverse=c.apply(&mut staged)?;
-        *doc=staged;
+        let mut staged = doc.clone();
+        let inverse = c.apply(&mut staged)?;
+        *doc = staged;
         self.redo.pop();
         self.undo.push(inverse);
         self.transition_fence = Arc::new(());

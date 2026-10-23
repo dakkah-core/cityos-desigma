@@ -7,19 +7,19 @@
 mod board;
 mod board_blocks;
 mod brush;
+mod cityos;
 mod code;
 mod comments;
-mod cityos;
 mod components;
 mod dev;
 pub mod find;
 mod geom;
 mod history;
-mod persistence;
 mod library;
 mod library_ops;
 mod node;
 mod paint;
+mod persistence;
 mod prototype;
 mod session;
 mod settings;
@@ -33,18 +33,18 @@ mod vector_fit;
 pub use board::*;
 pub use board_blocks::*;
 pub use brush::*;
+pub use cityos::*;
 pub use code::*;
 pub use comments::*;
-pub use cityos::*;
 pub use components::*;
 pub use dev::*;
 pub use geom::*;
 pub use history::*;
-pub use persistence::*;
 pub use library::*;
 pub use library_ops::*;
 pub use node::*;
 pub use paint::*;
+pub use persistence::*;
 pub use prototype::*;
 pub use session::*;
 pub use settings::*;
@@ -279,35 +279,51 @@ impl Document {
         if let Some(binding) = &self.cityos {
             binding.validate().map_err(<serde_json::Error as serde::ser::Error>::custom)?;
         }
-        if self.cityos.is_some(){
-            let version = if self.cityos.as_ref().is_some_and(|b| b.exchange_v3.is_some()) {"desigma.document.v4"} else if self.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {"desigma.document.v3"} else {"desigma.document.v2"};
+        if self.cityos.is_some() {
+            let version = if self.cityos.as_ref().is_some_and(|b| b.exchange_v3.is_some()) {
+                "desigma.document.v4"
+            } else if self.cityos.as_ref().is_some_and(|b| b.exchange_v2.is_some()) {
+                "desigma.document.v3"
+            } else {
+                "desigma.document.v2"
+            };
             return serde_json::to_string_pretty(&serde_json::json!({"schemaVersion":version,"document":self}));
         }
-        let mut value=serde_json::to_value(self)?;
-        value["schemaVersion"]=serde_json::Value::String("desigma.document.v1".into());
+        let mut value = serde_json::to_value(self)?;
+        value["schemaVersion"] = serde_json::Value::String("desigma.document.v1".into());
         serde_json::to_string_pretty(&value)
     }
 
     /// Parses a native document. Text written by older versions that emulated lists with
     /// literal bullet and "1. " prefixes is converted to real lists.
     pub fn from_json(s: &str) -> serde_json::Result<Self> {
-        let mut value: serde_json::Value=serde_json::from_str(s)?;
+        let mut value: serde_json::Value = serde_json::from_str(s)?;
         let container_version = value.get("schemaVersion").and_then(|v| v.as_str()).map(str::to_owned);
-        if let Some(version)=value.get("schemaVersion") {
-            if version=="desigma.document.v2" || version=="desigma.document.v3" || version=="desigma.document.v4" {
-                let v3=version=="desigma.document.v3";
-                let v4=version=="desigma.document.v4";
-                value=value.get("document").cloned().ok_or_else(||<serde_json::Error as serde::de::Error>::custom("Bound document payload missing"))?;
-                if !v3 && !v4 && value["cityos"]["exchange_v2"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Expanded bindings require container v3")); }
-                if v4 != value["cityos"]["exchange_v3"].is_object() { return Err(<serde_json::Error as serde::de::Error>::custom("Typed bindings require container v4")); }
+        if let Some(version) = value.get("schemaVersion") {
+            if version == "desigma.document.v2" || version == "desigma.document.v3" || version == "desigma.document.v4" {
+                let v3 = version == "desigma.document.v3";
+                let v4 = version == "desigma.document.v4";
+                value = value.get("document").cloned().ok_or_else(|| <serde_json::Error as serde::de::Error>::custom("Bound document payload missing"))?;
+                if !v3 && !v4 && value["cityos"]["exchange_v2"].is_object() {
+                    return Err(<serde_json::Error as serde::de::Error>::custom("Expanded bindings require container v3"));
+                }
+                if v4 != value["cityos"]["exchange_v3"].is_object() {
+                    return Err(<serde_json::Error as serde::de::Error>::custom("Typed bindings require container v4"));
+                }
+            } else if version != "desigma.document.v1" {
+                return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));
             }
-            else if version!="desigma.document.v1" {return Err(<serde_json::Error as serde::de::Error>::custom("Unsupported native document version; refusing a lossy replacement"));}
         }
         let mut doc: Self = serde_json::from_value(value)?;
-        if let Some(binding)=&doc.cityos {
+        if let Some(binding) = &doc.cityos {
             binding.validate().map_err(<serde_json::Error as serde::de::Error>::custom)?;
-            let expected = if binding.exchange_v3.is_some() { "desigma.document.v4" }
-                else if binding.exchange_v2.is_some() { "desigma.document.v3" } else { "desigma.document.v2" };
+            let expected = if binding.exchange_v3.is_some() {
+                "desigma.document.v4"
+            } else if binding.exchange_v2.is_some() {
+                "desigma.document.v3"
+            } else {
+                "desigma.document.v2"
+            };
             if container_version.as_deref() != Some(expected) {
                 return Err(<serde_json::Error as serde::de::Error>::custom("Binding/container version mismatch"));
             }
@@ -402,9 +418,15 @@ mod tests {
         }
         let mut bound = document;
         bound.cityos = Some(CityosBinding {
-            schema_version: "cityos.design-exchange.v1".into(), document_id: "d".into(), draft_id: "draft".into(),
+            schema_version: "cityos.design-exchange.v1".into(),
+            document_id: "d".into(),
+            draft_id: "draft".into(),
             base: CityosBase::NativeOwner { owner: "o".into(), resource: "r".into(), revision: "1".into() },
-            semantic_base: serde_json::json!({}), dependency_pins: vec![], occurrences: BTreeMap::new(), exchange_v2: None, exchange_v3: None,
+            semantic_base: serde_json::json!({}),
+            dependency_pins: vec![],
+            occurrences: BTreeMap::new(),
+            exchange_v2: None,
+            exchange_v3: None,
         });
         let mut flat = serde_json::to_value(&bound).unwrap();
         flat["schemaVersion"] = serde_json::json!("desigma.document.v1");

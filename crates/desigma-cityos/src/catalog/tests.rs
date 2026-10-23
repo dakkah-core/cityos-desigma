@@ -1,5 +1,5 @@
-use super::*;
 use super::test_support::{entry, services};
+use super::*;
 use serde_json::json;
 
 #[test]
@@ -32,30 +32,36 @@ fn profile_summary() -> Value {
 
 #[test]
 fn registered_default_inline_preview_preserves_the_full_locator_and_requires_matching_implementation_bytes() {
-    let mut selected=entry("context"); selected.kind="source-file".into();
-    selected.source_path="packages/runtime/src/ContextCapsule.tsx".into(); selected.source_digest="b".repeat(64);
-    let profile=json!({"kind":"registered-specimen","sourcePath":selected.source_path,"publicExport":"ContextCapsule",
+    let mut selected = entry("context");
+    selected.kind = "source-file".into();
+    selected.source_path = "packages/runtime/src/ContextCapsule.tsx".into();
+    selected.source_digest = "b".repeat(64);
+    let profile = json!({"kind":"registered-specimen","sourcePath":selected.source_path,"publicExport":"ContextCapsule",
         "sourceDigest":selected.source_digest,"implementationDigest":selected.source_digest,"sourcePaths":[selected.source_path,"packages/ui/src/ContextCapsule.tsx"],
         "componentId":"fixture.context","componentVersion":"1","profileRef":"fixture-profile","targetProfileRef":"web-fixture",
         "resourceId":"fixture-context-ar","fixture":"cityos-shared-leaf","actualWebPreview":true,"editable":false,
         "provenance":{"canonicalResource":false,"temporary":true,"locale":"ar","sourceCommit":"a".repeat(40)}});
-    let mut summary=json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[profile]});
-    let actions=support::actions(&selected,None,Some(&summary),"committed");
-    assert!(actions.actual_preview); assert!(!actions.editable);
-    assert_eq!(actions.inline_pin,Some(profile.clone()));
-    assert!(support::actions(&selected,None,Some(&summary),"local").inline_pin.is_none());
-    let mut registration=selected.clone(); registration.kind="registered-component".into();
-    registration.semantic_id="fixture.context".into();
-    registration.source_path="registrations.json".into(); registration.source_digest="c".repeat(64); registration.label="ContextCapsule".into();
-    let mut specimen=json!({"entry":registration,"digest":registration.source_digest,"data":{"name":"ContextCapsule","publicExport":"ContextCapsule","sourcePath":"packages/ui/src/ContextCapsule.tsx"},"workspaceProfile":profile});
-    assert!(support::actions(&registration,Some(&specimen),Some(&summary),"committed").actual_preview);
-    specimen["data"]["publicExport"]=json!("UnrelatedExport");
-    assert!(!support::actions(&registration,Some(&specimen),Some(&summary),"committed").actual_preview);
-    summary["workspaceProfiles"][0]["implementationDigest"]=json!("c".repeat(64));
-    assert!(!support::actions(&selected,None,Some(&summary),"committed").actual_preview);
-    summary["workspaceProfiles"][0]=profile;
-    selected.source_digest="c".repeat(64);
-    assert!(support::actions(&selected,None,Some(&summary),"committed").inline_pin.is_none());
+    let mut summary = json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[profile]});
+    let actions = support::actions(&selected, None, Some(&summary), "committed");
+    assert!(actions.actual_preview);
+    assert!(!actions.editable);
+    assert_eq!(actions.inline_pin, Some(profile.clone()));
+    assert!(support::actions(&selected, None, Some(&summary), "local").inline_pin.is_none());
+    let mut registration = selected.clone();
+    registration.kind = "registered-component".into();
+    registration.semantic_id = "fixture.context".into();
+    registration.source_path = "registrations.json".into();
+    registration.source_digest = "c".repeat(64);
+    registration.label = "ContextCapsule".into();
+    let mut specimen = json!({"entry":registration,"digest":registration.source_digest,"data":{"name":"ContextCapsule","publicExport":"ContextCapsule","sourcePath":"packages/ui/src/ContextCapsule.tsx"},"workspaceProfile":profile});
+    assert!(support::actions(&registration, Some(&specimen), Some(&summary), "committed").actual_preview);
+    specimen["data"]["publicExport"] = json!("UnrelatedExport");
+    assert!(!support::actions(&registration, Some(&specimen), Some(&summary), "committed").actual_preview);
+    summary["workspaceProfiles"][0]["implementationDigest"] = json!("c".repeat(64));
+    assert!(!support::actions(&selected, None, Some(&summary), "committed").actual_preview);
+    summary["workspaceProfiles"][0] = profile;
+    selected.source_digest = "c".repeat(64);
+    assert!(support::actions(&selected, None, Some(&summary), "committed").inline_pin.is_none());
 }
 
 #[test]
@@ -127,7 +133,9 @@ fn inline_renderer_requires_matching_selection_and_exact_captured_commit_and_dig
     let pin = actions.inline_pin.unwrap();
     assert_eq!(pin["sourcePath"], selected.source_path);
     assert_eq!(pin["sourceDigest"], "b".repeat(64));
-    for field in ["actualWebPreview", "editable"] { specimen["workspaceProfile"][field] = json!(false); }
+    for field in ["actualWebPreview", "editable"] {
+        specimen["workspaceProfile"][field] = json!(false);
+    }
     let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
     assert!(!actions.actual_preview && !actions.editable && actions.inline_pin.is_none());
     specimen["workspaceProfile"]["actualWebPreview"] = json!(true);
@@ -179,15 +187,19 @@ fn shared_modules_preserve_ambiguity_and_require_an_exact_export_before_opening(
     let first = exact_specimen_profile("fixture.first", "1", "First", "authoring", "web");
     let second = exact_specimen_profile("fixture.second", "1", "Second", "authoring", "web");
     let summary = json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[first,second]});
-    let mut selected = entry("shared"); selected.kind = "source-file".into(); selected.label = "First".into();
-    selected.source_path = "packages/runtime/src/shared.tsx".into(); selected.source_digest = "b".repeat(64);
+    let mut selected = entry("shared");
+    selected.kind = "source-file".into();
+    selected.label = "First".into();
+    selected.source_path = "packages/runtime/src/shared.tsx".into();
+    selected.source_digest = "b".repeat(64);
     let actions = support::actions(&selected, None, Some(&summary), "committed");
     assert!(!actions.actual_preview && !actions.editable && actions.source.is_none() && actions.inline_pin.is_none());
     assert!(actions.preview_reason.contains("Several registered definitions") && actions.edit_reason.contains("Select an exact"));
     assert_eq!(actions.preview_choices, vec![first, second.clone()]);
     assert_eq!(actions.capability_rows()[0].1, "Choose definition");
     assert!(support::actions(&selected, None, Some(&summary), "local").preview_choices.is_empty());
-    selected.kind = "public-declaration".into(); selected.label = "Second".into();
+    selected.kind = "public-declaration".into();
+    selected.label = "Second".into();
     let exact = support::actions(&selected, None, Some(&summary), "committed");
     assert!(exact.actual_preview && exact.preview_here);
     assert!(exact.workspace_reason.as_deref().unwrap().contains("Registered defaults are temporary"));
@@ -204,22 +216,35 @@ fn registered_fallback_checks_component_version_and_every_profile_target_claim()
         exact_specimen_profile("fixture.first", "2", "First", "authoring", "web"),
         exact_specimen_profile("fixture.first", "1", "First", "other-authoring", "web"),
         exact_specimen_profile("fixture.first", "1", "First", "authoring", "native"),first]});
-    let mut selected = entry("registered"); selected.kind = "registration".into(); selected.semantic_id = "fixture.first".into();
-    selected.label = "First".into(); selected.source_path = "registry.json".into();
+    let mut selected = entry("registered");
+    selected.kind = "registration".into();
+    selected.semantic_id = "fixture.first".into();
+    selected.label = "First".into();
+    selected.source_path = "registry.json".into();
     selected.dependencies = vec!["packages/runtime/src/shared.tsx".into()];
     assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
     let data = json!({"id":"fixture.first","version":"1","sourcePath":"packages/runtime/src/shared.tsx",
         "locator":first["locator"]});
     let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":data});
     let actions = support::actions(&selected, Some(&specimen), Some(&summary), "committed");
-    assert!(actions.actual_preview); assert_eq!(actions.inline_pin.unwrap()["locator"], first["locator"]);
-    for (key, value) in [("version", "9"), ("componentVersion", "9"), ("profileRef", "missing"),
-        ("targetProfileRef", "missing"), ("componentId", "fixture.wrong"), ("id", "fixture.wrong"), ("publicExport", "WrongExport")] {
-        let mut wrong = specimen.clone(); wrong["data"][key] = json!(value);
+    assert!(actions.actual_preview);
+    assert_eq!(actions.inline_pin.unwrap()["locator"], first["locator"]);
+    for (key, value) in [
+        ("version", "9"),
+        ("componentVersion", "9"),
+        ("profileRef", "missing"),
+        ("targetProfileRef", "missing"),
+        ("componentId", "fixture.wrong"),
+        ("id", "fixture.wrong"),
+        ("publicExport", "WrongExport"),
+    ] {
+        let mut wrong = specimen.clone();
+        wrong["data"][key] = json!(value);
         let actions = support::actions(&selected, Some(&wrong), Some(&summary), "committed");
         assert!(!actions.actual_preview && actions.source.is_none(), "{key}");
     }
-    let mut wrong = specimen.clone(); wrong["data"]["canvasLocator"] = first["locator"].clone();
+    let mut wrong = specimen.clone();
+    wrong["data"]["canvasLocator"] = first["locator"].clone();
     wrong["data"]["canvasLocator"]["componentVersion"] = json!("9");
     assert!(support::actions(&selected, Some(&wrong), Some(&summary), "committed").source.is_none());
     let versions = json!({"workspaceProfiles":[summary["workspaceProfiles"][0], first]});
@@ -235,8 +260,10 @@ fn registered_fallback_checks_component_version_and_every_profile_target_claim()
 fn materialized_ambiguity_or_identity_failure_cannot_fall_back_to_a_summary_first_match() {
     let profile = exact_specimen_profile("fixture.first", "1", "First", "authoring", "web");
     let summary = json!({"workspaceProfiles":[profile]});
-    let mut selected = entry("shared"); selected.kind = "source-file".into();
-    selected.source_path = "packages/runtime/src/shared.tsx".into(); selected.source_digest = "b".repeat(64);
+    let mut selected = entry("shared");
+    selected.kind = "source-file".into();
+    selected.source_path = "packages/runtime/src/shared.tsx".into();
+    selected.source_digest = "b".repeat(64);
     for status in ["ambiguous", "unavailable"] {
         let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":"captured bytes",
             "workspaceSelection":{"status":status,"reason":"Select the exact locator."}});
@@ -252,24 +279,31 @@ fn materialized_ambiguity_or_identity_failure_cannot_fall_back_to_a_summary_firs
 #[test]
 fn missing_locator_identity_and_shared_helper_files_do_not_select_a_registered_leaf() {
     let profile = exact_specimen_profile("fixture.first", "1", "First", "authoring", "web");
-    let mut selected = entry("helper"); selected.kind = "source-file".into(); selected.label = "First".into();
-    selected.source_path = "packages/runtime/src/Receiver.tsx".into(); selected.source_digest = "b".repeat(64);
+    let mut selected = entry("helper");
+    selected.kind = "source-file".into();
+    selected.label = "First".into();
+    selected.source_path = "packages/runtime/src/Receiver.tsx".into();
+    selected.source_digest = "b".repeat(64);
     let summary = json!({"workspaceProfiles":[profile]});
     assert!(support::actions(&selected, None, Some(&summary), "committed").source.is_none());
-    selected.kind = "registration".into(); selected.source_path = "registry.json".into();
+    selected.kind = "registration".into();
+    selected.source_path = "registry.json".into();
     selected.dependencies = vec!["packages/runtime/src/shared.tsx".into()];
     let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{"name":"First","sourcePath":"packages/runtime/src/shared.tsx"}});
     assert!(support::actions(&selected, Some(&specimen), Some(&summary), "committed").source.is_none());
-    selected.kind = "source-file".into(); selected.source_path = "packages/runtime/src/shared.tsx".into();
+    selected.kind = "source-file".into();
+    selected.source_path = "packages/runtime/src/shared.tsx".into();
     for key in ["componentId", "componentVersion", "profileRef", "targetProfileRef"] {
-        let mut missing = summary.clone(); missing["workspaceProfiles"][0].as_object_mut().unwrap().remove(key);
+        let mut missing = summary.clone();
+        missing["workspaceProfiles"][0].as_object_mut().unwrap().remove(key);
         assert!(support::actions(&selected, None, Some(&missing), "committed").source.is_none(), "{key}");
     }
 }
 
 #[test]
 fn unavailable_actual_adapter_keeps_the_selected_compositions_structure_canvas() {
-    let mut selected = entry("structure"); selected.kind = "authored-composition".into();
+    let mut selected = entry("structure");
+    selected.kind = "authored-composition".into();
     selected.source_path = "config/experience/another-page.input.json".into();
     let specimen = json!({"entry":selected,"digest":selected.source_digest,"data":{},
         "workspaceSelection":{"status":"unavailable","reason":"No renderer binding."}});
@@ -283,13 +317,23 @@ fn unavailable_actual_adapter_keeps_the_selected_compositions_structure_canvas()
 fn selected_capability_labels_separate_preview_canvas_local_drafts_and_qualification_from_accounting() {
     assert_eq!(support::LEVEL_OVERVIEW_TITLE, "Source accounting by level");
     assert!(support::LEVEL_EDITING_TOTALS.contains("Not aggregated"));
-    let mut selected = entry("accordion"); selected.kind = "public-declaration".into(); selected.label = "Accordion".into();
+    let mut selected = entry("accordion");
+    selected.kind = "public-declaration".into();
+    selected.label = "Accordion".into();
     selected.source_path = "packages/design-system/src/components/ui/accordion.tsx".into();
     let actions = support::actions(&selected, None, Some(&profile_summary()), "committed");
     let rows = actions.capability_rows();
-    assert_eq!(rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(), vec![
-        ("Actual preview", "Available"), ("Structure canvas", "Available"), ("Local copy", "Unavailable"),
-        ("Local draft", "Available"), ("Renderer qualification", "Not established here"), ("Owner writes", "Separate workflow")]);
+    assert_eq!(
+        rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(),
+        vec![
+            ("Actual preview", "Available"),
+            ("Structure canvas", "Available"),
+            ("Local copy", "Unavailable"),
+            ("Local draft", "Available"),
+            ("Renderer qualification", "Not established here"),
+            ("Owner writes", "Separate workflow")
+        ]
+    );
     assert!(!selected.editable && !selected.renderer_qualified && !selected.persistent_draft);
     let local = support::actions(&selected, None, Some(&profile_summary()), "local");
     assert!(local.inline_pin.is_none() && local.edit_reason.contains("Local-preview bytes are not adopted"));
@@ -297,7 +341,8 @@ fn selected_capability_labels_separate_preview_canvas_local_drafts_and_qualifica
     let summary = json!({"snapshot":snapshot});
     let theme_actions = support::actions(&theme, Some(&specimen), Some(&summary), "committed");
     let rows = theme_actions.capability_rows();
-    assert_eq!(rows[2].1, "Available"); assert_eq!(rows[3].1, "Unavailable");
+    assert_eq!(rows[2].1, "Available");
+    assert_eq!(rows[3].1, "Unavailable");
 }
 
 #[test]
@@ -330,11 +375,25 @@ fn theme_detail_prioritizes_its_workflows_instead_of_unrelated_component_binding
     let ctx = egui::Context::default();
     let mut output = None;
     for _ in 0..2 {
-        output = Some(ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.,1000.))), ..Default::default() }, |ui| browser.show(ui, &ctx)));
+        output =
+            Some(ctx.run_ui(
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600., 1000.))), ..Default::default() },
+                |ui| browser.show(ui, &ctx),
+            ));
     }
     let mut rendered = String::new();
-    for shape in output.unwrap().shapes { shape_text(&shape.shape, &mut rendered); }
-    for label in ["Token sheet", "Inspection canvas", "Local library", "Owner-bound draft", "Web-frame theme preview", "Create local theme library", "Preview token sheet"] {
+    for shape in output.unwrap().shapes {
+        shape_text(&shape.shape, &mut rendered);
+    }
+    for label in [
+        "Token sheet",
+        "Inspection canvas",
+        "Local library",
+        "Owner-bound draft",
+        "Web-frame theme preview",
+        "Create local theme library",
+        "Preview token sheet",
+    ] {
         assert!(rendered.contains(label), "Missing theme workflow {label}: {rendered}");
     }
     for unrelated in ["Open actual preview", "Open on canvas", "No exact captured workspace binding", "No editable workspace adapter"] {
@@ -370,7 +429,11 @@ fn mismatched_materialization_identity_cannot_replace_the_selected_resource() {
         browser.epoch = 4;
         browser.busy = true;
         let mut value = json!({"entry":entry("one"),"digest":"digest","data":{"$value":3}});
-        if mismatch == "entry" { value["entry"]["id"] = json!("other"); } else { value["digest"] = json!("other"); }
+        if mismatch == "entry" {
+            value["entry"]["id"] = json!("other");
+        } else {
+            value["digest"] = json!("other");
+        }
         responses.send(Reply::Materialize(4, "one".into(), Ok(value))).unwrap();
         browser.poll();
         assert_eq!(browser.selected.as_ref().unwrap().id, "one");
@@ -385,7 +448,7 @@ fn navigation_history_restores_selection_filters_mode_and_detail_without_reusing
     browser.select(entry("one"));
     browser.detail_tab = DetailTab::Inspector;
     browser.theme_mode = "dark".into();
-    browser.filters = Filters { collection:"themes".into(), ..Default::default() };
+    browser.filters = Filters { collection: "themes".into(), ..Default::default() };
     browser.filters_changed();
     assert!(browser.selected.is_none());
     browser.navigate_history(false);
@@ -407,8 +470,10 @@ fn navigation_history_restores_selection_filters_mode_and_detail_without_reusing
 fn typing_during_debounce_keeps_one_back_location_and_clears_stale_inline_status() {
     let (mut browser, _, _) = fixture();
     browser.inline_status = "Current · old selection".into();
-    browser.filters.search = "a".into(); browser.filters_changed();
-    browser.filters.search = "ab".into(); browser.filters_changed();
+    browser.filters.search = "a".into();
+    browser.filters_changed();
+    browser.filters.search = "ab".into();
+    browser.filters_changed();
     assert_eq!(browser.navigation_back.len(), 1);
     assert!(browser.inline_status.is_empty());
     browser.navigate_history(false);
@@ -417,21 +482,29 @@ fn typing_during_debounce_keeps_one_back_location_and_clears_stale_inline_status
 
 #[test]
 fn search_coalesces_keystrokes_and_dispatches_before_the_interaction_budget() {
-    let (mut browser,_responses,requests)=fixture();
-    browser.auto_refresh=false;
-    browser.filters.search="context".into(); browser.filters_changed();
-    browser.filters.search="context capsule".into(); browser.filters_changed();
-    browser.filter_changed=Some(Instant::now()-Duration::from_millis(125));
+    let (mut browser, _responses, requests) = fixture();
+    browser.auto_refresh = false;
+    browser.filters.search = "context".into();
+    browser.filters_changed();
+    browser.filters.search = "context capsule".into();
+    browser.filters_changed();
+    browser.filter_changed = Some(Instant::now() - Duration::from_millis(125));
     browser.tick();
     match requests.try_recv().expect("Search should dispatch within the 150 ms interaction budget") {
-        Job::Query(_,filters,offset,binding)=>{assert_eq!(filters.search,"context capsule");assert_eq!(offset,0);assert_eq!(binding.generation,"first");},
-        _=>panic!("Only the final query should run"),
+        Job::Query(_, filters, offset, binding) => {
+            assert_eq!(filters.search, "context capsule");
+            assert_eq!(offset, 0);
+            assert_eq!(binding.generation, "first");
+        }
+        _ => panic!("Only the final query should run"),
     }
     assert!(requests.try_recv().is_err());
 }
 
 fn catalog_frame(browser: &mut Browser, ctx: &egui::Context, size: egui::Vec2, events: Vec<egui::Event>) -> egui::FullOutput {
-    ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), events, ..Default::default() }, |ui| browser.show(ui, ctx))
+    ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), events, ..Default::default() }, |ui| {
+        browser.show(ui, ctx)
+    })
 }
 
 fn click_catalog(browser: &mut Browser, ctx: &egui::Context, size: egui::Vec2, id: &str) {
@@ -441,9 +514,15 @@ fn click_catalog(browser: &mut Browser, ctx: &egui::Context, size: egui::Vec2, i
     let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", id.to_string())))).unwrap_or_else(|| panic!("Missing {id}"));
     let pos = rect.center();
     for pressed in [true, false] {
-        catalog_frame(browser, ctx, size, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
-            pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
-        }]);
+        catalog_frame(
+            browser,
+            ctx,
+            size,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE },
+            ],
+        );
     }
 }
 
@@ -494,7 +573,9 @@ fn protected_canvas_opens_the_exact_canonical_composition_without_editing_or_ren
     let selected = browser.selected.clone().unwrap();
     let output = catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1000.), vec![]);
     let mut text = String::new();
-    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
     assert!(text.contains("Open protected canvas"));
     assert!(!text.contains("Open actual preview"));
     click_catalog(&mut browser, &ctx, egui::vec2(1600., 1000.), "catalog-edit-action");
@@ -509,8 +590,20 @@ fn protected_canvas_opens_the_exact_canonical_composition_without_editing_or_ren
 
 #[test]
 fn protected_canvas_preserves_local_native_identity_selection_and_temporary_barriers() {
-    for barrier in ["local-mode", "local-snapshot", "native", "revision", "no-observation", "unclassified",
-        "stale-entry", "stale-digest", "unloaded", "ambiguous", "mismatched-profile", "temporary"] {
+    for barrier in [
+        "local-mode",
+        "local-snapshot",
+        "native",
+        "revision",
+        "no-observation",
+        "unclassified",
+        "stale-entry",
+        "stale-digest",
+        "unloaded",
+        "ambiguous",
+        "mismatched-profile",
+        "temporary",
+    ] {
         let ctx = egui::Context::default();
         let mut browser = protected_canvas_browser();
         match barrier {
@@ -559,10 +652,16 @@ fn list_and_tile_results_stay_in_the_viewport_at_compact_and_wide_sizes() {
             let ctx = egui::Context::default();
             let (mut browser, _, _) = fixture();
             browser.visual_results = tiles;
-            for _ in 0..2 { catalog_frame(&mut browser, &ctx, size, vec![]); }
+            for _ in 0..2 {
+                catalog_frame(&mut browser, &ctx, size, vec![]);
+            }
             for name in ["catalog-search", "catalog-item-one", "catalog-back"] {
-                let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("Missing {name} at {size:?}"));
-                assert!(rect.min.x >= 0. && rect.min.y >= 0. && rect.max.x <= size.x + 1. && rect.max.y <= size.y + 1., "{name} escaped {size:?} with tiles={tiles}: {rect:?}");
+                let rect: egui::Rect =
+                    ctx.data(|data| data.get_temp(egui::Id::new(("test-rect", name.to_string())))).unwrap_or_else(|| panic!("Missing {name} at {size:?}"));
+                assert!(
+                    rect.min.x >= 0. && rect.min.y >= 0. && rect.max.x <= size.x + 1. && rect.max.y <= size.y + 1.,
+                    "{name} escaped {size:?} with tiles={tiles}: {rect:?}"
+                );
             }
         }
     }
@@ -577,7 +676,9 @@ fn unloaded_selection_shows_disabled_actions_and_resource_specific_reason() {
     browser.select(selected);
     let output = catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1000.), vec![]);
     let mut text = String::new();
-    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
     for expected in ["Open actual preview", "Open on canvas", "no standalone visual appearance", "No editable workspace adapter"] {
         assert!(text.contains(expected), "Missing {expected}: {text}");
     }
@@ -591,11 +692,14 @@ fn empty_theme_modes_and_compact_token_sheets_remain_browsable() {
     let mut mode = "light".into();
     let _ = ctx.run_ui(Default::default(), |ui| assert!(preview::theme_sheet(ui, &json!({"modes":{}}), &mut mode)));
     let (_, specimen, _) = editable_fixture();
-    let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360., 700.))), ..Default::default() }, |ui| {
-        assert!(preview::theme_sheet(ui, &specimen["presentation"], &mut mode));
-    });
+    let output =
+        ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360., 700.))), ..Default::default() }, |ui| {
+            assert!(preview::theme_sheet(ui, &specimen["presentation"], &mut mode));
+        });
     let mut text = String::new();
-    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
     assert!(text.contains("colors.primary") && text.contains("#123456"));
 }
 
@@ -607,7 +711,9 @@ fn failed_initial_capture_offers_recovery_instead_of_an_endless_loading_message(
     browser.error = Some("Reader executable is unavailable".into());
     let output = catalog_frame(&mut browser, &ctx, egui::vec2(900., 700.), vec![]);
     let mut text = String::new();
-    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
     assert!(text.contains("Repository capture is unavailable"));
     assert!(text.contains("Retry capture") && text.contains("Connection settings"));
 }
@@ -617,7 +723,7 @@ fn registered_product_hierarchy_exposes_only_the_captured_shell_route_and_page()
     let ctx = egui::Context::default();
     let (mut browser, _, _) = fixture();
     browser.products_open = true;
-    browser.filters = Filters { collection:"sources".into(), product:"alpha".into(), ..Default::default() };
+    browser.filters = Filters { collection: "sources".into(), product: "alpha".into(), ..Default::default() };
     browser.displayed_filters = browser.filters.clone();
     browser.location_filters = browser.filters.clone();
     browser.summary.as_mut().unwrap()["navigation"]["products"] = json!([{
@@ -635,14 +741,18 @@ fn registered_product_hierarchy_exposes_only_the_captured_shell_route_and_page()
     click_catalog(&mut browser, &ctx, size, "catalog-hierarchy-alpha/shells/0/routes/0/pages/0");
     let output = catalog_frame(&mut browser, &ctx, size, vec![]);
     let mut text = String::new();
-    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
     assert!(text.contains("Page ·"));
     assert!(text.contains("apps/alpha/src/overview.tsx"));
     assert!(browser.workspace_request.is_none(), "Hierarchy browsing must not substitute a renderer");
     browser.summary.as_mut().unwrap()["navigation"]["products"][0]["shells"] = json!([]);
     let output = catalog_frame(&mut browser, &ctx, size, vec![]);
     let mut text = String::new();
-    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
     assert!(text.contains("No shell hierarchy is registered"));
     assert!(!text.contains("Overview page"));
 }
@@ -652,7 +762,7 @@ fn nested_target_composition_opens_its_exact_registered_source_without_a_frame_s
     let ctx = egui::Context::default();
     let (mut browser, _, _) = fixture();
     browser.products_open = true;
-    browser.filters = Filters { collection:"sources".into(), product:"alpha".into(), ..Default::default() };
+    browser.filters = Filters { collection: "sources".into(), product: "alpha".into(), ..Default::default() };
     browser.displayed_filters = browser.filters.clone();
     browser.location_filters = browser.filters.clone();
     let source = "config/experience/registered-page.input.json";
@@ -670,7 +780,9 @@ fn nested_target_composition_opens_its_exact_registered_source_without_a_frame_s
         "catalog-hierarchy-alpha/targets/0/shells/0/routes/0",
         "catalog-hierarchy-alpha/targets/0/shells/0/routes/0/compositions/0",
         "catalog-hierarchy-open-alpha/targets/0/shells/0/routes/0/compositions/0",
-    ] { click_catalog(&mut browser, &ctx, size, id); }
+    ] {
+        click_catalog(&mut browser, &ctx, size, id);
+    }
     let request = browser.workspace_request.take().expect("Registered composition action should open its selected workspace");
     assert_eq!(request.source_path.as_deref(), Some(source));
     assert!(request.preview_only && !request.resume);
@@ -797,8 +909,12 @@ fn catalog_refresh_initial_read_without_a_generation_is_not_cancelled_by_interac
         browser.refresh();
         assert_eq!(browser.activity, "Reading repository");
         assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
-        if selection { browser.select(entry("one")); }
-        else { browser.filters.search = "initial search".into(); browser.filters_changed(); }
+        if selection {
+            browser.select(entry("one"));
+        } else {
+            browser.filters.search = "initial search".into();
+            browser.filters_changed();
+        }
         browser.tick();
         assert!(browser.busy);
         assert!(!browser.cancelled.load(Ordering::Acquire));
@@ -844,9 +960,9 @@ fn catalog_refresh_changed_configuration_or_mode_cannot_reuse_a_displayed_genera
         browser.tick();
         assert!(requests.try_recv().is_err());
         browser.refresh();
-        if change==3 {
+        if change == 3 {
             assert!(matches!(requests.try_recv(), Ok(Job::Restore(..))));
-            assert_eq!(browser.activity,"Restoring saved library");
+            assert_eq!(browser.activity, "Restoring saved library");
         } else {
             assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
             assert_eq!(browser.activity, "Reading repository");
@@ -859,34 +975,61 @@ fn catalog_refresh_changed_configuration_or_mode_cannot_reuse_a_displayed_genera
 
 #[test]
 fn initial_cache_recovery_is_separate_from_background_scan_and_queries_only_the_valid_generation() {
-    let (mut browser,tx,requests)=fixture();
-    let summary=browser.summary.take().unwrap();browser.catalog_binding=None;browser.entries.clear();browser.cache=Some("cache-fixture".into());
-    browser.refresh();let epoch=browser.epoch;
-    assert_eq!(browser.activity,"Restoring saved library");
-    assert!(matches!(requests.try_recv(),Ok(Job::Restore(..))));
-    browser.filters.search="requested during recovery".into();browser.filters_changed();browser.tick();
-    assert!(!browser.cancelled.load(Ordering::Acquire));assert!(requests.try_recv().is_err());
-    tx.send(Reply::Scan(epoch,Ok(summary))).unwrap();browser.poll();
+    let (mut browser, tx, requests) = fixture();
+    let summary = browser.summary.take().unwrap();
+    browser.catalog_binding = None;
+    browser.entries.clear();
+    browser.cache = Some("cache-fixture".into());
+    browser.refresh();
+    let epoch = browser.epoch;
+    assert_eq!(browser.activity, "Restoring saved library");
+    assert!(matches!(requests.try_recv(), Ok(Job::Restore(..))));
+    browser.filters.search = "requested during recovery".into();
+    browser.filters_changed();
+    browser.tick();
+    assert!(!browser.cancelled.load(Ordering::Acquire));
+    assert!(requests.try_recv().is_err());
+    tx.send(Reply::Scan(epoch, Ok(summary))).unwrap();
+    browser.poll();
     assert!(matches!(requests.try_recv(),Ok(Job::Query(_,filters,0,binding)) if filters.search=="requested during recovery" && binding.generation=="first"));
     assert!(browser.usable_generation().is_some());
 }
 
 #[test]
 fn cache_only_misses_fall_back_once_but_protocol_failures_or_obsolete_contexts_cannot_start_a_scan() {
-    for error in ["CACHE_RESTORE_UNAVAILABLE: missing cache","CACHE_RESTORE_UNAVAILABLE: reader capability unavailable","Malformed reader reply"] {
-        let (mut browser,tx,requests)=fixture();browser.summary=None;browser.catalog_binding=None;browser.cache=Some("cache-fixture".into());
-        browser.refresh();assert!(matches!(requests.try_recv(),Ok(Job::Restore(..))));
-        tx.send(Reply::Scan(browser.epoch,Err(error.into()))).unwrap();browser.poll();
+    for error in ["CACHE_RESTORE_UNAVAILABLE: missing cache", "CACHE_RESTORE_UNAVAILABLE: reader capability unavailable", "Malformed reader reply"] {
+        let (mut browser, tx, requests) = fixture();
+        browser.summary = None;
+        browser.catalog_binding = None;
+        browser.cache = Some("cache-fixture".into());
+        browser.refresh();
+        assert!(matches!(requests.try_recv(), Ok(Job::Restore(..))));
+        tx.send(Reply::Scan(browser.epoch, Err(error.into()))).unwrap();
+        browser.poll();
         if error.starts_with("CACHE_RESTORE_UNAVAILABLE") {
-            assert_eq!(browser.activity,"Reading repository");assert!(matches!(requests.try_recv(),Ok(Job::Scan(_,_,_,true))));
-        } else {assert!(requests.try_recv().is_err());assert!(browser.error.is_some());}
+            assert_eq!(browser.activity, "Reading repository");
+            assert!(matches!(requests.try_recv(), Ok(Job::Scan(_, _, _, true))));
+        } else {
+            assert!(requests.try_recv().is_err());
+            assert!(browser.error.is_some());
+        }
     }
-    for obsolete in [true,false] {
-        let (mut browser,tx,requests)=fixture();browser.summary=None;browser.catalog_binding=None;browser.cache=Some("cache-fixture".into());
-        browser.refresh();let epoch=browser.epoch;assert!(matches!(requests.try_recv(),Ok(Job::Restore(..))));
-        if obsolete {browser.mode="local".into();} else {browser.cancelled.store(true,Ordering::Release);}
-        tx.send(Reply::Scan(epoch,Err("CACHE_RESTORE_UNAVAILABLE: incompatible cache".into()))).unwrap();browser.poll();
-        assert!(requests.try_recv().is_err(),"A retired recovery cannot enqueue new source work");
+    for obsolete in [true, false] {
+        let (mut browser, tx, requests) = fixture();
+        browser.summary = None;
+        browser.catalog_binding = None;
+        browser.cache = Some("cache-fixture".into());
+        browser.refresh();
+        let epoch = browser.epoch;
+        assert!(matches!(requests.try_recv(), Ok(Job::Restore(..))));
+        if obsolete {
+            browser.mode = "local".into();
+        } else {
+            browser.cancelled.store(true, Ordering::Release);
+        }
+        tx.send(Reply::Scan(epoch, Err("CACHE_RESTORE_UNAVAILABLE: incompatible cache".into()))).unwrap();
+        browser.poll();
+        assert!(requests.try_recv().is_err(), "A retired recovery cannot enqueue new source work");
     }
 }
 
@@ -929,38 +1072,57 @@ fn catalog_refresh_failure_preserves_display_and_explicit_refresh_reconnects_wit
 
 #[test]
 fn failed_remote_refresh_recovered_from_cache_keeps_browsing_and_failure_backoff() {
-    let (mut browser,tx,requests)=fixture();browser.auto_refresh=false;
-    let mut recovered=browser.summary.clone().unwrap();
-    recovered["restoredCache"]=json!(true);recovered["stale"]=json!(true);
-    recovered["refreshError"]=json!("Remote unavailable");recovered["restoredAfterRefreshFailure"]=json!(true);
-    browser.refresh();let epoch=browser.epoch;assert!(matches!(requests.try_recv(),Ok(Job::Scan(..))));
-    browser.filters.level="L2".into();browser.filters_changed();
-    tx.send(Reply::Scan(epoch,Ok(recovered))).unwrap();browser.poll();
-    assert_eq!(browser.refresh_failures,1);assert_eq!(browser.summary.as_ref().unwrap()["generationId"],"first");
+    let (mut browser, tx, requests) = fixture();
+    browser.auto_refresh = false;
+    let mut recovered = browser.summary.clone().unwrap();
+    recovered["restoredCache"] = json!(true);
+    recovered["stale"] = json!(true);
+    recovered["refreshError"] = json!("Remote unavailable");
+    recovered["restoredAfterRefreshFailure"] = json!(true);
+    browser.refresh();
+    let epoch = browser.epoch;
+    assert!(matches!(requests.try_recv(), Ok(Job::Scan(..))));
+    browser.filters.level = "L2".into();
+    browser.filters_changed();
+    tx.send(Reply::Scan(epoch, Ok(recovered))).unwrap();
+    browser.poll();
+    assert_eq!(browser.refresh_failures, 1);
+    assert_eq!(browser.summary.as_ref().unwrap()["generationId"], "first");
     assert!(matches!(requests.try_recv(),Ok(Job::Query(_,filters,0,binding)) if filters.level=="L2"&&binding.generation=="first"));
-    tx.send(Reply::Query(browser.epoch,browser.filters.clone(),0,Ok(Page{entries:vec![entry("L2-match")],total:1,next_offset:None}))).unwrap();
-    browser.poll();assert_eq!(browser.entries[0].id,"L2-match");assert_eq!(browser.displayed_filters,browser.filters);
-    assert_eq!(browser.next_repaint_after(Instant::now()),None);
+    tx.send(Reply::Query(browser.epoch, browser.filters.clone(), 0, Ok(Page { entries: vec![entry("L2-match")], total: 1, next_offset: None }))).unwrap();
+    browser.poll();
+    assert_eq!(browser.entries[0].id, "L2-match");
+    assert_eq!(browser.displayed_filters, browser.filters);
+    assert_eq!(browser.next_repaint_after(Instant::now()), None);
 }
 
 #[test]
 fn an_unrecoverable_reader_shows_reconnect_instead_of_permanent_loading_or_mismatched_rows() {
-    let (mut browser,_,_)=fixture();browser.auto_refresh=false;browser.catalog_binding=None;
-    browser.filters.level="L2".into();browser.error=Some("Remote unavailable; saved cache is missing".into());
-    let ctx=egui::Context::default();let size=egui::vec2(1440.,900.);
-    catalog_frame(&mut browser,&ctx,size,vec![]);let output=catalog_frame(&mut browser,&ctx,size,vec![]);
-    let mut text=String::new();for shape in &output.shapes {shape_text(&shape.shape,&mut text);}
-    assert!(text.contains("Results unavailable")&&text.contains("Reconnect saved library"));
-    assert!(!text.contains("Updating results")&&!text.contains("token:/colors/surface/page"));
-    assert_eq!(browser.next_repaint_after(Instant::now()),None);
+    let (mut browser, _, _) = fixture();
+    browser.auto_refresh = false;
+    browser.catalog_binding = None;
+    browser.filters.level = "L2".into();
+    browser.error = Some("Remote unavailable; saved cache is missing".into());
+    let ctx = egui::Context::default();
+    let size = egui::vec2(1440., 900.);
+    catalog_frame(&mut browser, &ctx, size, vec![]);
+    let output = catalog_frame(&mut browser, &ctx, size, vec![]);
+    let mut text = String::new();
+    for shape in &output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
+    assert!(text.contains("Results unavailable") && text.contains("Reconnect saved library"));
+    assert!(!text.contains("Updating results") && !text.contains("token:/colors/surface/page"));
+    assert_eq!(browser.next_repaint_after(Instant::now()), None);
 }
 
 #[test]
 fn remote_failure_recovery_only_restores_the_exact_generation_without_capturing_sources() {
-    for outcome in ["healthy","generation-changed","mode-changed","old-reader"] {
-        let root=std::env::temp_dir().join(format!("desigma-cache-reconnect-{}",uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();let fixture=CatalogReaderFixture(root.clone());
-        let reader=root.join("reader.mjs");
+    for outcome in ["healthy", "generation-changed", "mode-changed", "old-reader"] {
+        let root = std::env::temp_dir().join(format!("desigma-cache-reconnect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let fixture = CatalogReaderFixture(root.clone());
+        let reader = root.join("reader.mjs");
         let script=r#"import readline from 'node:readline';const outcome=__OUTCOME__;let generation=null;
           const send=(r,body)=>process.stdout.write(JSON.stringify({protocolVersion:r.protocolVersion,requestId:r.requestId,sessionId:r.sessionId,generationId:generation,kind:'result',result:body})+'\n');
           readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);
@@ -968,22 +1130,36 @@ fn remote_failure_recovery_only_restores_the_exact_generation_without_capturing_
             if(r.op==='Scan'){if(r.cacheOnly!==true)process.exit(51);generation=outcome==='generation-changed'?'different':'first';return send(r,{generationId:generation,restoredCache:true,snapshot:{mode:outcome==='mode-changed'?'local':'committed'}});}
             if(r.op==='Query')return send(r,{entries:[],total:0,nextOffset:null});
             process.exit(52);});"#.replace("__OUTCOME__",&serde_json::to_string(outcome).unwrap());
-        std::fs::write(&reader,script).unwrap();let marker=root.join("active.json");std::fs::write(&marker,b"immutable fixture pointer").unwrap();
-        let binding=CatalogBinding {config:ReaderConfig{node:"node".into(),reader,repository:root.clone(),cache:Some(root.clone()),canonical_ref:None},
-            mode:"committed".into(),generation:"first".into()};
-        let result=recover_previous_catalog(&binding,Arc::new(AtomicBool::new(false)),"Remote unavailable");
-        if outcome=="healthy" {
-            let (mut client,summary)=result.unwrap();assert_eq!(summary["stale"],true);assert_eq!(summary["refreshError"],"Remote unavailable");
-            assert_eq!(summary["restoredAfterRefreshFailure"],true);assert_eq!(client.generation.as_deref(),Some("first"));
-            assert_eq!(client.query(&Filters::default(),0).unwrap().total,0);drop(client);
-        } else {assert!(result.is_err(),"{outcome}");}
-        assert_eq!(std::fs::read(&marker).unwrap(),b"immutable fixture pointer");drop(fixture);
+        std::fs::write(&reader, script).unwrap();
+        let marker = root.join("active.json");
+        std::fs::write(&marker, b"immutable fixture pointer").unwrap();
+        let binding = CatalogBinding {
+            config: ReaderConfig { node: "node".into(), reader, repository: root.clone(), cache: Some(root.clone()), canonical_ref: None },
+            mode: "committed".into(),
+            generation: "first".into(),
+        };
+        let result = recover_previous_catalog(&binding, Arc::new(AtomicBool::new(false)), "Remote unavailable");
+        if outcome == "healthy" {
+            let (mut client, summary) = result.unwrap();
+            assert_eq!(summary["stale"], true);
+            assert_eq!(summary["refreshError"], "Remote unavailable");
+            assert_eq!(summary["restoredAfterRefreshFailure"], true);
+            assert_eq!(client.generation.as_deref(), Some("first"));
+            assert_eq!(client.query(&Filters::default(), 0).unwrap().total, 0);
+            drop(client);
+        } else {
+            assert!(result.is_err(), "{outcome}");
+        }
+        assert_eq!(std::fs::read(&marker).unwrap(), b"immutable fixture pointer");
+        drop(fixture);
     }
 }
 
 struct CatalogReaderFixture(PathBuf);
 impl Drop for CatalogReaderFixture {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 // A real Client against a small IPC peer exercises request/session/generation
@@ -1029,8 +1205,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (r.op === 'Materialize') send(r, 'result', {result:{entry, digest:'digest', data:{selected:r.entryId}, readerProcess:process.pid, scans}});
 });
 "#;
-    let script = script.replace("__FENCE_MODE__", &serde_json::to_string(fence_mode).unwrap())
-        .replace("__ENTRY__", &serde_json::to_string(&entry("one")).unwrap());
+    let script =
+        script.replace("__FENCE_MODE__", &serde_json::to_string(fence_mode).unwrap()).replace("__ENTRY__", &serde_json::to_string(&entry("one")).unwrap());
     let reader = directory.join("reader.mjs");
     std::fs::write(&reader, script).unwrap();
     let config = ReaderConfig { node: "node".into(), reader, repository: directory, cache: None, canonical_ref: None };
@@ -1053,14 +1229,12 @@ fn catalog_refresh_retained_client_serves_query_and_materialize_from_the_previou
         let mut fence = true;
         // The cancellation request has returned; this is the UI's settle boundary.
         cancelled.store(false, Ordering::Release);
-        let first_specimen = materialize_first.then(||
-            read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize("one")).unwrap());
+        let first_specimen = materialize_first.then(|| read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize("one")).unwrap());
         let filters = Filters { search: "new search".into(), ..Default::default() };
         let page = read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.query(&filters, 0)).unwrap();
         assert_eq!(page.entries[0].id, "one");
         assert!(!fence);
-        let specimen = first_specimen.unwrap_or_else(||
-            read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize("one")).unwrap());
+        let specimen = first_specimen.unwrap_or_else(|| read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize("one")).unwrap());
         assert_eq!(specimen["data"]["selected"], "one");
         assert_eq!(specimen["readerProcess"], summary["readerProcess"], "A healthy cancellation must keep the same Client process");
         assert_eq!(specimen["scans"], 2, "Reads must not launch a replacement scan");
@@ -1089,7 +1263,8 @@ fn catalog_refresh_worker_read_rejects_mismatched_config_mode_and_generation() {
         assert!(read_catalog(&mut client, &mut session, &mut fence, &requested, |_| {
             read_called = true;
             Ok(())
-        }).is_err());
+        })
+        .is_err());
         assert!(!read_called && client.is_none() && session.is_none() && !fence);
     }
 }
@@ -1106,7 +1281,8 @@ fn catalog_refresh_failed_cancel_fence_discards_session_and_preserves_display_fo
         let error = read_catalog(&mut client, &mut session, &mut fence, &binding, |_| {
             read_called = true;
             Ok(())
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert!(!read_called && client.is_none() && session.is_none() && !fence);
         assert!(error.contains("Use Refresh to reconnect from cache"));
 
@@ -1225,7 +1401,7 @@ fn pending_library_work_keeps_fast_repaints_even_with_live_updates_paused() {
     browser.busy = false;
     browser.filter_changed = Some(now);
     assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(75)));
-    assert_eq!(browser.next_repaint_after(now+Duration::from_millis(50)), Some(Duration::from_millis(25)));
+    assert_eq!(browser.next_repaint_after(now + Duration::from_millis(50)), Some(Duration::from_millis(25)));
     browser.filter_changed = None;
     browser.pending_selection = true;
     assert_eq!(browser.next_repaint_after(now), Some(Duration::from_millis(100)));
@@ -1257,10 +1433,14 @@ fn idle_guard_does_not_delay_sixty_second_refresh_backoff_or_interaction_deadlin
 fn reader_source_events_queue_then_wake_the_desktop_without_waiting_for_idle_repaint() {
     let (mut browser, responses, requests) = fixture();
     let ctx = egui::Context::default();
-    for _ in 0..4 { let _ = ctx.run_ui(Default::default(), |_| {}); }
+    for _ in 0..4 {
+        let _ = ctx.run_ui(Default::default(), |_| {});
+    }
     let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = wakes.clone();
-    ctx.set_request_repaint_callback(move |_| { observed.fetch_add(1, Ordering::SeqCst); });
+    ctx.set_request_repaint_callback(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    });
     *browser.repaint.lock().unwrap() = Some(ctx);
     browser.mode = "local".into();
     browser.selected = Some(entry("one"));

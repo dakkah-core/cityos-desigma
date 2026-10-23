@@ -3,7 +3,9 @@ use crate::app::App;
 use desigma_cityos::catalog::SpecimenRenderer;
 use desigma_doc::Document;
 
-pub(super) struct SpecimenCanvas { app: App }
+pub(super) struct SpecimenCanvas {
+    app: App,
+}
 
 impl SpecimenCanvas {
     pub(super) fn new(document: Document) -> Self {
@@ -76,9 +78,14 @@ mod tests {
         let ctx = egui::Context::default();
         for key in [egui::Key::S, egui::Key::Z, egui::Key::D, egui::Key::Delete] {
             let modifiers = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
-            let _ = ctx.run_ui(egui::RawInput { modifiers, events: vec![egui::Event::Key {
-                key, physical_key: None, pressed: true, repeat: false, modifiers,
-            }], ..Default::default() }, |ui| surface.show(ui));
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    modifiers,
+                    events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }],
+                    ..Default::default()
+                },
+                |ui| surface.show(ui),
+            );
         }
         assert_eq!(surface.app.doc.to_json().unwrap(), original);
         assert!(surface.app.doc.cityos.is_none());

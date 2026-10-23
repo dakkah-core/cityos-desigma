@@ -238,7 +238,10 @@ pub(super) fn theme_sheet(ui: &mut Ui, presentation: &Value, mode: &mut String) 
     let Some(modes) = presentation["modes"].as_object() else {
         return false;
     };
-    if modes.is_empty() { ui.label("No theme modes were captured for this source."); return true; }
+    if modes.is_empty() {
+        ui.label("No theme modes were captured for this source.");
+        return true;
+    }
     if !modes.contains_key(mode.as_str()) {
         *mode = modes.keys().next().cloned().unwrap_or_default();
     }
@@ -251,10 +254,14 @@ pub(super) fn theme_sheet(ui: &mut Ui, presentation: &Value, mode: &mut String) 
                 Frame::new().inner_margin(egui::Margin::symmetric(0, 8)).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(36., 24.), egui::Sense::hover());
-                        if let Some(value) = color(&row["resolvedValue"]) { ui.painter().rect_filled(rect, 4, value); }
+                        if let Some(value) = color(&row["resolvedValue"]) {
+                            ui.painter().rect_filled(rect, 4, value);
+                        }
                         ui.label(row["name"].as_str().unwrap_or(""));
                     });
-                    ui.label(RichText::new(if row["resolvedValue"].is_null() { "Unresolved alias".into() } else { compact(&row["resolvedValue"]) }).monospace());
+                    ui.label(
+                        RichText::new(if row["resolvedValue"].is_null() { "Unresolved alias".into() } else { compact(&row["resolvedValue"]) }).monospace(),
+                    );
                 });
             }
             return true;

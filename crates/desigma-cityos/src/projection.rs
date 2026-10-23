@@ -5,8 +5,10 @@ use desigma_doc::{CityosOccurrence, Color, Document, Node, Paint, Rect, TextStyl
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub fn projection_document(projection: &Value, name: &str) -> Result<(Document,BTreeMap<String,CityosOccurrence>),String> {
-    if projection.get("scene").is_some() { return native_projection::document(projection, name); }
+pub fn projection_document(projection: &Value, name: &str) -> Result<(Document, BTreeMap<String, CityosOccurrence>), String> {
+    if projection.get("scene").is_some() {
+        return native_projection::document(projection, name);
+    }
     let string = |v: &Value, key: &str| v[key].as_str().map(str::to_owned).ok_or_else(|| format!("Missing {key}"));
     let mut doc = Document::new(name);
     let page = doc.add_page("Bound canvas");
@@ -15,7 +17,9 @@ pub fn projection_document(projection: &Value, name: &str) -> Result<(Document,B
     for row in projection["nodes"].as_array().ok_or("Missing canvas projection")? {
         let id = doc.alloc_id();
         let key = string(row, "id")?;
-        if key.is_empty() || ids.contains_key(&key) { return Err("Duplicate or empty native occurrence identity".into()); }
+        if key.is_empty() || ids.contains_key(&key) {
+            return Err("Duplicate or empty native occurrence identity".into());
+        }
         ids.insert(key.clone(), id);
         let number =
             |name: &str| row[name].as_f64().filter(|n| n.is_finite() && n.abs() < 10000.).map(|n| n as f32).ok_or_else(|| format!("Invalid projection {name}"));
@@ -24,7 +28,9 @@ pub fn projection_document(projection: &Value, name: &str) -> Result<(Document,B
             Some(Value::String(parent)) => *ids.get(parent).filter(|parent| **parent != id).ok_or("Native projection parent must precede its child")?,
             _ => return Err("Invalid native projection parent".into()),
         };
-        if number("width")?<=0. || number("height")?<=0. { return Err("Invalid native projection extent".into()); }
+        if number("width")? <= 0. || number("height")? <= 0. {
+            return Err("Invalid native projection extent".into());
+        }
         let mut node = Node::frame(id, Rect::new(number("x")?, number("y")?, number("width")?, number("height")?));
         // Adapter coordinates are page-space. Native nodes retain the named-slot parent relation.
         if parent != page {
@@ -64,5 +70,5 @@ pub fn projection_document(projection: &Value, name: &str) -> Result<(Document,B
             },
         );
     }
-    Ok((doc,occurrences))
+    Ok((doc, occurrences))
 }

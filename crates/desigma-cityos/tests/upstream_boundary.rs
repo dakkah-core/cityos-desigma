@@ -16,7 +16,9 @@ fn selected_upstream_and_all_native_core_changes_are_declared() {
     run(&["merge-base", "--is-ancestor", upstream, "HEAD"]);
     let mut declared = HashSet::new();
     for change in manifest["changes"].as_array().unwrap() {
-        for field in ["id", "purpose", "invariant"] { assert!(!change[field].as_str().unwrap().is_empty()); }
+        for field in ["id", "purpose", "invariant"] {
+            assert!(!change[field].as_str().unwrap().is_empty());
+        }
         assert!(!change["tests"].as_array().unwrap().is_empty());
         for test in change["tests"].as_array().unwrap() {
             assert!(root.join(test.as_str().unwrap()).is_file(), "declared regression source is missing");
@@ -28,6 +30,9 @@ fn selected_upstream_and_all_native_core_changes_are_declared() {
     let owned: Vec<_> = manifest["ownedDirectories"].as_array().unwrap().iter().map(|value| value.as_str().unwrap()).collect();
     let diff = run(&["diff", "--name-only", "-z", &format!("{upstream}...HEAD")]);
     for path in std::str::from_utf8(&diff).unwrap().split('\0').filter(|path| !path.is_empty()) {
-        assert!(declared.contains(path) || owned.iter().any(|owner| path == *owner || path.starts_with(&format!("{owner}/"))), "undeclared upstream change: {path}");
+        assert!(
+            declared.contains(path) || owned.iter().any(|owner| path == *owner || path.starts_with(&format!("{owner}/"))),
+            "undeclared upstream change: {path}"
+        );
     }
 }

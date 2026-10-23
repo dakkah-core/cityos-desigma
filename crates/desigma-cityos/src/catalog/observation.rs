@@ -54,18 +54,20 @@ impl CoverageObservation {
             library_records: collection("design"),
             theme_records: collection("themes"),
             token_records: collection("tokens"),
-            levels: (0..10).map(|index| {
-                let id = format!("L{index}");
-                let members: Vec<_> = rows.into_iter().flatten().filter(|row| row["id"] == id).collect();
-                let row = (members.len() == 1).then(|| members[0]);
-                CoverageLevel {
-                    id,
-                    name: row.and_then(|row| row["name"].as_str()).unwrap_or("Not reported").chars().take(160).collect(),
-                    records: row.and_then(|row| row["count"].as_u64()),
-                    data_specimens: row.and_then(|row| row["temporaryViewCount"].as_u64()),
-                    conflicting: members.len() > 1,
-                }
-            }).collect(),
+            levels: (0..10)
+                .map(|index| {
+                    let id = format!("L{index}");
+                    let members: Vec<_> = rows.into_iter().flatten().filter(|row| row["id"] == id).collect();
+                    let row = (members.len() == 1).then(|| members[0]);
+                    CoverageLevel {
+                        id,
+                        name: row.and_then(|row| row["name"].as_str()).unwrap_or("Not reported").chars().take(160).collect(),
+                        records: row.and_then(|row| row["count"].as_u64()),
+                        data_specimens: row.and_then(|row| row["temporaryViewCount"].as_u64()),
+                        conflicting: members.len() > 1,
+                    }
+                })
+                .collect(),
         })
     }
 }
@@ -116,13 +118,20 @@ mod tests {
     fn source_identity_and_mode_are_required_and_failed_refresh_remains_visible() {
         for path in ["generationId", "snapshot.repositoryId", "snapshot.canonicalCommit", "snapshot.readerImplementation", "snapshot.mode"] {
             let mut value = summary();
-            if let Some((parent, key)) = path.split_once('.') { value[parent][key] = json!("invalid"); }
-            else { value[path] = json!("invalid"); }
+            if let Some((parent, key)) = path.split_once('.') {
+                value[parent][key] = json!("invalid");
+            } else {
+                value[path] = json!("invalid");
+            }
             assert!(CoverageObservation::from_summary(&value, false).is_none(), "{path}");
         }
-        let mut value = summary(); value["snapshot"]["mode"] = json!("local"); value["accountingComplete"] = json!(false);
+        let mut value = summary();
+        value["snapshot"]["mode"] = json!("local");
+        value["accountingComplete"] = json!(false);
         let report = CoverageObservation::from_summary(&value, true).unwrap();
-        assert_eq!(report.mode, "local"); assert_eq!(report.accounting_complete, Some(false)); assert!(report.stale);
+        assert_eq!(report.mode, "local");
+        assert_eq!(report.accounting_complete, Some(false));
+        assert!(report.stale);
         value["stale"] = json!(true);
         assert!(CoverageObservation::from_summary(&value, false).unwrap().stale);
     }
@@ -133,7 +142,7 @@ mod tests {
         let (mut browser, _, jobs) = test_support::captured_browser(test_support::services());
         let value = summary();
         browser.summary = Some(value.clone());
-        browser.catalog_binding = Some(CatalogBinding {config: browser.reader_config(), mode: "committed".into(), generation: "a".repeat(64)});
+        browser.catalog_binding = Some(CatalogBinding { config: browser.reader_config(), mode: "committed".into(), generation: "a".repeat(64) });
         let first = browser.coverage_observation().unwrap();
         assert_eq!(first.theme_records, Some(3));
         assert!(jobs.try_recv().is_err(), "Coverage must not dispatch a scan or query");
@@ -144,7 +153,8 @@ mod tests {
         browser.summary = Some(value);
         browser.mode = "local".into();
         assert!(browser.coverage_observation().is_none());
-        browser.mode = "committed".into(); browser.repository.push_str("-other");
+        browser.mode = "committed".into();
+        browser.repository.push_str("-other");
         assert!(browser.coverage_observation().is_none(), "A context change cannot retain another repository's observation");
         assert!(jobs.try_recv().is_err());
     }

@@ -10,10 +10,10 @@
 
 use crate::{new_id, Library, LibraryError, Result};
 use desigma_doc::{Document, DocumentCheckpoint, DocumentKind, Vec2};
-use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -105,7 +105,7 @@ pub fn now_ms() -> u64 {
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 static RECOVERY_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PendingSave {
     #[serde(default)]
@@ -135,8 +135,7 @@ pub(crate) struct StorageGuard {
 pub(crate) fn write_lock(library: &Library) -> Result<StorageGuard> {
     let process = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Do not create the parent: a late thumbnail must not resurrect a removed root.
-    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
-        .open(library.path(".storage.lock"))?;
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(library.path(".storage.lock"))?;
     match file.try_lock() {
         Ok(()) => Ok(StorageGuard { _file: file, _process: process }),
         Err(std::fs::TryLockError::WouldBlock) => Err(LibraryError::StorageBusy),
@@ -155,17 +154,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn write_atomic_existing_parent(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".tmp-{}",new_id()));
+    tmp.push(format!(".tmp-{}", new_id()));
     let tmp = PathBuf::from(tmp);
     let res = (|| {
-        let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         replace_atomic(&tmp, path)?;
         #[cfg(not(windows))]
-        if let Some(parent)=path.parent(){std::fs::File::open(parent)?.sync_all()?;}
-        Ok::<(),std::io::Error>(())
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok::<(), std::io::Error>(())
     })();
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -214,7 +215,11 @@ fn replace_atomic(source: &Path, target: &Path) -> std::io::Result<()> {
     // SAFETY: Both buffers are valid, NUL-terminated UTF-16 for this synchronous
     // call, remain alive, and are not retained by MoveFileExW.
     let moved = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 0x1 | 0x8) };
-    if moved == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Persist deletion ordering as well as rename ordering on platforms that expose
@@ -224,7 +229,9 @@ pub(crate) fn remove_durable(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => {
             #[cfg(not(windows))]
-            if let Some(parent) = path.parent() { std::fs::File::open(parent)?.sync_all()?; }
+            if let Some(parent) = path.parent() {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -258,19 +265,32 @@ fn save_fault(_phase: &str) -> Result<()> {
     #[cfg(test)]
     if let Some(hook) = SAVE_HOOK.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) { slot.take() } else { None }
-    }) { hook.1(); }
+        if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) {
+            slot.take()
+        } else {
+            None
+        }
+    }) {
+        hook.1();
+    }
     #[cfg(test)]
-    if SAVE_EXIT.with(|fault| fault.get() == Some(_phase)) { std::process::exit(92); }
+    if SAVE_EXIT.with(|fault| fault.get() == Some(_phase)) {
+        std::process::exit(92);
+    }
     #[cfg(test)]
     if SAVE_FAULT.with(|fault| {
         if fault.get() == Some(_phase) {
             SAVE_FAULT_REPEATS.with(|remaining| {
-                if remaining.get() == 0 { fault.set(None); }
-                else { remaining.set(remaining.get() - 1); }
+                if remaining.get() == 0 {
+                    fault.set(None);
+                } else {
+                    remaining.set(remaining.get() - 1);
+                }
             });
             true
-        } else { false }
+        } else {
+            false
+        }
     }) {
         return Err(std::io::Error::other(format!("Interrupted save at {_phase}")).into());
     }
@@ -346,7 +366,7 @@ impl Library {
 
     /// Caller holds the root/process storage guard, including during recovery.
     fn load_manifest_locked(&self, id: &str) -> Result<Manifest> {
-        let _recovery=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let _recovery = RECOVERY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         self.recover_project_save(id)?;
         let p = self.project_dir(id).join(MANIFEST);
         let text = std::fs::read_to_string(&p).map_err(|e| {
@@ -364,11 +384,15 @@ impl Library {
         write_atomic(&p, serde_json::to_string_pretty(m)?.as_bytes())
     }
 
-    fn recover_project_save(&self,project:&str)->Result<()> {
+    fn recover_project_save(&self, project: &str) -> Result<()> {
         crate::validate_id(project)?;
-        let journal=self.project_dir(project).join(".save.pending.json");
-        let text=match std::fs::read_to_string(&journal){Ok(t)=>t,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(e)=>return Err(e.into())};
-        let pending:PendingSave=serde_json::from_str(&text)?;
+        let journal = self.project_dir(project).join(".save.pending.json");
+        let text = match std::fs::read_to_string(&journal) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let pending: PendingSave = serde_json::from_str(&text)?;
         if pending.schema_version.as_deref().is_some_and(|version| !["desigma.file-save.v2", "desigma.file-save.v3"].contains(&version)) {
             return Err(LibraryError::Invalid("Unsupported pending save version".into()));
         }
@@ -390,12 +414,22 @@ impl Library {
                 return Err(LibraryError::Invalid("Pending checkpoint/document mismatch".into()));
             }
         }
-        let roots: BTreeSet<_> = checkpoint.as_ref().map(DocumentCheckpoint::dependency_pins)
-            .unwrap_or_else(|| DocumentCheckpoint::new(document.clone(), desigma_doc::History::default()).dependency_pins()).into_iter().collect();
-        let required: BTreeSet<_> = pending.required_pins.as_ref().map(|pins| pins.iter().cloned().collect())
-            .unwrap_or_else(|| if checkpoint.is_some() { roots.clone() } else { pending.payloads.keys().cloned().collect() });
+        let roots: BTreeSet<_> = checkpoint
+            .as_ref()
+            .map(DocumentCheckpoint::dependency_pins)
+            .unwrap_or_else(|| DocumentCheckpoint::new(document.clone(), desigma_doc::History::default()).dependency_pins())
+            .into_iter()
+            .collect();
+        let required: BTreeSet<_> = pending.required_pins.as_ref().map(|pins| pins.iter().cloned().collect()).unwrap_or_else(|| {
+            if checkpoint.is_some() {
+                roots.clone()
+            } else {
+                pending.payloads.keys().cloned().collect()
+            }
+        });
         if (pending.schema_version.as_deref() == Some("desigma.file-save.v3") && pending.required_pins.is_none())
-            || !required.is_subset(&roots) || (checkpoint.is_some() && required != roots)
+            || !required.is_subset(&roots)
+            || (checkpoint.is_some() && required != roots)
         {
             return Err(LibraryError::Invalid("Pending dependency reference closure mismatch".into()));
         }
@@ -407,11 +441,15 @@ impl Library {
             }
         }
         for hash in &required {
-            if !pending.payloads.contains_key(hash) { self.verify_cityos_payload(hash)?; }
+            if !pending.payloads.contains_key(hash) {
+                self.verify_cityos_payload(hash)?;
+            }
         }
-        for (hash, bytes) in &pending.payloads { self.put_cityos_payload(hash, bytes)?; }
+        for (hash, bytes) in &pending.payloads {
+            self.put_cityos_payload(hash, bytes)?;
+        }
         save_fault("payloads")?;
-        write_atomic(&self.file_path(project,&pending.file_id),pending.document.as_bytes())?;
+        write_atomic(&self.file_path(project, &pending.file_id), pending.document.as_bytes())?;
         save_fault("document")?;
         let checkpoint_path = self.checkpoint_path(&pending.file_id)?;
         if let Some(checkpoint) = &pending.checkpoint {
@@ -427,15 +465,22 @@ impl Library {
         Ok(())
     }
 
-    fn commit_document(&self,file_id:&str,doc:&Document,manifest:Manifest)->Result<()> {
+    fn commit_document(&self, file_id: &str, doc: &Document, manifest: Manifest) -> Result<()> {
         // Legacy native saves preserve unresolved pins (including remote-only
         // drafts). Complete checkpoints/export deliberately require their bytes.
         self.commit_document_state(file_id, doc, None, BTreeMap::new(), manifest)
     }
 
-    fn commit_document_state(&self, file_id: &str, doc: &Document, checkpoint: Option<String>, payloads: BTreeMap<String, Vec<u8>>, manifest: Manifest) -> Result<()> {
-        let _recovery=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-        let project=manifest.project.id.clone();
+    fn commit_document_state(
+        &self,
+        file_id: &str,
+        doc: &Document,
+        checkpoint: Option<String>,
+        payloads: BTreeMap<String, Vec<u8>>,
+        manifest: Manifest,
+    ) -> Result<()> {
+        let _recovery = RECOVERY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let project = manifest.project.id.clone();
         crate::validate_id(&project)?;
         crate::validate_id(file_id)?;
         // Never replace an earlier durable intent with a later save after an I/O
@@ -446,8 +491,12 @@ impl Library {
         let document = doc.to_json()?;
         Document::from_json(&document)?;
         let state = checkpoint.as_deref().map(DocumentCheckpoint::from_json).transpose()?;
-        let roots: BTreeSet<_> = state.as_ref().map(DocumentCheckpoint::dependency_pins)
-            .unwrap_or_else(|| DocumentCheckpoint::new(doc.clone(), desigma_doc::History::default()).dependency_pins()).into_iter().collect();
+        let roots: BTreeSet<_> = state
+            .as_ref()
+            .map(DocumentCheckpoint::dependency_pins)
+            .unwrap_or_else(|| DocumentCheckpoint::new(doc.clone(), desigma_doc::History::default()).dependency_pins())
+            .into_iter()
+            .collect();
         if payloads.iter().any(|(hash, bytes)| !roots.contains(hash) || crate::payload_digest(bytes) != *hash) {
             return Err(LibraryError::Invalid("Checkpoint dependency closure mismatch".into()));
         }
@@ -456,7 +505,9 @@ impl Library {
         let mut required_pins = Vec::new();
         for hash in roots {
             match self.verify_cityos_payload(&hash) {
-                Ok(()) => { required_pins.push(hash); }
+                Ok(()) => {
+                    required_pins.push(hash);
+                }
                 Err(LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                     if let Some(bytes) = supplied.remove(&hash) {
                         payloads.insert(hash.clone(), bytes);
@@ -480,9 +531,17 @@ impl Library {
             }
         }
         drop(supplied);
-        let pending=PendingSave{schema_version:Some("desigma.file-save.v3".into()),file_id:file_id.into(),document,manifest,checkpoint,payloads,required_pins:Some(required_pins)};
+        let pending = PendingSave {
+            schema_version: Some("desigma.file-save.v3".into()),
+            file_id: file_id.into(),
+            document,
+            manifest,
+            checkpoint,
+            payloads,
+            required_pins: Some(required_pins),
+        };
         save_fault("before-journal")?;
-        write_atomic(&self.project_dir(&project).join(".save.pending.json"),serde_json::to_string(&pending)?.as_bytes())?;
+        write_atomic(&self.project_dir(&project).join(".save.pending.json"), serde_json::to_string(&pending)?.as_bytes())?;
         save_fault("journal")?;
         self.recover_project_save(&project)
     }
@@ -518,10 +577,19 @@ impl Library {
         self.commit_document_state(id, &checkpoint.document, Some(checkpoint_json), payloads, manifest)
     }
 
-    pub(crate) fn recover_pending_saves_locked(&self)->Result<()> {
-        let projects=self.path("projects");
-        if !projects.exists(){return Ok(());}
-        for entry in std::fs::read_dir(projects)?{let entry=entry?;if entry.file_type()?.is_dir(){let id=entry.file_name().to_string_lossy().into_owned();let _guard=RECOVERY_LOCK.lock().unwrap_or_else(|e|e.into_inner());self.recover_project_save(&id)?;}}
+    pub(crate) fn recover_pending_saves_locked(&self) -> Result<()> {
+        let projects = self.path("projects");
+        if !projects.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(projects)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let id = entry.file_name().to_string_lossy().into_owned();
+                let _guard = RECOVERY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                self.recover_project_save(&id)?;
+            }
+        }
         Ok(())
     }
 
@@ -708,7 +776,9 @@ impl Library {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        if !selected.is_file() { return Err(LibraryError::Invalid("A regular document file is required".into())); }
+        if !selected.is_file() {
+            return Err(LibraryError::Invalid("A regular document file is required".into()));
+        }
         let root = std::fs::canonicalize(self.root())?;
         let entries = match std::fs::read_dir(self.path("projects")) {
             Ok(entries) => entries,
@@ -720,12 +790,18 @@ impl Library {
         for entry in entries {
             let entry = entry?;
             let kind = entry.file_type()?;
-            if kind.is_symlink() { return Err(LibraryError::Invalid("Managed project paths cannot be links".into())); }
-            if !kind.is_dir() { continue; }
+            if kind.is_symlink() {
+                return Err(LibraryError::Invalid("Managed project paths cannot be links".into()));
+            }
+            if !kind.is_dir() {
+                continue;
+            }
             let project = entry.file_name().into_string().map_err(|_| LibraryError::Invalid("Invalid project path".into()))?;
             crate::validate_id(&project)?;
             let manifest = self.load_manifest_locked(&project)?;
-            if manifest.project.id != project { return Err(LibraryError::Invalid("Project manifest identity does not match its path".into())); }
+            if manifest.project.id != project {
+                return Err(LibraryError::Invalid("Project manifest identity does not match its path".into()));
+            }
             for file in manifest.files {
                 crate::validate_id(&file.id)?;
                 if file.project != project || !ids.insert(file.id.clone()) {
@@ -740,7 +816,9 @@ impl Library {
                     return Err(LibraryError::Invalid("Managed document path escapes its project files".into()));
                 }
                 if selected == owned || cfg!(windows) && selected.to_string_lossy().eq_ignore_ascii_case(&owned.to_string_lossy()) {
-                    if found.is_some() { return Err(LibraryError::Invalid("Selected path has multiple managed identities".into())); }
+                    if found.is_some() {
+                        return Err(LibraryError::Invalid("Selected path has multiple managed identities".into()));
+                    }
                     found = Some(file);
                 }
             }
@@ -754,7 +832,14 @@ impl Library {
 
     /// Creates the file and its first complete history checkpoint in the same
     /// document/manifest transaction; no intermediate history-free file is needed.
-    pub fn create_file_with_history(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, history: &desigma_doc::History) -> Result<FileEntry> {
+    pub fn create_file_with_history(
+        &self,
+        project: &str,
+        folder: Option<&str>,
+        name: &str,
+        doc: &Document,
+        history: &desigma_doc::History,
+    ) -> Result<FileEntry> {
         self.create_file_checkpoint(project, folder, name, &DocumentCheckpoint::new(doc.clone(), history.clone()))
     }
 
@@ -765,12 +850,26 @@ impl Library {
         self.create_file_state(project, folder, name, &checkpoint.document, Some((text, BTreeMap::new())))
     }
 
-    pub(crate) fn create_file_state(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>) -> Result<FileEntry> {
+    pub(crate) fn create_file_state(
+        &self,
+        project: &str,
+        folder: Option<&str>,
+        name: &str,
+        doc: &Document,
+        checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>,
+    ) -> Result<FileEntry> {
         let _guard = write_lock(self)?;
         self.create_file_state_locked(project, folder, name, doc, checkpoint)
     }
 
-    pub(crate) fn create_file_state_locked(&self, project: &str, folder: Option<&str>, name: &str, doc: &Document, checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>) -> Result<FileEntry> {
+    pub(crate) fn create_file_state_locked(
+        &self,
+        project: &str,
+        folder: Option<&str>,
+        name: &str,
+        doc: &Document,
+        checkpoint: Option<(String, BTreeMap<String, Vec<u8>>)>,
+    ) -> Result<FileEntry> {
         let name = clean_name(name, "file")?;
         let mut m = self.load_manifest_locked(project)?;
         if let Some(f) = folder {
@@ -795,7 +894,7 @@ impl Library {
         if let Some((text, payloads)) = checkpoint {
             self.commit_document_state(&entry.id, doc, Some(text), payloads, m)?;
         } else {
-            self.commit_document(&entry.id,doc,m)?;
+            self.commit_document(&entry.id, doc, m)?;
         }
         Ok(entry)
     }
@@ -810,7 +909,7 @@ impl Library {
         let now = now_ms();
         m.files[i].modified = now;
         m.project.modified = now;
-        self.commit_document(id,doc,m)
+        self.commit_document(id, doc, m)
     }
 
     /// Whether the file is a design file or a board, read from the document itself (the manifest
@@ -825,7 +924,7 @@ impl Library {
         }
         let (m, _) = self.find_file_locked(id)?;
         let bytes = std::fs::read(self.file_path(&m.project.id, id))?;
-        if serde_json::from_slice::<serde_json::Value>(&bytes)?.get("schemaVersion").is_some(){
+        if serde_json::from_slice::<serde_json::Value>(&bytes)?.get("schemaVersion").is_some() {
             return Ok(Document::from_json(&String::from_utf8_lossy(&bytes))?.kind);
         }
         Ok(serde_json::from_slice::<Probe>(&bytes)?.kind)
@@ -874,15 +973,19 @@ impl Library {
         let (m, i) = self.find_file_locked(id)?;
         let src = m.files[i].clone();
         let checkpoint = self.load_checkpoint_locked(id)?;
-        let states = std::iter::once((&checkpoint.document, &checkpoint.history))
-            .chain(checkpoint.retained.iter().map(|state| (&state.document, &state.history)));
-        if states.flat_map(|(document, history)| std::iter::once(document).chain(history.retained_documents()))
-            .any(|document| document.is_managed()) {
+        let states =
+            std::iter::once((&checkpoint.document, &checkpoint.history)).chain(checkpoint.retained.iter().map(|state| (&state.document, &state.history)));
+        if states.flat_map(|(document, history)| std::iter::once(document).chain(history.retained_documents())).any(|document| document.is_managed()) {
             return Err(LibraryError::Invalid("Bound CityOS documents cannot be duplicated without an explicit successor contract".into()));
         }
         self.ensure_portable_submission_safe_locked(policy, Some(id), &checkpoint)?;
-        let mut new = self.create_file_state_locked(&src.project, src.folder.as_deref(), &format!("{} (copy)", src.name),
-            &checkpoint.document, Some((checkpoint.to_json()?, BTreeMap::new())))?;
+        let mut new = self.create_file_state_locked(
+            &src.project,
+            src.folder.as_deref(),
+            &format!("{} (copy)", src.name),
+            &checkpoint.document,
+            Some((checkpoint.to_json()?, BTreeMap::new())),
+        )?;
         // The document, both history stacks and retained archives are durable
         // before best-effort presentation work. Thumbnail failure cannot undo or
         // orphan that primary generation or replace its manifest with an old one.
@@ -1185,7 +1288,8 @@ pub(crate) mod storage_test {
                 .env("DESIGMA_STORAGE_TEST_ROOT", root)
                 .env("DESIGMA_STORAGE_TEST_MODE", mode)
                 .env("DESIGMA_STORAGE_TEST_FILE", file)
-                .spawn().unwrap();
+                .spawn()
+                .unwrap();
             let mut worker = Self { child, root: root.to_owned() };
             let deadline = Instant::now() + Duration::from_secs(10);
             while !root.join("storage-test-ready").exists() {
@@ -1257,10 +1361,17 @@ mod tests {
         checkpoint.document.name = "child committed".into();
         checkpoint.history.exec(&mut checkpoint.document, desigma_doc::Command::SetComments { comments: vec![] }).unwrap();
         let barrier = library.root().to_owned();
-        SAVE_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(move || {
-            storage_test::pause(&barrier);
-            if crash { std::process::exit(94); }
-        }))));
+        SAVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some((
+                phase,
+                Box::new(move || {
+                    storage_test::pause(&barrier);
+                    if crash {
+                        std::process::exit(94);
+                    }
+                }),
+            ))
+        });
         library.save_checkpoint_reconciled(&file, &checkpoint).unwrap();
         std::process::exit(93);
     }
@@ -1274,8 +1385,12 @@ mod tests {
             let file = library.create_file_checkpoint(&project.id, None, "F", &checkpoint).unwrap();
             let version = library.save_version(&file.id, &checkpoint.document, Some("Keep".into()), false).unwrap();
             let mut worker = storage_test::Worker::start(&temp.0, "store::tests::checkpoint_storage_worker", mode, &file.id);
-            let paths = [library.project_dir(&project.id).join(MANIFEST), library.file_path(&project.id, &file.id),
-                library.checkpoint_path(&file.id).unwrap(), library.project_dir(&project.id).join(".save.pending.json")];
+            let paths = [
+                library.project_dir(&project.id).join(MANIFEST),
+                library.file_path(&project.id, &file.id),
+                library.checkpoint_path(&file.id).unwrap(),
+                library.project_dir(&project.id).join(".save.pending.json"),
+            ];
             let before: Vec<_> = paths.iter().map(std::fs::read).collect();
             let fingerprint = crate::checkpoint_fingerprint(&checkpoint).unwrap();
             storage_test::busy(library.save_file_with_history_expected(&file.id, &checkpoint.document, &checkpoint.history, &fingerprint));
@@ -1349,9 +1464,15 @@ mod tests {
     fn cas_checkpoint(pins: Vec<String>) -> DocumentCheckpoint {
         let mut document = doc("CAS checkpoint", 1);
         document.cityos = Some(desigma_doc::CityosBinding {
-            schema_version: "cityos.design-exchange.v1".into(), document_id: "d".into(), draft_id: "draft".into(),
+            schema_version: "cityos.design-exchange.v1".into(),
+            document_id: "d".into(),
+            draft_id: "draft".into(),
             base: desigma_doc::CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
-            semantic_base: serde_json::json!({}), dependency_pins: pins, occurrences: BTreeMap::new(), exchange_v2: None, exchange_v3: None,
+            semantic_base: serde_json::json!({}),
+            dependency_pins: pins,
+            occurrences: BTreeMap::new(),
+            exchange_v2: None,
+            exchange_v3: None,
         });
         DocumentCheckpoint::new(document, desigma_doc::History::default())
     }
@@ -1472,8 +1593,9 @@ mod tests {
             drop(library);
             let reopened = Library::open(&temp.0).unwrap();
             let copies: Vec<_> = reopened.files_in(&project.id, None).unwrap().into_iter().filter(|file| file.id != source.id).collect();
-            if phase == "before-journal" { assert!(copies.is_empty()); }
-            else {
+            if phase == "before-journal" {
+                assert!(copies.is_empty());
+            } else {
                 assert_eq!(copies.len(), 1, "{phase}");
                 assert_eq!(copies[0].name, "Source (copy)");
                 assert_eq!(reopened.load_checkpoint(&copies[0].id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap(), "{phase}");
@@ -1493,13 +1615,21 @@ mod tests {
             let mut checkpoint = ordinary_duplicate_checkpoint();
             let bound = cas_checkpoint(Vec::new()).document;
             match slot {
-                "current" => { checkpoint.document = bound; checkpoint.history = desigma_doc::History::default(); }
-                "retained" => { checkpoint.retained[0].document = bound; checkpoint.retained[0].history = desigma_doc::History::default(); }
+                "current" => {
+                    checkpoint.document = bound;
+                    checkpoint.history = desigma_doc::History::default();
+                }
+                "retained" => {
+                    checkpoint.retained[0].document = bound;
+                    checkpoint.retained[0].history = desigma_doc::History::default();
+                }
                 _ => {
                     let target = if slot == "retained-undo" { &mut checkpoint.retained[0].history } else { &mut checkpoint.history };
                     let mut history = serde_json::to_value(&*target).unwrap();
-                    history[if slot == "redo" { "redo" } else { "undo" }].as_array_mut().unwrap().push(
-                        serde_json::to_value(desigma_doc::Command::CityosInstall { document: Box::new(bound) }).unwrap());
+                    history[if slot == "redo" { "redo" } else { "undo" }]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::to_value(desigma_doc::Command::CityosInstall { document: Box::new(bound) }).unwrap());
                     *target = serde_json::from_value(history).unwrap();
                 }
             }
@@ -1520,25 +1650,39 @@ mod tests {
         let (_temp, library) = Tmp::new();
         let project = library.create_project("P").unwrap();
         let source = library.create_file_checkpoint(&project.id, None, "Source", &ordinary_duplicate_checkpoint()).unwrap();
-        let record = library.prepare_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, crate::SubmissionCommand {
-            intent_id: "duplicate-intent".into(), operation_id: "duplicate-operation".into(), predecessor: None,
-            owner: "experience".into(), resource: "frame".into(),
-            scope: BTreeMap::from([("tenantId".into(), "t".into()), ("actorId".into(), "a".into())]),
-            base: desigma_doc::CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
-            expected_revision: "a".repeat(40), semantic_base: serde_json::json!({}), submitted_snapshot: serde_json::json!({}), dependency_pins: vec![],
-        }).unwrap();
+        let record = library
+            .prepare_submission_with_policy(
+                &crate::storage_policy::tests::BOUND_FIXTURE_POLICY,
+                crate::SubmissionCommand {
+                    intent_id: "duplicate-intent".into(),
+                    operation_id: "duplicate-operation".into(),
+                    predecessor: None,
+                    owner: "experience".into(),
+                    resource: "frame".into(),
+                    scope: BTreeMap::from([("tenantId".into(), "t".into()), ("actorId".into(), "a".into())]),
+                    base: desigma_doc::CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
+                    expected_revision: "a".repeat(40),
+                    semantic_base: serde_json::json!({}),
+                    submitted_snapshot: serde_json::json!({}),
+                    dependency_pins: vec![],
+                },
+            )
+            .unwrap();
         // Independent legacy association fixture: no submitted checkpoint was
         // retained by that format, but its original file must remain frozen.
         let none: Option<String> = None;
-        let digest = crate::payload_digest(&serde_json::to_vec(&("cityos.submission-file.v1", &source.id, &none, &none,
-            &record.command.operation_id, &record.request_digest)).unwrap());
+        let digest = crate::payload_digest(
+            &serde_json::to_vec(&("cityos.submission-file.v1", &source.id, &none, &none, &record.command.operation_id, &record.request_digest)).unwrap(),
+        );
         let mut stored = serde_json::to_value(&record).unwrap();
         stored["local_file"] = serde_json::json!({"file_id":source.id,"document_id":null,"draft_id":null,"digest":digest});
         let path = library.submission_path(&record.command.operation_id).unwrap();
         let original = serde_json::to_vec(&stored).unwrap();
         std::fs::write(&path, &original).unwrap();
         assert_eq!(library.document_submissions_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source.id).unwrap(), [record]);
-        assert!(matches!(library.duplicate_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source.id), Err(LibraryError::Invalid(ref message)) if message.contains("Unresolved submission")));
+        assert!(
+            matches!(library.duplicate_file_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &source.id), Err(LibraryError::Invalid(ref message)) if message.contains("Unresolved submission"))
+        );
         assert_eq!(std::fs::read(path).unwrap(), original);
         assert_eq!(library.files_in(&project.id, None).unwrap().len(), 1);
     }
@@ -1612,8 +1756,11 @@ mod tests {
             assert_eq!(reopened.load_cityos_payload(&second).unwrap(), incoming);
             assert_eq!(std::fs::metadata(reopened.path("cityos/payloads").join(&first)).unwrap().modified().unwrap(), first_modified);
             if let Some(modified) = second_modified {
-                assert_eq!(std::fs::metadata(reopened.path("cityos/payloads").join(&second)).unwrap().modified().unwrap(), modified,
-                    "replay must not rewrite an imported object already materialized before the interruption");
+                assert_eq!(
+                    std::fs::metadata(reopened.path("cityos/payloads").join(&second)).unwrap().modified().unwrap(),
+                    modified,
+                    "replay must not rewrite an imported object already materialized before the interruption"
+                );
             }
             assert!(!journal.exists());
         }
@@ -1636,11 +1783,15 @@ mod tests {
             library.put_cityos_payload(&hash, bytes).unwrap();
             let submission_only = library.retain_cityos_payload(b"unresolved submission only").unwrap();
             let command = crate::SubmissionCommand {
-                intent_id: "repair-intent".into(), operation_id: "repair-operation".into(), predecessor: None,
-                owner: "experience".into(), resource: "frame".into(),
+                intent_id: "repair-intent".into(),
+                operation_id: "repair-operation".into(),
+                predecessor: None,
+                owner: "experience".into(),
+                resource: "frame".into(),
                 scope: BTreeMap::from([("tenantId".into(), "t".into()), ("actorId".into(), "a".into())]),
                 base: desigma_doc::CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
-                expected_revision: "a".repeat(40), semantic_base: serde_json::json!({"elevation":"flat"}),
+                expected_revision: "a".repeat(40),
+                semantic_base: serde_json::json!({"elevation":"flat"}),
                 submitted_snapshot: serde_json::json!({"elevation":"resting"}),
                 dependency_pins: vec![hash.clone(), submission_only.clone()],
             };
@@ -1659,9 +1810,15 @@ mod tests {
             // An incomplete/unverified package cannot repair or erase anything.
             for fault in ["missing", "corrupt"] {
                 let mut invalid: serde_json::Value = serde_json::from_str(&portable).unwrap();
-                if fault == "missing" { invalid["payloads"].as_object_mut().unwrap().remove(&hash); }
-                else { invalid["payloads"][&hash] = serde_json::json!([0]); }
-                assert!(library.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id, &invalid.to_string()).is_err(), "{phase}/{fault}");
+                if fault == "missing" {
+                    invalid["payloads"].as_object_mut().unwrap().remove(&hash);
+                } else {
+                    invalid["payloads"][&hash] = serde_json::json!([0]);
+                }
+                assert!(
+                    library.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id, &invalid.to_string()).is_err(),
+                    "{phase}/{fault}"
+                );
                 assert_eq!(std::fs::read(&payload_path).unwrap(), b"corrupt local object");
                 assert_eq!(std::fs::read(&document_path).unwrap(), original_document);
                 assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
@@ -1671,11 +1828,19 @@ mod tests {
             }
             assert!(library.save_checkpoint(&file.id, &checkpoint).is_err(), "ordinary saves still require verified CAS bytes");
             let mut dispatches = 0;
-            assert!(library.dispatch_prepared_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
+            assert!(library
+                .dispatch_prepared_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone(), |_| {
+                    dispatches += 1;
+                    Ok(())
+                })
+                .is_err());
             assert_eq!(dispatches, 0);
             assert_eq!(library.prepare_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone()).unwrap(), original);
             let expected_roots = BTreeSet::from([hash.clone(), submission_only.clone()]);
-            assert_eq!(library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
+            assert_eq!(
+                library.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(),
+                expected_roots
+            );
 
             SAVE_FAULT.with(|fault| fault.set(Some(phase)));
             assert!(library.import_checkpoint_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &file.id, &portable).is_err(), "{phase}");
@@ -1710,9 +1875,17 @@ mod tests {
             assert_eq!(std::fs::read(&submission_path).unwrap(), original_record);
             assert_eq!(reopened.load_submission_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, &command.operation_id).unwrap(), original);
             assert!(original.frozen());
-            assert_eq!(reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(), expected_roots);
+            assert_eq!(
+                reopened.retention_roots_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY).unwrap().into_iter().collect::<BTreeSet<_>>(),
+                expected_roots
+            );
             assert!(reopened.load_cityos_payload(&submission_only).is_err());
-            assert!(reopened.dispatch_prepared_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone(), |_| { dispatches += 1; Ok(()) }).is_err());
+            assert!(reopened
+                .dispatch_prepared_with_policy(&crate::storage_policy::tests::BOUND_FIXTURE_POLICY, command.clone(), |_| {
+                    dispatches += 1;
+                    Ok(())
+                })
+                .is_err());
             assert_eq!(dispatches, 0, "repair must not bypass the still-missing submission dependency");
         }
     }
@@ -1875,17 +2048,34 @@ mod tests {
         assert_eq!(lib.load_file(&e.id).unwrap().nodes.len(), 4);
         let names: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(names.contains(&format!("{}.desigma", e.id)));
-        assert!(names.contains(&format!("{}.desigma.tmp",e.id)));
-        assert!(names.iter().all(|name|!name.contains(".tmp-")));
-        assert_eq!(std::fs::read_to_string(path.with_extension("desigma.tmp")).unwrap(),"garbage");
+        assert!(names.contains(&format!("{}.desigma.tmp", e.id)));
+        assert!(names.iter().all(|name| !name.contains(".tmp-")));
+        assert_eq!(std::fs::read_to_string(path.with_extension("desigma.tmp")).unwrap(), "garbage");
     }
 
     #[test]
-    fn interrupted_document_manifest_commit_recovers_on_reopen(){
-        let (_t,lib)=Tmp::new();let project=lib.create_project("P").unwrap();let file=lib.create_file(&project.id,None,"File",&doc("before",1)).unwrap();
-        let mut manifest={let _guard=write_lock(&lib).unwrap();lib.load_manifest_locked(&project.id).unwrap()};manifest.files[0].modified=now_ms();let pending=PendingSave{schema_version:None,file_id:file.id.clone(),document:doc("accepted-new",2).to_json().unwrap(),manifest,checkpoint:None,payloads:BTreeMap::new(),required_pins:None};
-        write_atomic(&lib.project_dir(&project.id).join(".save.pending.json"),serde_json::to_string(&pending).unwrap().as_bytes()).unwrap();
-        let reopened=Library::open(lib.root()).unwrap();assert_eq!(reopened.load_file(&file.id).unwrap().name,"accepted-new");assert!(!lib.project_dir(&project.id).join(".save.pending.json").exists());
+    fn interrupted_document_manifest_commit_recovers_on_reopen() {
+        let (_t, lib) = Tmp::new();
+        let project = lib.create_project("P").unwrap();
+        let file = lib.create_file(&project.id, None, "File", &doc("before", 1)).unwrap();
+        let mut manifest = {
+            let _guard = write_lock(&lib).unwrap();
+            lib.load_manifest_locked(&project.id).unwrap()
+        };
+        manifest.files[0].modified = now_ms();
+        let pending = PendingSave {
+            schema_version: None,
+            file_id: file.id.clone(),
+            document: doc("accepted-new", 2).to_json().unwrap(),
+            manifest,
+            checkpoint: None,
+            payloads: BTreeMap::new(),
+            required_pins: None,
+        };
+        write_atomic(&lib.project_dir(&project.id).join(".save.pending.json"), serde_json::to_string(&pending).unwrap().as_bytes()).unwrap();
+        let reopened = Library::open(lib.root()).unwrap();
+        assert_eq!(reopened.load_file(&file.id).unwrap().name, "accepted-new");
+        assert!(!lib.project_dir(&project.id).join(".save.pending.json").exists());
     }
 
     #[test]
@@ -1931,7 +2121,8 @@ mod tests {
         let project = library.create_project("P").unwrap();
         let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
         let old = library.load_checkpoint(&file.id).unwrap();
-        let mut incoming = old.clone(); incoming.install_baseline(doc("incoming", 2));
+        let mut incoming = old.clone();
+        incoming.install_baseline(doc("incoming", 2));
         SAVE_FAULT.with(|fault| fault.set(Some("document")));
         SAVE_FAULT_REPEATS.with(|remaining| remaining.set(1));
         assert!(matches!(library.save_checkpoint_reconciled(&file.id, &incoming), Err(LibraryError::ReconciliationRequired { .. })));
@@ -1946,7 +2137,8 @@ mod tests {
         let project = library.create_project("P").unwrap();
         let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
         let old = library.load_checkpoint(&file.id).unwrap();
-        let mut incoming = old.clone(); incoming.install_baseline(doc("incoming", 2));
+        let mut incoming = old.clone();
+        incoming.install_baseline(doc("incoming", 2));
         SAVE_FAULT.with(|fault| fault.set(Some("document")));
         assert!(library.save_checkpoint(&file.id, &incoming).is_err());
         assert!(matches!(library.save_file_with_history(&file.id, &old.document, &old.history), Err(LibraryError::CheckpointConflict(_))));
@@ -1959,7 +2151,8 @@ mod tests {
         let project = library.create_project("P").unwrap();
         let file = library.create_file(&project.id, None, "F", &doc("same", 1)).unwrap();
         let old = library.load_checkpoint(&file.id).unwrap();
-        let mut incoming = old.clone(); incoming.install_baseline(old.document.clone());
+        let mut incoming = old.clone();
+        incoming.install_baseline(old.document.clone());
         let receipt = library.save_checkpoint_reconciled(&file.id, &incoming).unwrap();
         assert!(!receipt.recovered_after_error);
         assert_ne!(receipt.checkpoint.history.baseline_id(), old.history.baseline_id());
@@ -1975,7 +2168,11 @@ mod tests {
         let Ok(root) = std::env::var("DESIGMA_PERSISTENCE_TEST_ROOT") else { return };
         let file = std::env::var("DESIGMA_PERSISTENCE_TEST_FILE").unwrap();
         let phase = std::env::var("DESIGMA_PERSISTENCE_TEST_PHASE").unwrap();
-        let phase = match phase.as_str() { "document" => "document", "manifest" => "manifest", _ => panic!("Unexpected worker phase") };
+        let phase = match phase.as_str() {
+            "document" => "document",
+            "manifest" => "manifest",
+            _ => panic!("Unexpected worker phase"),
+        };
         let library = Library::open(root).unwrap();
         let mut document = library.load_file(&file).unwrap();
         document.name = "from child".into();
@@ -2000,7 +2197,8 @@ mod tests {
                 .env("DESIGMA_PERSISTENCE_TEST_ROOT", &temp.0)
                 .env("DESIGMA_PERSISTENCE_TEST_FILE", &file.id)
                 .env("DESIGMA_PERSISTENCE_TEST_PHASE", phase)
-                .status().unwrap();
+                .status()
+                .unwrap();
             assert_eq!(result.code(), Some(91), "worker must exit after the injected interruption");
             let reopened = Library::open(&temp.0).unwrap();
             let checkpoint = reopened.load_checkpoint(&file.id).unwrap();
@@ -2025,8 +2223,9 @@ mod tests {
             drop(library);
             let reopened = Library::open(&temp.0).unwrap();
             let files = reopened.files_in(&project.id, None).unwrap();
-            if phase == "before-journal" { assert!(files.is_empty()); }
-            else {
+            if phase == "before-journal" {
+                assert!(files.is_empty());
+            } else {
                 assert_eq!(files.len(), 1);
                 assert_eq!(reopened.load_checkpoint(&files[0].id).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
             }
@@ -2045,7 +2244,8 @@ mod tests {
             let node_id = document.nodes[&document.pages[0]].children[0];
             let mut history = History::default();
             for name in ["first", "second"] {
-                let mut node = document.get(node_id).unwrap().clone(); node.name = name.into();
+                let mut node = document.get(node_id).unwrap().clone();
+                node.name = name.into();
                 history.exec(&mut document, Command::Update { node: Box::new(node) }).unwrap();
             }
             history.undo(&mut document).unwrap();
@@ -2053,10 +2253,15 @@ mod tests {
             let hash = crate::payload_digest(b"history-only dependency");
             let mut retained = doc("previous baseline", 0);
             retained.cityos = Some(desigma_doc::CityosBinding {
-                schema_version: "cityos.design-exchange.v1".into(), document_id: "d".into(), draft_id: "d".into(),
+                schema_version: "cityos.design-exchange.v1".into(),
+                document_id: "d".into(),
+                draft_id: "d".into(),
                 base: desigma_doc::CityosBase::CanonicalGit { repository_id: "r".into(), commit: "a".repeat(40) },
-                semantic_base: serde_json::json!({}), dependency_pins: vec![hash.clone()], occurrences: BTreeMap::new(),
-                exchange_v2: None, exchange_v3: None,
+                semantic_base: serde_json::json!({}),
+                dependency_pins: vec![hash.clone()],
+                occurrences: BTreeMap::new(),
+                exchange_v2: None,
+                exchange_v3: None,
             });
             checkpoint.retained.push(RetainedHistory { document: retained, history: History::default() });
             let payloads = BTreeMap::from([(hash.clone(), b"history-only dependency".to_vec())]);
@@ -2098,12 +2303,15 @@ mod tests {
                 let _guard = write_lock(&library).unwrap();
                 library.load_manifest_locked(&project.id).unwrap()
             };
-            if fault == "manifest" { manifest.files[0].project = "another-project".into(); }
+            if fault == "manifest" {
+                manifest.files[0].project = "another-project".into();
+            }
             let pending = PendingSave {
                 schema_version: Some(if fault == "future" { "future".into() } else { "desigma.file-save.v2".into() }),
                 required_pins: None,
                 file_id: if fault == "identity" { "..".into() } else { file.id.clone() },
-                document: doc("new", 2).to_json().unwrap(), manifest,
+                document: doc("new", 2).to_json().unwrap(),
+                manifest,
                 checkpoint: (fault == "checkpoint").then(|| DocumentCheckpoint::new(doc("wrong", 1), desigma_doc::History::default()).to_json().unwrap()),
                 payloads: if fault == "dependency" { BTreeMap::from([("a".repeat(64), vec![1])]) } else { BTreeMap::new() },
             };
@@ -2120,9 +2328,12 @@ mod tests {
         let (_temp, library) = Tmp::new();
         let project = library.create_project("P").unwrap();
         let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
-        let background = library.clone(); let project_id = project.id.clone();
+        let background = library.clone();
+        let project_id = project.id.clone();
         let thread = std::thread::spawn(move || {
-            for i in 0..8 { background.create_folder(&project_id, None, &format!("Folder {i}")).unwrap(); }
+            for i in 0..8 {
+                background.create_folder(&project_id, None, &format!("Folder {i}")).unwrap();
+            }
         });
         for i in 0..8 {
             library.save_checkpoint(&file.id, &DocumentCheckpoint::new(doc(&format!("save {i}"), 1), desigma_doc::History::default())).unwrap();
@@ -2138,7 +2349,8 @@ mod tests {
         let (_temp, library) = Tmp::new();
         let project = library.create_project("P").unwrap();
         let file = library.create_file(&project.id, None, "F", &doc("old", 1)).unwrap();
-        let background = library.clone(); let id = file.id.clone();
+        let background = library.clone();
+        let id = file.id.clone();
         let thread = std::thread::spawn(move || background.set_thumbnail(&id, b"png"));
         library.save_checkpoint(&file.id, &DocumentCheckpoint::new(doc("new", 2), desigma_doc::History::default())).unwrap();
         thread.join().unwrap().unwrap();
@@ -2167,14 +2379,16 @@ mod tests {
     }
 
     #[test]
-    fn file_kind_rejects_unknown_containers_instead_of_defaulting_to_a_design(){
-        let (_t,lib)=Tmp::new();let project=lib.create_project("P").unwrap();
-        let file=lib.create_file(&project.id,None,"File",&doc("valid",1)).unwrap();
-        let path=lib.file_path(&project.id,&file.id);
-        let mut value:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        value["schemaVersion"]=serde_json::json!("desigma.document.v999");
-        std::fs::write(&path,serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(lib.file_kind(&file.id).is_err());assert!(lib.load_file(&file.id).is_err());
+    fn file_kind_rejects_unknown_containers_instead_of_defaulting_to_a_design() {
+        let (_t, lib) = Tmp::new();
+        let project = lib.create_project("P").unwrap();
+        let file = lib.create_file(&project.id, None, "File", &doc("valid", 1)).unwrap();
+        let path = lib.file_path(&project.id, &file.id);
+        let mut value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value["schemaVersion"] = serde_json::json!("desigma.document.v999");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(lib.file_kind(&file.id).is_err());
+        assert!(lib.load_file(&file.id).is_err());
     }
 
     #[test]

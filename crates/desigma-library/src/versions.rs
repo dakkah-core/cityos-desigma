@@ -88,12 +88,25 @@ fn version_fault(_phase: &str) -> Result<()> {
     #[cfg(test)]
     if let Some(hook) = VERSION_HOOK.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) { slot.take() } else { None }
-    }) { hook.1(); }
+        if slot.as_ref().is_some_and(|(phase, _)| *phase == _phase) {
+            slot.take()
+        } else {
+            None
+        }
+    }) {
+        hook.1();
+    }
     #[cfg(test)]
     if VERSION_FAULT.with(|fault| {
-        if fault.get() == Some(_phase) { fault.set(None); true } else { false }
-    }) { return Err(std::io::Error::other(format!("Interrupted version at {_phase}")).into()); }
+        if fault.get() == Some(_phase) {
+            fault.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(std::io::Error::other(format!("Interrupted version at {_phase}")).into());
+    }
     Ok(())
 }
 
@@ -166,7 +179,8 @@ impl Library {
         let pending: PendingVersion = serde_json::from_slice(&bytes)?;
         Document::from_json(&pending.document)?;
         let mut ids = std::collections::BTreeSet::new();
-        if pending.schema_version != "desigma.version-save.v1" || pending.version.n == 0
+        if pending.schema_version != "desigma.version-save.v1"
+            || pending.version.n == 0
             || pending.version.size != pending.document.len() as u64
             || !pending.entries.iter().any(|entry| entry == &pending.version)
             || pending.entries.iter().any(|entry| entry.n == 0 || !ids.insert(entry.n) || pending.prune.contains(&entry.n))
@@ -201,7 +215,9 @@ impl Library {
         };
         for entry in entries {
             let entry = entry?;
-            if entry.file_type()?.is_dir() { self.recover_version_save(&entry.file_name().to_string_lossy())?; }
+            if entry.file_type()?.is_dir() {
+                self.recover_version_save(&entry.file_name().to_string_lossy())?;
+            }
         }
         Ok(())
     }
@@ -226,7 +242,9 @@ impl Library {
         for entry in rd {
             let entry = entry?;
             let Some(n) = entry.file_name().to_str().and_then(|s| s.strip_suffix(".desigma")).and_then(|s| s.parse::<u32>().ok()) else { continue };
-            if n == 0 { continue; }
+            if n == 0 {
+                continue;
+            }
             let metadata = entry.metadata()?;
             let mut version = match std::fs::read(self.version_metadata_path(file, n)) {
                 Ok(bytes) => {
@@ -237,7 +255,10 @@ impl Library {
                     version
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => indexed.iter().find(|v| v.n == n).cloned().unwrap_or(FileVersion {
-                    n, label: None, description: None, auto: true,
+                    n,
+                    label: None,
+                    description: None,
+                    auto: true,
                     created: metadata.modified()?.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
                     size: metadata.len(),
                 }),
@@ -289,8 +310,16 @@ impl Library {
         let trashed_max = std::fs::read_dir(self.path("trash"))
             .map(|rd| rd.flatten().filter_map(|e| e.file_name().to_str()?.strip_prefix(&format!("{file_id}-v"))?.parse::<u32>().ok()).max().unwrap_or(0))
             .unwrap_or(0);
-        let n = entries.iter().map(|e| e.n).max().unwrap_or(0).max(on_disk_max).max(trashed_max).max(self.version_sequence(file_id)?)
-            .checked_add(1).ok_or_else(|| LibraryError::Invalid("Version sequence exhausted".into()))?;
+        let n = entries
+            .iter()
+            .map(|e| e.n)
+            .max()
+            .unwrap_or(0)
+            .max(on_disk_max)
+            .max(trashed_max)
+            .max(self.version_sequence(file_id)?)
+            .checked_add(1)
+            .ok_or_else(|| LibraryError::Invalid("Version sequence exhausted".into()))?;
         let v = FileVersion { n, label: clean(label), description: clean(description), auto, created: now, size: json.len() as u64 };
         entries.push(v.clone());
         let prune: Vec<_> = if auto { retention(&entries, now).into_iter().filter(|old| *old != n).collect() } else { Vec::new() };
@@ -387,10 +416,17 @@ mod tests {
             _ => panic!("unexpected version storage worker mode"),
         };
         let barrier = library.root().to_owned();
-        VERSION_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(move || {
-            crate::store::storage_test::pause(&barrier);
-            if crash { std::process::exit(94); }
-        }))));
+        VERSION_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some((
+                phase,
+                Box::new(move || {
+                    crate::store::storage_test::pause(&barrier);
+                    if crash {
+                        std::process::exit(94);
+                    }
+                }),
+            ))
+        });
         let version = library.save_version_described(&file, &doc_with(2), Some("Child".into()), Some("Retain child metadata".into()), false).unwrap();
         assert_eq!(version.n, 2);
         std::process::exit(93);
@@ -408,10 +444,13 @@ mod tests {
             let first_bytes = std::fs::read(library.version_path(&file.id, first.n)).unwrap();
             let mut worker = Worker::start(&temp.0, "versions::tests::version_storage_worker", mode, &file.id);
             let snapshot = || -> std::collections::BTreeMap<_, _> {
-                std::fs::read_dir(library.versions_dir(&file.id)).unwrap().map(|entry| {
-                    let entry = entry.unwrap();
-                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
-                }).collect()
+                std::fs::read_dir(library.versions_dir(&file.id))
+                    .unwrap()
+                    .map(|entry| {
+                        let entry = entry.unwrap();
+                        (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                    })
+                    .collect()
             };
             let paused = snapshot();
             busy(library.save_version(&file.id, &doc_with(3), Some("Parent".into()), false));

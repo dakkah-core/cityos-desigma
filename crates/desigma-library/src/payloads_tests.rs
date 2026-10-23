@@ -10,11 +10,7 @@ impl TempRoot {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         loop {
-            let path = std::env::temp_dir().join(format!(
-                "desigma-payloads-tests-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed),
-            ));
+            let path = std::env::temp_dir().join(format!("desigma-payloads-tests-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),));
             // Never reuse or delete a directory left by another process/run.
             match fs::create_dir(&path) {
                 Ok(()) => return Self(path),
@@ -138,11 +134,33 @@ fn invalid_namespaces_leave_filesystem_unchanged() {
             library.retain_cityos_payload(b"existing object").unwrap();
         }
         let mut invalid: Vec<String> = [
-            "", ".", "..", "../escape", "..\\escape", "nested/name", "nested\\name",
-            "CityOS", "a b", "a.b", "a:b", "a\nb", "a\0b", "é",
-            "projects", "trash", "versions", "libraries", "settings",
-            "con", "prn", "aux", "nul",
-        ].into_iter().map(String::from).collect();
+            "",
+            ".",
+            "..",
+            "../escape",
+            "..\\escape",
+            "nested/name",
+            "nested\\name",
+            "CityOS",
+            "a b",
+            "a.b",
+            "a:b",
+            "a\nb",
+            "a\0b",
+            "é",
+            "projects",
+            "trash",
+            "versions",
+            "libraries",
+            "settings",
+            "con",
+            "prn",
+            "aux",
+            "nul",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         invalid.push("x".repeat(81));
         invalid.push(temp.0.join("absolute-escape").to_str().unwrap().to_owned());
         for number in 1..=9 {
@@ -167,13 +185,16 @@ fn invalid_digests_leave_filesystem_unchanged() {
             store.retain(b"existing generic object").unwrap();
             library.retain_cityos_payload(b"existing CityOS object").unwrap();
         }
-        let mut invalid: Vec<String> = [
-            "", ".", "..", "../escape", "..\\escape", "nested/name", "nested\\name", "a\0b",
-        ].into_iter().map(String::from).collect();
+        let mut invalid: Vec<String> =
+            ["", ".", "..", "../escape", "..\\escape", "nested/name", "nested\\name", "a\0b"].into_iter().map(String::from).collect();
         invalid.extend([
-            "a".repeat(63), "a".repeat(65), "g".repeat(64),
-            format!("{} ", "a".repeat(63)), format!("{}\n", "a".repeat(63)),
-            format!("{}/", "a".repeat(63)), format!("{}\\", "a".repeat(63)),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+            format!("{} ", "a".repeat(63)),
+            format!("{}\n", "a".repeat(63)),
+            format!("{}/", "a".repeat(63)),
+            format!("{}\\", "a".repeat(63)),
             temp.0.join("absolute-digest").to_str().unwrap().to_owned(),
         ]);
         let before = snapshot(&temp.0);

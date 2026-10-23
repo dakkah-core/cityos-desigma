@@ -1,5 +1,5 @@
-use super::{preview, support, Browser, DetailTab};
 use super::CatalogUiServices;
+use super::{preview, support, Browser, DetailTab};
 use desigma_cityos_catalog::{Entry, Filters};
 use egui::{Align, Align2, Context, FontId, Frame, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
 use serde_json::Value;
@@ -84,13 +84,7 @@ fn item_row(ui: &mut Ui, services: CatalogUiServices, entry: &Entry, selected: b
     }
     let tile = egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 16.0), egui::vec2(36.0, 36.0));
     painter.rect_filled(tile, 6, theme.bg_tertiary);
-    painter.text(
-        tile.center(),
-        Align2::CENTER_CENTER,
-        entry.level.as_deref().unwrap_or("·"),
-        FontId::proportional(theme.catalog_small),
-        theme.text_secondary,
-    );
+    painter.text(tile.center(), Align2::CENTER_CENTER, entry.level.as_deref().unwrap_or("·"), FontId::proportional(theme.catalog_small), theme.text_secondary);
     let text_rect = egui::Rect::from_min_max(rect.min + egui::vec2(57.0, 0.0), rect.max - egui::vec2(10.0, 0.0));
     let p = painter.with_clip_rect(text_rect);
     p.text(egui::pos2(text_rect.left(), rect.top() + 23.0), Align2::LEFT_CENTER, title, FontId::proportional(theme.catalog_body), theme.text);
@@ -100,7 +94,9 @@ fn item_row(ui: &mut Ui, services: CatalogUiServices, entry: &Entry, selected: b
 }
 
 const TILE_HEIGHT: f32 = 148.0;
-fn tile_columns(width: f32) -> usize { ((width + 8.0) / 168.0).floor().clamp(1.0, 4.0) as usize }
+fn tile_columns(width: f32) -> usize {
+    ((width + 8.0) / 168.0).floor().clamp(1.0, 4.0) as usize
+}
 fn item_tile(ui: &mut Ui, services: CatalogUiServices, entry: &Entry, selected: bool, width: f32) -> egui::Response {
     let theme = services.theme();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width.max(1.0), TILE_HEIGHT), Sense::click());
@@ -108,15 +104,37 @@ fn item_tile(ui: &mut Ui, services: CatalogUiServices, entry: &Entry, selected: 
     let title = preview::display_name(entry);
     response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, &title));
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect.shrink(1.0), theme.catalog_radius, if selected { theme.bg_selected_secondary } else if response.hovered() { theme.bg_hover } else { theme.bg_tertiary });
+    painter.rect_filled(
+        rect.shrink(1.0),
+        theme.catalog_radius,
+        if selected {
+            theme.bg_selected_secondary
+        } else if response.hovered() {
+            theme.bg_hover
+        } else {
+            theme.bg_tertiary
+        },
+    );
     if selected || response.has_focus() {
         painter.rect_stroke(rect.shrink(1.0), theme.catalog_radius, Stroke::new(1.0, theme.border_selected), StrokeKind::Inside);
     }
     let content = rect.shrink(12.0);
     let painter = painter.with_clip_rect(content);
-    painter.text(content.min, Align2::LEFT_TOP, entry.level.as_deref().unwrap_or_else(|| preview::kind_name(&entry.kind)), FontId::proportional(theme.catalog_title), theme.text_secondary);
+    painter.text(
+        content.min,
+        Align2::LEFT_TOP,
+        entry.level.as_deref().unwrap_or_else(|| preview::kind_name(&entry.kind)),
+        FontId::proportional(theme.catalog_title),
+        theme.text_secondary,
+    );
     painter.text(content.min + egui::vec2(0.0, 48.0), Align2::LEFT_TOP, title, FontId::proportional(theme.catalog_body), theme.text);
-    painter.text(content.min + egui::vec2(0.0, 73.0), Align2::LEFT_TOP, preview::kind_name(&entry.kind), FontId::proportional(theme.catalog_small), theme.text_secondary);
+    painter.text(
+        content.min + egui::vec2(0.0, 73.0),
+        Align2::LEFT_TOP,
+        preview::kind_name(&entry.kind),
+        FontId::proportional(theme.catalog_small),
+        theme.text_secondary,
+    );
     painter.text(content.min + egui::vec2(0.0, 100.0), Align2::LEFT_TOP, "Select to preview", FontId::proportional(theme.catalog_small), theme.text_tertiary);
     response.on_hover_text(format!("{}\n{}\n{}", entry.label, entry.source_path, entry.classification_status))
 }
@@ -125,7 +143,9 @@ fn action_button(ui: &mut Ui, services: CatalogUiServices, id: &str, label: &str
     let response = ui.add_enabled(reason.is_none(), egui::Button::new(label));
     services.record(ui, id, response.rect);
     let clicked = response.clicked();
-    if let Some(reason) = reason { response.on_disabled_hover_text(reason); }
+    if let Some(reason) = reason {
+        response.on_disabled_hover_text(reason);
+    }
     clicked
 }
 
@@ -142,31 +162,45 @@ fn preview_choices_menu(ui: &mut Ui, services: CatalogUiServices, choices: &[Val
         // Wrapping changes each choice's height. Fixed-height virtual rows would
         // overlap long labels and skip choices during keyboard navigation.
         let height = ui.available_height().min(320.0).max(1.0);
-        let scroll = egui::ScrollArea::vertical().id_salt("catalog-preview-choices")
-            .max_height(height).min_scrolled_height(1.0).auto_shrink([false, true]).show(ui, |ui| {
-                for (index, pin) in choices.iter().enumerate() {
-                    let label = format!("{} · {}\n{} · {}\n{}", pin["publicExport"].as_str().unwrap_or("Registered definition"),
-                        pin["componentVersion"].as_str().unwrap_or(""), pin["profileRef"].as_str().unwrap_or(""),
-                        pin["targetProfileRef"].as_str().unwrap_or(""), pin["sourcePath"].as_str().unwrap_or(""));
-                    let choice = ui.push_id(("catalog-preview-choice", index), |ui| {
-                        ui.add(egui::Button::new(label).wrap().min_size(egui::vec2(ui.available_width(), 0.0)))
-                    }).inner;
-                    services.record(ui, &format!("catalog-preview-choice-{index}"), choice.rect);
-                    #[cfg(test)]
-                    ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new(("catalog-preview-choice-id", index)), choice.id));
-                    if choice.gained_focus() { choice.scroll_to_me(Some(Align::Center)); }
-                    if choice.clicked() {
-                        selected = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
-                        ui.close();
+        let scroll =
+            egui::ScrollArea::vertical().id_salt("catalog-preview-choices").max_height(height).min_scrolled_height(1.0).auto_shrink([false, true]).show(
+                ui,
+                |ui| {
+                    for (index, pin) in choices.iter().enumerate() {
+                        let label = format!(
+                            "{} · {}\n{} · {}\n{}",
+                            pin["publicExport"].as_str().unwrap_or("Registered definition"),
+                            pin["componentVersion"].as_str().unwrap_or(""),
+                            pin["profileRef"].as_str().unwrap_or(""),
+                            pin["targetProfileRef"].as_str().unwrap_or(""),
+                            pin["sourcePath"].as_str().unwrap_or("")
+                        );
+                        let choice = ui
+                            .push_id(("catalog-preview-choice", index), |ui| {
+                                ui.add(egui::Button::new(label).wrap().min_size(egui::vec2(ui.available_width(), 0.0)))
+                            })
+                            .inner;
+                        services.record(ui, &format!("catalog-preview-choice-{index}"), choice.rect);
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new(("catalog-preview-choice-id", index)), choice.id));
+                        if choice.gained_focus() {
+                            choice.scroll_to_me(Some(Align::Center));
+                        }
+                        if choice.clicked() {
+                            selected = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                            ui.close();
+                        }
                     }
-                }
-            });
+                },
+            );
         services.record(ui, "catalog-preview-scroll", scroll.inner_rect);
         #[cfg(test)]
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("catalog-preview-content-size"), scroll.content_size));
     });
     services.record(ui, "catalog-choose-preview", button.rect);
-    if let Some(popup) = popup { services.record(ui, "catalog-preview-popup", popup.response.rect); }
+    if let Some(popup) = popup {
+        services.record(ui, "catalog-preview-popup", popup.response.rect);
+    }
     selected
 }
 
@@ -174,8 +208,10 @@ impl Browser {
     pub fn show(&mut self, ui: &mut Ui, ctx: &Context) {
         let services = self.services;
         let theme = services.theme();
-        if let Ok(mut repaint) = self.repaint.lock() { *repaint = Some(ctx.clone()); }
-        self.inline_preview=None;
+        if let Ok(mut repaint) = self.repaint.lock() {
+            *repaint = Some(ctx.clone());
+        }
+        self.inline_preview = None;
         if ctx.input(|input| {
             input.pointer.any_pressed()
                 || input.smooth_scroll_delta != egui::Vec2::ZERO
@@ -227,7 +263,11 @@ impl Browser {
                     if results.clicked() {
                         self.results_visible = true;
                     }
-                    if !self.results_visible { self.detail(ui); } else { self.results(ui); }
+                    if !self.results_visible {
+                        self.detail(ui);
+                    } else {
+                        self.results(ui);
+                    }
                 } else {
                     self.results(ui);
                 }
@@ -243,11 +283,19 @@ impl Browser {
         }
         self.settings(ctx);
         self.coverage(ctx);
-        if self.settings_open||self.coverage_open {self.inline_preview=None;}
-        if self.atlas_tools.is_open() { self.inline_preview = None; }
-        if let Some(delay) = self.next_repaint_after(Instant::now()) { ctx.request_repaint_after(delay); }
+        if self.settings_open || self.coverage_open {
+            self.inline_preview = None;
+        }
+        if self.atlas_tools.is_open() {
+            self.inline_preview = None;
+        }
+        if let Some(delay) = self.next_repaint_after(Instant::now()) {
+            ctx.request_repaint_after(delay);
+        }
         if !self.open {
-            if let Ok(mut repaint) = self.repaint.lock() { *repaint = None; }
+            if let Ok(mut repaint) = self.repaint.lock() {
+                *repaint = None;
+            }
         }
     }
     fn header(&mut self, ui: &mut Ui) {
@@ -303,11 +351,17 @@ impl Browser {
     fn search_bar(&mut self, ui: &mut Ui, ctx: &Context) {
         let services = self.services;
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(!self.navigation_back.is_empty(), egui::Button::new("← Back")).clicked() { self.navigate_history(false); }
-            if ui.add_enabled(!self.navigation_forward.is_empty(), egui::Button::new("Forward →")).clicked() { self.navigate_history(true); }
+            if ui.add_enabled(!self.navigation_back.is_empty(), egui::Button::new("← Back")).clicked() {
+                self.navigate_history(false);
+            }
+            if ui.add_enabled(!self.navigation_forward.is_empty(), egui::Button::new("Forward →")).clicked() {
+                self.navigate_history(true);
+            }
             if self.results_visible {
                 if let Some(entry) = self.selected.as_ref() {
-                    if ui.button("Return to selection").on_hover_text(preview::display_name(entry)).clicked() { self.results_visible = false; }
+                    if ui.button("Return to selection").on_hover_text(preview::display_name(entry)).clicked() {
+                        self.results_visible = false;
+                    }
                 }
             }
         });
@@ -380,7 +434,9 @@ impl Browser {
                     .and_then(|rows| rows.iter().find(|row| row["id"] == id))
                     .and_then(|row| row["count"].as_u64());
                 let suffix = n.filter(|n| *n < 10000).map(|n| count(n as usize)).unwrap_or_default();
-                if nav_row(ui, services, self.filters.collection == id && self.filters.level.is_empty() && self.filters.product.is_empty(), label, &suffix).clicked() {
+                if nav_row(ui, services, self.filters.collection == id && self.filters.level.is_empty() && self.filters.product.is_empty(), label, &suffix)
+                    .clicked()
+                {
                     self.filters = Filters { collection: id.into(), ..Default::default() };
                 }
                 if id == "compositions" {
@@ -404,13 +460,17 @@ impl Browser {
         let services = self.services;
         let products = self.summary.as_ref().and_then(|s| s["navigation"]["products"].as_array()).cloned().unwrap_or_default();
         let diagnostics = self.summary.as_ref().and_then(|s| s["navigation"]["diagnostics"].as_array()).map_or(0, Vec::len);
-        if diagnostics > 0 { ui.small(format!("{diagnostics} unresolved hierarchy relationships · see Source accounting")); }
+        if diagnostics > 0 {
+            ui.small(format!("{diagnostics} unresolved hierarchy relationships · see Source accounting"));
+        }
         if products.is_empty() {
             ui.label(if self.summary.is_some() { "No products are registered in this snapshot." } else { "Products appear after the repository loads." });
         }
         for product in products {
             let id = product["id"].as_str().unwrap_or("");
-            if id.is_empty() { continue; }
+            if id.is_empty() {
+                continue;
+            }
             let name = product["name"].as_str().unwrap_or(id);
             if nav_row(ui, services, self.filters.product == id, name, "").clicked() {
                 self.filters = Filters { collection: "sources".into(), product: id.into(), ..Default::default() };
@@ -418,10 +478,14 @@ impl Browser {
             if self.filters.product == id {
                 ui.indent(id, |ui| {
                     if let Some(targets) = product["targets"].as_array() {
-                        if !targets.is_empty() { ui.small("Declared targets"); }
+                        if !targets.is_empty() {
+                            ui.small("Declared targets");
+                        }
                         for target in targets {
                             let target = target.as_str().or_else(|| target["id"].as_str()).unwrap_or("");
-                            if target.is_empty() { continue; }
+                            if target.is_empty() {
+                                continue;
+                            }
                             if ui.selectable_label(self.filters.target == target, preview::humanize(target)).clicked() {
                                 self.filters.target = target.into();
                                 self.filters.search.clear();
@@ -430,7 +494,9 @@ impl Browser {
                     }
                     self.product_children(ui, &product, id, 0);
                     let has_shells = product["shells"].as_array().is_some_and(|shells| !shells.is_empty())
-                        || product["targets"].as_array().is_some_and(|targets| targets.iter().any(|target| target["shells"].as_array().is_some_and(|shells| !shells.is_empty())));
+                        || product["targets"]
+                            .as_array()
+                            .is_some_and(|targets| targets.iter().any(|target| target["shells"].as_array().is_some_and(|shells| !shells.is_empty())));
                     if !has_shells {
                         ui.small("No shell hierarchy is registered for this product in this capture.");
                     }
@@ -440,11 +506,20 @@ impl Browser {
     }
     fn product_children(&mut self, ui: &mut Ui, parent: &Value, scope: &str, depth: usize) {
         let services = self.services;
-        if depth >= 6 { ui.small("Further registered hierarchy is available in source records."); return; }
-        for (key, kind) in [("targets", "Target"), ("shells", "Shell"), ("routes", "Route"), ("pages", "Page"), ("screens", "Screen"), ("compositions", "Composition")] {
-            let Some(children) = parent[key].as_array() else { continue; };
+        if depth >= 6 {
+            ui.small("Further registered hierarchy is available in source records.");
+            return;
+        }
+        for (key, kind) in
+            [("targets", "Target"), ("shells", "Shell"), ("routes", "Route"), ("pages", "Page"), ("screens", "Screen"), ("compositions", "Composition")]
+        {
+            let Some(children) = parent[key].as_array() else {
+                continue;
+            };
             for (index, child) in children.iter().enumerate() {
-                if key == "targets" && !child.is_object() { continue; }
+                if key == "targets" && !child.is_object() {
+                    continue;
+                }
                 let id = child["id"].as_str().or_else(|| child["path"].as_str()).or_else(|| child.as_str()).unwrap_or("Unnamed registration");
                 let name = child["name"].as_str().unwrap_or(id);
                 let path = child["sourcePath"].as_str().or_else(|| child["path"].as_str());
@@ -462,15 +537,23 @@ impl Browser {
                         if key == "compositions" && child["kind"] == "composition" {
                             let open = ui.button("Open selected composition workspace");
                             services.record(ui, &format!("catalog-hierarchy-open-{salt}"), open.rect);
-                            if open.clicked() { self.workspace_request = Some(super::WorkspaceRequest::selected(path, true)); }
+                            if open.clicked() {
+                                self.workspace_request = Some(super::WorkspaceRequest::selected(path, true));
+                            }
                         }
-                        if ui.button("Browse source records").on_hover_text("Find this captured source path, including compositions registered outside the product directory.").clicked() {
+                        if ui
+                            .button("Browse source records")
+                            .on_hover_text("Find this captured source path, including compositions registered outside the product directory.")
+                            .clicked()
+                        {
                             self.filters.collection = "sources".into();
                             self.filters.product.clear();
                             self.filters.search = path.into();
                             self.filters.target.clear();
                         }
-                    } else { ui.small("No source path is registered for this item."); }
+                    } else {
+                        ui.small("No source path is registered for this item.");
+                    }
                     self.product_children(ui, child, &salt, depth + 1);
                 });
                 services.record(ui, &format!("catalog-hierarchy-{salt}"), response.header_response.rect);
@@ -494,16 +577,30 @@ impl Browser {
             ui.selectable_value(&mut self.visual_results, true, "Tiles");
         });
         let waiting = self.displayed_filters != self.filters;
-        let unavailable=waiting && !self.busy && self.filter_changed.is_none() && self.usable_generation().is_none() && self.error.is_some();
-        ui.label(RichText::new(if unavailable {"Results unavailable".into()} else if waiting { "Updating results…".into() } else { format!("{} items", count(self.total)) }).small().color(theme.text_secondary));
+        let unavailable = waiting && !self.busy && self.filter_changed.is_none() && self.usable_generation().is_none() && self.error.is_some();
+        ui.label(
+            RichText::new(if unavailable {
+                "Results unavailable".into()
+            } else if waiting {
+                "Updating results…".into()
+            } else {
+                format!("{} items", count(self.total))
+            })
+            .small()
+            .color(theme.text_secondary),
+        );
         ui.add_space(8.0);
         if self.summary.is_none() {
             ui.add_space(24.0);
             if let Some(error) = &self.error {
                 ui.strong("Repository capture is unavailable");
                 ui.label(error);
-                if ui.add_enabled(!self.busy, egui::Button::new("Retry capture")).clicked() { self.refresh(); }
-                if ui.button("Connection settings").clicked() { self.settings_open = true; }
+                if ui.add_enabled(!self.busy, egui::Button::new("Retry capture")).clicked() {
+                    self.refresh();
+                }
+                if ui.button("Connection settings").clicked() {
+                    self.settings_open = true;
+                }
                 return;
             }
             crate::jobs::progress_marker(ui);
@@ -514,8 +611,12 @@ impl Browser {
         if waiting {
             if unavailable {
                 ui.label("Reconnect to the saved library to load this selection.");
-                if let Some(error)=&self.error {ui.add(egui::Label::new(error).wrap());}
-                if ui.button("Reconnect saved library").clicked() {self.start_refresh(true);}
+                if let Some(error) = &self.error {
+                    ui.add(egui::Label::new(error).wrap());
+                }
+                if ui.button("Reconnect saved library").clicked() {
+                    self.start_refresh(true);
+                }
                 return;
             }
             crate::jobs::progress_marker(ui);
@@ -545,8 +646,11 @@ impl Browser {
                         for index in row * columns..((row + 1) * columns).min(self.entries.len()) {
                             let entry = &self.entries[index];
                             let selected = self.selected.as_ref().is_some_and(|s| s.id == entry.id);
-                            let response = if self.visual_results { item_tile(ui, services, entry, selected, width) } else { item_row(ui, services, entry, selected) };
-                            if response.clicked() { chosen = Some(entry.clone()); }
+                            let response =
+                                if self.visual_results { item_tile(ui, services, entry, selected, width) } else { item_row(ui, services, entry, selected) };
+                            if response.clicked() {
+                                chosen = Some(entry.clone());
+                            }
                         }
                     });
                 }
@@ -592,115 +696,204 @@ impl Browser {
             }
         });
         if !actions.foundation {
-        ui.horizontal_wrapped(|ui| {
-            let unavailable = if actions.preview_here {
-                actions.inline_pin.is_none().then_some("Switch to GitLab main and refresh the matching captured implementation before previewing this registered definition.")
-            } else { actions.source.is_none().then_some(actions.preview_reason.as_str()) };
-            let label = if actions.preview_here { "Preview here" }
-                else if actions.source.is_some() && !actions.actual_preview { "Open structure workspace" } else { "Open actual preview" };
-            if action_button(ui, services, "catalog-preview-action", label, unavailable) {
-                if actions.preview_here {
-                    self.detail_tab = DetailTab::Preview;
-                    if self.specimen.is_none() { self.pending_selection = true; }
-                } else if let Some(source) = &actions.source {
-                    self.workspace_request = Some(super::WorkspaceRequest::selected(source, true));
+            ui.horizontal_wrapped(|ui| {
+                let unavailable = if actions.preview_here {
+                    actions
+                        .inline_pin
+                        .is_none()
+                        .then_some("Switch to GitLab main and refresh the matching captured implementation before previewing this registered definition.")
+                } else {
+                    actions.source.is_none().then_some(actions.preview_reason.as_str())
+                };
+                let label = if actions.preview_here {
+                    "Preview here"
+                } else if actions.source.is_some() && !actions.actual_preview {
+                    "Open structure workspace"
+                } else {
+                    "Open actual preview"
+                };
+                if action_button(ui, services, "catalog-preview-action", label, unavailable) {
+                    if actions.preview_here {
+                        self.detail_tab = DetailTab::Preview;
+                        if self.specimen.is_none() {
+                            self.pending_selection = true;
+                        }
+                    } else if let Some(source) = &actions.source {
+                        self.workspace_request = Some(super::WorkspaceRequest::selected(source, true));
+                    }
                 }
-            }
-            if actions.preview_here && action_button(ui, services, "catalog-workspace-preview-action", "Open in Design",
-                actions.inline_pin.is_none().then_some("Refresh the matching canonical implementation before opening this preview.")) {
-                if let Some(pin) = &actions.inline_pin {
-                    self.workspace_request = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                if actions.preview_here
+                    && action_button(
+                        ui,
+                        services,
+                        "catalog-workspace-preview-action",
+                        "Open in Design",
+                        actions.inline_pin.is_none().then_some("Refresh the matching canonical implementation before opening this preview."),
+                    )
+                {
+                    if let Some(pin) = &actions.inline_pin {
+                        self.workspace_request = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                    }
                 }
-            }
-            if !actions.preview_choices.is_empty() {
-                if let Some(request) = preview_choices_menu(ui, services, &actions.preview_choices) { self.workspace_request = Some(request); }
-            }
-            let snapshot = self.summary.as_ref().map(|summary| &summary["snapshot"]).unwrap_or(&Value::Null);
-            // A protected composition can use the existing canonical canvas route
-            // without granting editable fields or adopting a temporary/local view.
-            let protected_canvas = !actions.editable && actions.workspace_reason.is_none()
-                && self.mode == "committed" && snapshot["mode"] == "committed"
-                && entry.kind == "authored-composition" && entry.classification_status == "classified"
-                && actions.source.as_deref() == Some(entry.source_path.as_str())
-                && entry.source_digest.len() == 64 && entry.source_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && snapshot["canonicalCommit"].as_str().is_some_and(|commit| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                && snapshot["observations"].as_array().is_some_and(|observations| observations.iter().any(|observation|
-                    observation["id"] == entry.observation_id && observation["kind"] == "git"
-                        && observation["revision"] == snapshot["canonicalCommit"]))
-                && self.specimen.as_ref().is_some_and(|specimen| support::matches(&entry, specimen)
-                    && specimen["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1"
-                    && specimen["workspaceProfile"]["kind"] != "registered-specimen");
-            let unavailable = actions.workspace_reason.as_deref().or_else(|| (!actions.editable && !protected_canvas).then_some(actions.edit_reason.as_str()));
-            let label = if self.mode == "local" { "Open canonical draft" }
-                else if protected_canvas { "Open protected canvas" } else { "Open on canvas" };
-            if action_button(ui, services, "catalog-edit-action", label, unavailable) {
-                if let Some(source) = &actions.source {
-                    self.workspace_request = Some(super::WorkspaceRequest::selected(source, false));
+                if !actions.preview_choices.is_empty() {
+                    if let Some(request) = preview_choices_menu(ui, services, &actions.preview_choices) {
+                        self.workspace_request = Some(request);
+                    }
                 }
+                let snapshot = self.summary.as_ref().map(|summary| &summary["snapshot"]).unwrap_or(&Value::Null);
+                // A protected composition can use the existing canonical canvas route
+                // without granting editable fields or adopting a temporary/local view.
+                let protected_canvas = !actions.editable
+                    && actions.workspace_reason.is_none()
+                    && self.mode == "committed"
+                    && snapshot["mode"] == "committed"
+                    && entry.kind == "authored-composition"
+                    && entry.classification_status == "classified"
+                    && actions.source.as_deref() == Some(entry.source_path.as_str())
+                    && entry.source_digest.len() == 64
+                    && entry.source_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && snapshot["canonicalCommit"].as_str().is_some_and(|commit| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    && snapshot["observations"].as_array().is_some_and(|observations| {
+                        observations.iter().any(|observation| {
+                            observation["id"] == entry.observation_id && observation["kind"] == "git" && observation["revision"] == snapshot["canonicalCommit"]
+                        })
+                    })
+                    && self.specimen.as_ref().is_some_and(|specimen| {
+                        support::matches(&entry, specimen)
+                            && specimen["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1"
+                            && specimen["workspaceProfile"]["kind"] != "registered-specimen"
+                    });
+                let unavailable =
+                    actions.workspace_reason.as_deref().or_else(|| (!actions.editable && !protected_canvas).then_some(actions.edit_reason.as_str()));
+                let label = if self.mode == "local" {
+                    "Open canonical draft"
+                } else if protected_canvas {
+                    "Open protected canvas"
+                } else {
+                    "Open on canvas"
+                };
+                if action_button(ui, services, "catalog-edit-action", label, unavailable) {
+                    if let Some(source) = &actions.source {
+                        self.workspace_request = Some(super::WorkspaceRequest::selected(source, false));
+                    }
+                }
+            });
+            ui.label(RichText::new(&actions.preview_reason).small().color(theme.text_secondary));
+            if !actions.editable {
+                ui.small(&actions.edit_reason);
             }
-        });
-        ui.label(RichText::new(&actions.preview_reason).small().color(theme.text_secondary));
-        if !actions.editable { ui.small(&actions.edit_reason); }
         }
         for diagnostic in entry.diagnostics.iter().take(3) {
-            if let Some(message) = diagnostic["message"].as_str() { ui.small(message); }
+            if let Some(message) = diagnostic["message"].as_str() {
+                ui.small(message);
+            }
         }
         if actions.source.is_some() && self.mode == "local" {
             ui.small("Workspace actions open canonical source. The local overlay remains a data preview.");
         }
         if matches!(entry.kind.as_str(), "theme" | "design-token" | "token") {
             ui.horizontal_wrapped(|ui| {
-            if action_button(ui, services, "catalog-token-sheet-action", "Preview token sheet", (!actions.inspection_available).then_some("Load the selected values before previewing the token sheet.")) {
-                self.specimen_canvas = None;
-                self.detail_tab = DetailTab::Preview;
-            }
-            if action_button(ui, services, "catalog-local-copy-action", if entry.kind == "theme" { "Create local theme library" } else { "Create editable token" }, actions.copy_reason.as_deref()) {
-                if let (Some(summary), Some(specimen)) = (&self.summary, &self.specimen) {
-                    self.local_design_error = None;
-                    match super::local_library::create(&entry, specimen, &summary["snapshot"], &self.theme_mode) {
-                        Ok(document) => self.local_design_request = Some(document),
-                        Err(error) => self.local_design_error = Some(error),
+                if action_button(
+                    ui,
+                    services,
+                    "catalog-token-sheet-action",
+                    "Preview token sheet",
+                    (!actions.inspection_available).then_some("Load the selected values before previewing the token sheet."),
+                ) {
+                    self.specimen_canvas = None;
+                    self.detail_tab = DetailTab::Preview;
+                }
+                if action_button(
+                    ui,
+                    services,
+                    "catalog-local-copy-action",
+                    if entry.kind == "theme" { "Create local theme library" } else { "Create editable token" },
+                    actions.copy_reason.as_deref(),
+                ) {
+                    if let (Some(summary), Some(specimen)) = (&self.summary, &self.specimen) {
+                        self.local_design_error = None;
+                        match super::local_library::create(&entry, specimen, &summary["snapshot"], &self.theme_mode) {
+                            Ok(document) => self.local_design_request = Some(document),
+                            Err(error) => self.local_design_error = Some(error),
+                        }
                     }
                 }
-            }
             });
-            ui.small(actions.copy_reason.as_deref().unwrap_or("Creates an ordinary local design with editable variables. Save it normally; source submission is not enabled."));
+            ui.small(
+                actions
+                    .copy_reason
+                    .as_deref()
+                    .unwrap_or("Creates an ordinary local design with editable variables. Save it normally; source submission is not enabled."),
+            );
         }
         if entry.kind == "theme" {
             if action_button(ui, services, "catalog-theme-preview-action", "Preview theme on canonical web frame", actions.theme_reason.as_deref()) {
                 self.workspace_theme = Some(entry.semantic_id.clone());
                 self.workspace_request = Some(super::WorkspaceRequest::selected("config/experience/living-canvas-frame/cityos-web.input.json", true));
             }
-            ui.small(actions.theme_reason.as_deref().unwrap_or("Applies this canonical theme to the registered web-frame fixture. The token sheet below shows the captured values."));
+            ui.small(
+                actions
+                    .theme_reason
+                    .as_deref()
+                    .unwrap_or("Applies this canonical theme to the registered web-frame fixture. The token sheet below shows the captured values."),
+            );
         }
         if let Some(error) = &self.local_design_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
-            if ui.button("Return to current design").clicked() { self.open = false; }
+            if ui.button("Return to current design").clicked() {
+                self.open = false;
+            }
         }
         let specimen = self.specimen.as_ref().filter(|s| support::matches(&entry, s));
         ui.horizontal_wrapped(|ui| {
-            if action_button(ui, services, "catalog-inspection-action", if self.specimen_canvas.is_some() { "Reload inspection canvas" } else { "Load inspection canvas" }, specimen.is_none().then_some("Load this resource before opening its inspection canvas.")) {
+            if action_button(
+                ui,
+                services,
+                "catalog-inspection-action",
+                if self.specimen_canvas.is_some() { "Reload inspection canvas" } else { "Load inspection canvas" },
+                specimen.is_none().then_some("Load this resource before opening its inspection canvas."),
+            ) {
                 if let Some(specimen) = specimen {
                     self.specimen_canvas = Some(services.renderer(super::canvas::build_document(&entry, specimen, &self.theme_mode)));
                     self.detail_tab = DetailTab::Preview;
                 }
             }
-            if self.specimen_canvas.is_some() && ui.button("Back to specimen").clicked() { self.specimen_canvas = None; }
+            if self.specimen_canvas.is_some() && ui.button("Back to specimen").clicked() {
+                self.specimen_canvas = None;
+            }
         });
         if let Some(modes) = specimen.and_then(|s| s["presentation"]["modes"].as_object()) {
-            if !modes.contains_key(&self.theme_mode) { self.theme_mode = modes.keys().next().cloned().unwrap_or_default(); }
+            if !modes.contains_key(&self.theme_mode) {
+                self.theme_mode = modes.keys().next().cloned().unwrap_or_default();
+            }
             let old = self.theme_mode.clone();
             ui.horizontal_wrapped(|ui| {
                 ui.label("Token sheet mode");
-                for key in modes.keys() { ui.selectable_value(&mut self.theme_mode, key.clone(), preview::humanize(key)); }
+                for key in modes.keys() {
+                    ui.selectable_value(&mut self.theme_mode, key.clone(), preview::humanize(key));
+                }
             });
             if old != self.theme_mode && self.specimen_canvas.is_some() {
-                if let Some(specimen) = specimen { self.specimen_canvas = Some(services.renderer(super::canvas::build_document(&entry, specimen, &self.theme_mode))); }
+                if let Some(specimen) = specimen {
+                    self.specimen_canvas = Some(services.renderer(super::canvas::build_document(&entry, specimen, &self.theme_mode)));
+                }
             }
         }
         ui.add_space(theme.catalog_gap);
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.detail_tab, DetailTab::Preview, if actions.foundation { if self.specimen_canvas.is_some() { "Inspection canvas" } else { "Token sheet" } } else { "Specimen" });
+            ui.selectable_value(
+                &mut self.detail_tab,
+                DetailTab::Preview,
+                if actions.foundation {
+                    if self.specimen_canvas.is_some() {
+                        "Inspection canvas"
+                    } else {
+                        "Token sheet"
+                    }
+                } else {
+                    "Specimen"
+                },
+            );
             ui.selectable_value(&mut self.detail_tab, DetailTab::Inspector, "Source & support");
             ui.selectable_value(&mut self.detail_tab, DetailTab::Source, "Raw data");
         });
@@ -712,10 +905,14 @@ impl Browser {
             }
             if let Some(pin) = actions.inline_pin {
                 ui.label("Actual renderer · pinned captured source · temporary preview");
-                if !self.inline_status.is_empty(){ui.small(&self.inline_status);}
-                let (_,rect)=ui.allocate_space(egui::vec2(ui.available_width().max(1.),360.0));
+                if !self.inline_status.is_empty() {
+                    ui.small(&self.inline_status);
+                }
+                let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width().max(1.), 360.0));
                 let rect = rect.intersect(ui.clip_rect());
-                if rect.width() > 1.0 && rect.height() > 1.0 { self.inline_preview=Some((pin,rect)); }
+                if rect.width() > 1.0 && rect.height() > 1.0 {
+                    self.inline_preview = Some((pin, rect));
+                }
                 return;
             }
         }
@@ -727,7 +924,9 @@ impl Browser {
                     if let Some(error) = &self.preview_error {
                         ui.label("Captured source could not load.");
                         ui.small(error);
-                        if ui.button("Retry captured source").clicked() { self.pending_selection = true; }
+                        if ui.button("Retry captured source").clicked() {
+                            self.pending_selection = true;
+                        }
                     } else if self.source_text.is_empty() {
                         ui.label("Captured source is loading.");
                     } else {
@@ -796,7 +995,9 @@ impl Browser {
     fn level_overview(&mut self, ui: &mut Ui) {
         let services = self.services;
         ui.strong(support::LEVEL_OVERVIEW_TITLE);
-        ui.small("L0–L9 captured source occurrences and data specimens. Unknown counts are not treated as zero. Selected workspace actions are reported separately.");
+        ui.small(
+            "L0–L9 captured source occurrences and data specimens. Unknown counts are not treated as zero. Selected workspace actions are reported separately.",
+        );
         ui.small(support::LEVEL_EDITING_TOTALS);
         for level in support::levels(self.summary.as_ref()) {
             Frame::new().inner_margin(egui::Margin::symmetric(0, 6)).show(ui, |ui| {
@@ -814,15 +1015,20 @@ impl Browser {
                         chip(ui, services, &format!("{label} · {number}"));
                     }
                 });
-                ui.push_id(&level.id, |ui| ui.collapsing("Captured read-only source flags", |ui| {
-                    for (label, number) in [("Renderer-qualified source flags", level.renderers), ("Editable source flags", level.editable)] {
-                        let number = number.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
-                        ui.small(format!("{label} · {number}"));
-                    }
-                    ui.small("These v1 accounting flags are not totals of installed preview adapters or local draft support.");
-                }));
-                if level.count == Some(0) { ui.small("No classified records are reported at this level."); }
-                else if level.count.is_none() { ui.small("The capture does not report this level; refresh or inspect source accounting."); }
+                ui.push_id(&level.id, |ui| {
+                    ui.collapsing("Captured read-only source flags", |ui| {
+                        for (label, number) in [("Renderer-qualified source flags", level.renderers), ("Editable source flags", level.editable)] {
+                            let number = number.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
+                            ui.small(format!("{label} · {number}"));
+                        }
+                        ui.small("These v1 accounting flags are not totals of installed preview adapters or local draft support.");
+                    })
+                });
+                if level.count == Some(0) {
+                    ui.small("No classified records are reported at this level.");
+                } else if level.count.is_none() {
+                    ui.small("The capture does not report this level; refresh or inspect source accounting.");
+                }
             });
         }
     }

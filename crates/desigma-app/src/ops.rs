@@ -9,8 +9,8 @@ use crate::io;
 use crate::layout;
 use crate::theme;
 use crate::util::*;
-use desigma_doc::*;
 use desigma_cityos::history::CityosHistory;
+use desigma_doc::*;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,8 +196,14 @@ impl App {
     }
 
     pub fn undo(&mut self) {
-        if self.cityos_submission_frozen() { self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true); return; }
-        if self.doc.cityos.is_some() { self.request_cityos_history(false); return; }
+        if self.cityos_submission_frozen() {
+            self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true);
+            return;
+        }
+        if self.doc.cityos.is_some() {
+            self.request_cityos_history(false);
+            return;
+        }
         if self.try_undo_restore() {
             return;
         }
@@ -212,8 +218,14 @@ impl App {
     }
 
     pub fn redo(&mut self) {
-        if self.cityos_submission_frozen() { self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true); return; }
-        if self.doc.cityos.is_some() { self.request_cityos_history(true); return; }
+        if self.cityos_submission_frozen() {
+            self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true);
+            return;
+        }
+        if self.doc.cityos.is_some() {
+            self.request_cityos_history(true);
+            return;
+        }
         if self.try_redo_restore() {
             return;
         }
@@ -228,7 +240,9 @@ impl App {
     }
 
     fn request_cityos_history(&mut self, redo: bool) {
-        if self.ui.cityos_history_request.is_some() { return; }
+        if self.ui.cityos_history_request.is_some() {
+            return;
+        }
         match self.hist.prepare_cityos(&self.doc, redo) {
             Ok(step) => self.ui.cityos_history_request = step,
             Err(error) => self.show_toast(format!("Bound history is unavailable: {error}"), true),
@@ -795,15 +809,14 @@ impl App {
 
     /// Run the ownership transfer only after every fallible outgoing save.
     /// An uncalled closure retains the incoming session and active history.
-    pub(crate) fn replace_document_transaction<T>(
-        &mut self,
-        transfer: impl FnOnce(&mut Self) -> (Document, Option<PathBuf>, T),
-    ) -> Option<T> {
+    pub(crate) fn replace_document_transaction<T>(&mut self, transfer: impl FnOnce(&mut Self) -> (Document, Option<PathBuf>, T)) -> Option<T> {
         crate::decks::ui::flush_notes(self);
         self.finish_variable_editors();
         // Pending edits of the library file being left are saved first (from the live state, not an old version).
         self.exit_version_view();
-        if !self.flush_autosave(){return None;}
+        if !self.flush_autosave() {
+            return None;
+        }
         self.stop_plugin();
         let (doc, path, result) = transfer(self);
         self.lib_file = None;
@@ -820,11 +833,7 @@ impl App {
         self.selection.clear();
         self.hover = None;
         self.file_path = path;
-        self.autosave = crate::home::Autosave {
-            seen_rev: self.canvas.tiles.rev(),
-            saved_hash: crate::home::doc_hash(&self.doc),
-            ..Default::default()
-        };
+        self.autosave = crate::home::Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: crate::home::doc_hash(&self.doc), ..Default::default() };
         self.canvas.reset_interaction();
         // a design tool means nothing on a board and the other way round
         self.tool = Tool::Move;
@@ -848,14 +857,25 @@ impl App {
     pub fn open_path(&mut self, p: PathBuf) {
         if p.extension().is_some_and(|extension| extension.eq_ignore_ascii_case(io::NATIVE_EXT)) {
             if let Some(library) = self.lib.clone() {
-                let owned = crate::io::inside_library_storage(&p, library.root())
-                    .and_then(|owned| if owned {
-                        library.file_at_path(&p).map_err(|error| error.to_string()).and_then(|file|
-                            file.map(Some).ok_or_else(|| "Open this managed document through its library or version history.".into()))
-                    } else { Ok(None) });
+                let owned = crate::io::inside_library_storage(&p, library.root()).and_then(|owned| {
+                    if owned {
+                        library
+                            .file_at_path(&p)
+                            .map_err(|error| error.to_string())
+                            .and_then(|file| file.map(Some).ok_or_else(|| "Open this managed document through its library or version history.".into()))
+                    } else {
+                        Ok(None)
+                    }
+                });
                 match owned {
-                    Ok(Some(file)) => { self.open_library_file(&file.id); return; }
-                    Err(error) => { self.show_toast(error, true); return; }
+                    Ok(Some(file)) => {
+                        self.open_library_file(&file.id);
+                        return;
+                    }
+                    Err(error) => {
+                        self.show_toast(error, true);
+                        return;
+                    }
                     Ok(None) => {}
                 }
             }
@@ -893,8 +913,12 @@ impl App {
                 let name = doc.name.clone();
                 // An SVG becomes a new unsaved document, never overwritten by Save.
                 let svg = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-                if !self.replace_document(doc, (!svg).then_some(p)){return;}
-                if !svg { self.autosave.external_fingerprint = Some(fingerprint); }
+                if !self.replace_document(doc, (!svg).then_some(p)) {
+                    return;
+                }
+                if !svg {
+                    self.autosave.external_fingerprint = Some(fingerprint);
+                }
                 self.show_toast(format!("Opened {name}"), false);
             }
             Err(e) => self.show_toast(e, true),
@@ -912,11 +936,9 @@ impl App {
         // Ordinary external documents are not covered by flush_autosave.
         // Never replace an unsaved design, or silently overwrite an import
         // source such as SVG/JSON, just to open a portable checkpoint.
-        let has_editor_document = self.home.is_none() || self.file_path.is_some()
-            || self.hist.can_undo() || self.hist.can_redo();
+        let has_editor_document = self.home.is_none() || self.file_path.is_some() || self.hist.can_undo() || self.hist.can_redo();
         if self.lib_file.is_none() && has_editor_document {
-            let native = self.file_path.as_ref()
-                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(io::NATIVE_EXT)));
+            let native = self.file_path.as_ref().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(io::NATIVE_EXT)));
             let changed = crate::home::doc_hash(&self.doc) != self.autosave.saved_hash;
             if self.file_path.is_none() || changed && native.is_none() {
                 self.show_toast("Save the current document before opening a checkpoint", true);
@@ -931,7 +953,9 @@ impl App {
                 }
             }
         }
-        if !self.flush_autosave() { return; }
+        if !self.flush_autosave() {
+            return;
+        }
         let result = (|| {
             let target = match self.home_target() {
                 Some(target) => Some(target),
@@ -987,7 +1011,9 @@ impl App {
     pub(crate) fn preserve_before_local_design(&mut self) -> Result<(), String> {
         crate::decks::ui::flush_notes(self);
         self.finish_variable_editors();
-        if self.lib_file.is_some() { return self.save_library_file(); }
+        if self.lib_file.is_some() {
+            return self.save_library_file();
+        }
         if let Some(path) = &self.file_path {
             if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case(io::NATIVE_EXT)) {
                 return Err("Save the current design as a native file before creating another design. Your imported source was preserved.".into());

@@ -8,12 +8,7 @@ fn acknowledgement_remaining(now: Instant, started: Option<Instant>) -> Option<D
     started.map(|at| RENDER_ACK_TIMEOUT.saturating_sub(now.saturating_duration_since(at)))
 }
 
-pub fn progress_delay(
-    now: Instant,
-    busy: bool,
-    visible_pending: bool,
-    render_started: Option<Instant>,
-) -> Option<Duration> {
+pub fn progress_delay(now: Instant, busy: bool, visible_pending: bool, render_started: Option<Instant>) -> Option<Duration> {
     // Helper replies and pending debounced work still need polling. WebView IPC
     // wakes egui independently, so its receipt needs only a deadline wakeup.
     let progress = (busy || visible_pending).then_some(PROGRESS_POLL);
@@ -33,8 +28,7 @@ mod tests {
         let started = Instant::now();
         for seconds in [0, 1, 15, 29, 30, 31] {
             let elapsed = Duration::from_secs(seconds);
-            assert_eq!(progress_delay(started + elapsed, false, false, Some(started)),
-                Some(RENDER_ACK_TIMEOUT.saturating_sub(elapsed)));
+            assert_eq!(progress_delay(started + elapsed, false, false, Some(started)), Some(RENDER_ACK_TIMEOUT.saturating_sub(elapsed)));
         }
     }
 
@@ -44,10 +38,8 @@ mod tests {
         for (busy, pending) in [(true, false), (false, true), (true, true)] {
             assert_eq!(progress_delay(started, busy, pending, None), Some(PROGRESS_POLL));
             assert_eq!(progress_delay(started, busy, pending, Some(started)), Some(PROGRESS_POLL));
-            assert_eq!(progress_delay(started + Duration::from_millis(29_950), busy, pending, Some(started)),
-                Some(Duration::from_millis(50)));
-            assert_eq!(progress_delay(started + RENDER_ACK_TIMEOUT, busy, pending, Some(started)),
-                Some(Duration::ZERO));
+            assert_eq!(progress_delay(started + Duration::from_millis(29_950), busy, pending, Some(started)), Some(Duration::from_millis(50)));
+            assert_eq!(progress_delay(started + RENDER_ACK_TIMEOUT, busy, pending, Some(started)), Some(Duration::ZERO));
         }
     }
 

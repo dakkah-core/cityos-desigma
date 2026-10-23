@@ -72,18 +72,14 @@ impl DocumentCheckpoint {
     /// The caller must validate/authorize the incoming baseline before using this
     /// local hook. Persist the candidate checkpoint before installing it in the UI.
     pub fn install_baseline(&mut self, document: Document) {
-        self.retained.push(RetainedHistory {
-            document: std::mem::replace(&mut self.document, document),
-            history: self.history.seal(),
-        });
+        self.retained.push(RetainedHistory { document: std::mem::replace(&mut self.document, document), history: self.history.seal() });
     }
 
     /// All payload roots, including documents reachable only from undo/redo or
     /// inactive baseline history. No garbage-collection authority is implied.
     pub fn dependency_pins(&self) -> Vec<String> {
         let mut roots = BTreeSet::new();
-        let states = std::iter::once((&self.document, &self.history))
-            .chain(self.retained.iter().map(|s| (&s.document, &s.history)));
+        let states = std::iter::once((&self.document, &self.history)).chain(self.retained.iter().map(|s| (&s.document, &s.history)));
         for (document, history) in states {
             for document in std::iter::once(document).chain(history.retained_documents()) {
                 if let Some(binding) = &document.cityos {
@@ -132,9 +128,14 @@ mod tests {
             let mut document = Document::new(hash);
             let semantic = serde_json::json!({"root":{"props":{"elevation":"flat"}}});
             document.cityos = Some(CityosBinding {
-                schema_version: "cityos.design-exchange.v3".into(), document_id: "d".into(), draft_id: "draft".into(),
+                schema_version: "cityos.design-exchange.v3".into(),
+                document_id: "d".into(),
+                draft_id: "draft".into(),
                 base: CityosBase::CanonicalGit { repository_id: "repo".into(), commit: "a".repeat(40) },
-                semantic_base: semantic.clone(), dependency_pins: vec![hash.into()], occurrences: Default::default(), exchange_v2: None,
+                semantic_base: semantic.clone(),
+                dependency_pins: vec![hash.into()],
+                occurrences: Default::default(),
+                exchange_v2: None,
                 exchange_v3: Some(serde_json::json!({
                     "schemaVersion":"cityos.design-exchange.v3", "semanticContract":"fixture", "documentId":"d", "draftId":"draft", "draftRevision":0,
                     "base":{"kind":"canonical-git", "repositoryId":"repo", "commit":"a".repeat(40)},
@@ -143,7 +144,8 @@ mod tests {
             });
             document
         }
-        let first_hash = "b".repeat(64); let second_hash = "c".repeat(64);
+        let first_hash = "b".repeat(64);
+        let second_hash = "c".repeat(64);
         let mut current = document(&first_hash);
         let mut history = History::default();
         history.exec(&mut current, Command::CityosInstall { document: Box::new(document(&second_hash)) }).unwrap();

@@ -135,17 +135,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--cityos-frame" => o.cityos_frame=true,
-            "--cityos-host-diagnostic" => o.cityos_host_diagnostic=true,
+            "--cityos-frame" => o.cityos_frame = true,
+            "--cityos-host-diagnostic" => o.cityos_host_diagnostic = true,
             "--cityos-performance-report" => {
                 if o.cityos_performance_report.is_some() {
                     return Err("--cityos-performance-report may only be given once".into());
                 }
-                let path = it.next().filter(|p| !p.trim().is_empty() && !p.starts_with('-'))
-                    .ok_or("--cityos-performance-report needs an output path")?;
+                let path = it.next().filter(|p| !p.trim().is_empty() && !p.starts_with('-')).ok_or("--cityos-performance-report needs an output path")?;
                 o.cityos_performance_report = Some(path.into());
             }
-            "--cityos-verify-workspace" => o.cityos_verify_workspace=Some(it.next().ok_or("--cityos-verify-workspace needs a fixture/evidence directory")?.into()),
+            "--cityos-verify-workspace" => {
+                o.cityos_verify_workspace = Some(it.next().ok_or("--cityos-verify-workspace needs a fixture/evidence directory")?.into())
+            }
             "--cityos-repository" => o.cityos_repository = Some(it.next().ok_or("--cityos-repository needs a path")?.into()),
             "--cityos-reader" => o.cityos_reader = Some(it.next().ok_or("--cityos-reader needs the packaged reader path")?.into()),
             "--cityos-node" => o.cityos_node = Some(it.next().ok_or("--cityos-node needs a Node executable")?.into()),
@@ -275,7 +276,9 @@ mod tests {
             vec!["--cityos-performance-report", "  "],
             vec!["--cityos-performance-report", "--gpu"],
             vec!["--cityos-performance-report", "a.json", "--cityos-performance-report", "b.json"],
-        ] { assert!(p(&args).is_err(), "{args:?}"); }
+        ] {
+            assert!(p(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

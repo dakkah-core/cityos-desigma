@@ -36,10 +36,12 @@ fn autosave_app() -> (crate::app::App, Library, TmpDir, String) {
     let dir = TmpDir::new();
     let library = Library::open(&dir.0).unwrap();
     let project = library.create_project("Autosave").unwrap();
-    let mut doc = Document::new("History draft"); doc.add_page("Page");
+    let mut doc = Document::new("History draft");
+    doc.add_page("Page");
     let file = library.create_file(&project.id, None, &doc.name, &doc).unwrap();
     let mut app = crate::app::App::new(doc);
-    app.lib = Some(library.clone()); app.open_library_file(&file.id);
+    app.lib = Some(library.clone());
+    app.open_library_file(&file.id);
     crate::home::thumb::finish_library_jobs(&dir.0);
     (app, library, dir, file.id)
 }
@@ -64,10 +66,13 @@ fn history_only_autosave_preserves_redo_when_edit_undo_returns_to_saved_document
     edit_then_undo_same_document(&mut app);
     assert_eq!(app.canvas.tiles.rev(), revision, "history events do not require a canvas invalidation");
     let ctx = egui::Context::default();
-    app.now = 10.; app.autosave_tick(&ctx);
-    app.now = 10.4; app.autosave_tick(&ctx);
+    app.now = 10.;
+    app.autosave_tick(&ctx);
+    app.now = 10.4;
+    app.autosave_tick(&ctx);
     assert!(app.autosave.pending());
-    app.now = 12.; app.autosave_tick(&ctx);
+    app.now = 12.;
+    app.autosave_tick(&ctx);
     assert_eq!(app.autosave.saves, 1);
     assert_eq!(app.autosave.saved_hash, saved_hash);
     assert_ne!(app.autosave.saved_history_hash, saved_history);
@@ -88,17 +93,25 @@ fn history_only_failed_autosave_retries_without_advancing_persisted_history_or_f
     let bytes = std::fs::read(&manifest).unwrap();
     std::fs::write(&manifest, b"{damaged manifest").unwrap();
     let ctx = egui::Context::default();
-    app.now = 10.; app.autosave_tick(&ctx);
-    app.now = 10.4; app.autosave_tick(&ctx);
-    app.now = 12.; app.autosave_tick(&ctx);
+    app.now = 10.;
+    app.autosave_tick(&ctx);
+    app.now = 10.4;
+    app.autosave_tick(&ctx);
+    app.now = 12.;
+    app.autosave_tick(&ctx);
     assert_eq!((app.autosave.saved_hash, app.autosave.saved_history_hash, app.autosave.saved_checkpoint_fingerprint.clone()), saved);
-    assert!(app.autosave.pending()); assert!(app.hist.can_redo());
-    assert_eq!(app.autosave.failures, 1); assert_eq!(app.autosave.retry_at, Some(14.));
+    assert!(app.autosave.pending());
+    assert!(app.hist.can_redo());
+    assert_eq!(app.autosave.failures, 1);
+    assert_eq!(app.autosave.retry_at, Some(14.));
     std::fs::write(&manifest, bytes).unwrap();
-    app.now = 13.; app.autosave_tick(&ctx);
+    app.now = 13.;
+    app.autosave_tick(&ctx);
     assert_eq!(app.autosave.saves, 0);
-    app.now = 14.; app.autosave_tick(&ctx);
-    assert_eq!(app.autosave.saves, 1); assert_eq!(app.autosave.failures, 0);
+    app.now = 14.;
+    app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saves, 1);
+    assert_eq!(app.autosave.failures, 0);
     assert_eq!(app.autosave.retry_at, None);
     assert!(library.load_checkpoint(&file).unwrap().history.can_redo());
     crate::home::thumb::finish_library_jobs(&dir.0);
@@ -109,7 +122,8 @@ fn history_only_flush_persists_redo_and_missing_checkpoint_observation_fails_clo
     let (mut app, library, _dir, file) = autosave_app();
     edit_then_undo_same_document(&mut app);
     let fingerprint = app.autosave.saved_checkpoint_fingerprint.take().unwrap();
-    assert!(!app.flush_autosave()); assert!(app.autosave.pending());
+    assert!(!app.flush_autosave());
+    assert!(app.autosave.pending());
     assert!(!library.load_checkpoint(&file).unwrap().history.can_redo());
     assert!(app.autosave.saved_checkpoint_fingerprint.is_none());
     app.autosave.saved_checkpoint_fingerprint = Some(fingerprint);
@@ -120,18 +134,24 @@ fn history_only_flush_persists_redo_and_missing_checkpoint_observation_fails_clo
 #[test]
 fn history_fence_change_with_identical_serialized_stacks_does_not_rewrite_checkpoint() {
     let (mut app, library, _dir, file) = autosave_app();
-    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name.push_str(" changed");
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone();
+    node.name.push_str(" changed");
     app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
     app.save_library_file().unwrap();
     let before = library.load_checkpoint(&file).unwrap().to_json().unwrap();
     let identity = app.hist.change_identity();
-    assert!(app.hist.undo(&mut app.doc).unwrap()); assert!(app.hist.redo(&mut app.doc).unwrap());
+    assert!(app.hist.undo(&mut app.doc).unwrap());
+    assert!(app.hist.redo(&mut app.doc).unwrap());
     assert!(!std::sync::Arc::ptr_eq(&identity, &app.hist.change_identity()));
     let ctx = egui::Context::default();
-    app.now = 10.; app.autosave_tick(&ctx);
-    app.now = 10.4; app.autosave_tick(&ctx);
-    app.now = 20.; app.autosave_tick(&ctx);
-    assert!(app.autosave.changed_at.is_none()); assert_eq!(app.autosave.saves, 0);
+    app.now = 10.;
+    app.autosave_tick(&ctx);
+    app.now = 10.4;
+    app.autosave_tick(&ctx);
+    app.now = 20.;
+    app.autosave_tick(&ctx);
+    assert!(app.autosave.changed_at.is_none());
+    assert_eq!(app.autosave.saves, 0);
     assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), before);
 }
 
@@ -147,7 +167,8 @@ fn library_observation_precedes_entry_name_normalization_and_rejects_a_newer_wri
     assert_eq!(app.autosave.saved_checkpoint_fingerprint.as_deref(), Some(fingerprint.as_str()));
     assert!(app.flush_autosave());
     assert_eq!(library.load_checkpoint(&file).unwrap().to_json().unwrap(), checkpoint.to_json().unwrap());
-    let mut newer = checkpoint.document; newer.name = "Other writer".into();
+    let mut newer = checkpoint.document;
+    newer.name = "Other writer".into();
     let newer_fingerprint = library.save_file_with_history_expected(&file, &newer, &checkpoint.history, &fingerprint).unwrap();
     app.doc.name = "Keep local candidate".into();
     assert!(app.save_library_file().is_err());
@@ -158,15 +179,20 @@ fn library_observation_precedes_entry_name_normalization_and_rejects_a_newer_wri
 
 #[test]
 fn external_saves_keep_observed_bytes_and_never_claim_durable_history() {
-    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
-    let mut doc = Document::new("External"); doc.add_page("Page");
+    let dir = TmpDir::new();
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let mut doc = Document::new("External");
+    doc.add_page("Page");
     let (path, fingerprint) = crate::io::save_path_observed(&doc, &dir.0.join("external.desigma")).unwrap();
-    let mut app = crate::app::App::new(doc); app.open_path(path.clone());
+    let mut app = crate::app::App::new(doc);
+    app.open_path(path.clone());
     assert_eq!(app.autosave.external_fingerprint.as_deref(), Some(fingerprint.as_str()));
-    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name = "Edited".into();
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone();
+    node.name = "Edited".into();
     app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
     app.save_external_to(&path).unwrap();
-    assert!(app.hist.can_undo()); assert!(app.autosave.saved_history_hash.is_none());
+    assert!(app.hist.can_undo());
+    assert!(app.autosave.saved_history_hash.is_none());
     assert!(app.autosave.saved_checkpoint_fingerprint.is_none());
     assert_ne!(app.autosave.external_fingerprint.as_deref(), Some(fingerprint.as_str()));
     assert_eq!(app.autosave.external_fingerprint.as_ref().unwrap(), &crate::io::file_fingerprint(&path).unwrap());
@@ -178,17 +204,22 @@ fn external_saves_keep_observed_bytes_and_never_claim_durable_history() {
 
 #[test]
 fn external_same_target_save_as_rejects_stale_observation_but_explicit_copy_observes_its_write() {
-    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
-    let mut doc = Document::new("Original"); doc.add_page("Page");
+    let dir = TmpDir::new();
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let mut doc = Document::new("Original");
+    doc.add_page("Page");
     let (path, fingerprint) = crate::io::save_path_observed(&doc, &dir.0.join("external.desigma")).unwrap();
-    let mut app = crate::app::App::new(doc.clone()); app.open_path(path.clone());
-    doc.name = "Other writer".into(); crate::io::save_path_observed(&doc, &path).unwrap();
+    let mut app = crate::app::App::new(doc.clone());
+    app.open_path(path.clone());
+    doc.name = "Other writer".into();
+    crate::io::save_path_observed(&doc, &path).unwrap();
     app.doc.name = "Keep local candidate".into();
     assert!(app.save_external_to(&path.with_extension("")).is_err(), "extension normalization must retain CAS");
     assert_eq!(app.doc.name, "Keep local candidate");
     assert_eq!(app.autosave.external_fingerprint.as_deref(), Some(fingerprint.as_str()));
     assert_eq!(crate::io::load_path(&path).unwrap().name, "Other writer");
-    let copy = dir.0.join("copy.desigma"); app.save_external_to(&copy).unwrap();
+    let copy = dir.0.join("copy.desigma");
+    app.save_external_to(&copy).unwrap();
     assert_eq!(app.file_path.as_ref(), Some(&copy));
     assert_eq!(app.autosave.external_fingerprint.as_ref().unwrap(), &crate::io::file_fingerprint(&copy).unwrap());
     assert!(app.autosave.saved_history_hash.is_none());
@@ -196,14 +227,19 @@ fn external_same_target_save_as_rejects_stale_observation_but_explicit_copy_obse
 
 #[test]
 fn local_design_creation_preserves_a_stale_external_candidate_and_the_newer_file() {
-    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
+    let dir = TmpDir::new();
+    std::fs::create_dir_all(&dir.0).unwrap();
     let path = dir.0.join("external.desigma");
-    let mut original = Document::new("Original"); original.add_page("Page");
+    let mut original = Document::new("Original");
+    original.add_page("Page");
     crate::io::save_path(&original, &path).unwrap();
-    let mut app = crate::app::App::new(Document::new("Empty")); app.open_path(path.clone());
+    let mut app = crate::app::App::new(Document::new("Empty"));
+    app.open_path(path.clone());
     let observation = app.autosave.external_fingerprint.clone();
-    original.name = "Newer saved design".into(); crate::io::save_path(&original, &path).unwrap();
-    let before = std::fs::read(&path).unwrap(); app.doc.name = "Keep local edits".into();
+    original.name = "Newer saved design".into();
+    crate::io::save_path(&original, &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    app.doc.name = "Keep local edits".into();
     assert!(app.preserve_before_local_design().unwrap_err().contains("changed on disk"));
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(app.doc.name, "Keep local edits");
@@ -213,8 +249,10 @@ fn local_design_creation_preserves_a_stale_external_candidate_and_the_newer_file
 
 #[test]
 fn external_preservation_never_replaces_an_import_source_with_native_json() {
-    let dir = TmpDir::new(); std::fs::create_dir_all(&dir.0).unwrap();
-    let path = dir.0.join("source.fig"); std::fs::write(&path, b"original import bytes").unwrap();
+    let dir = TmpDir::new();
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let path = dir.0.join("source.fig");
+    std::fs::write(&path, b"original import bytes").unwrap();
     let mut app = crate::app::App::new(Document::new("Imported design"));
     app.file_path = Some(path.clone());
     app.autosave.external_fingerprint = Some(crate::io::file_fingerprint(&path).unwrap());
@@ -240,13 +278,15 @@ fn save_as_cannot_replace_a_managed_library_document_outside_its_checkpoint() {
 #[test]
 fn opening_a_managed_file_path_uses_its_original_checkpoint_instead_of_an_external_copy() {
     let (mut app, library, _dir, file) = autosave_app();
-    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name = "Retain undo".into();
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone();
+    node.name = "Retain undo".into();
     app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
     app.save_library_file().unwrap();
     let entry = library.file(&file).unwrap();
     let path = library.path("projects").join(&entry.project).join("files").join(format!("{file}.desigma"));
     let history = serde_json::to_value(&app.hist).unwrap();
-    let mut other = crate::app::App::new(Document::new("Empty")); other.lib = Some(library.clone());
+    let mut other = crate::app::App::new(Document::new("Empty"));
+    other.lib = Some(library.clone());
     other.open_path(path);
     assert_eq!(other.lib_file.as_ref().map(|file| file.id.as_str()), Some(file.as_str()));
     assert!(other.file_path.is_none());
@@ -258,9 +298,11 @@ fn opening_a_managed_file_path_uses_its_original_checkpoint_instead_of_an_extern
 #[test]
 fn reopening_the_active_library_file_observes_its_own_pending_save_and_history() {
     let (mut app, library, _dir, file) = autosave_app();
-    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone(); node.name = "Unsaved layer change".into();
+    let mut node = app.doc.get(app.doc.pages[0]).unwrap().clone();
+    node.name = "Unsaved layer change".into();
     app.hist.exec(&mut app.doc, desigma_doc::Command::Update { node: Box::new(node) }).unwrap();
-    let expected = app.doc.to_json().unwrap(); let history = serde_json::to_value(&app.hist).unwrap();
+    let expected = app.doc.to_json().unwrap();
+    let history = serde_json::to_value(&app.hist).unwrap();
     app.open_library_file(&file);
     assert_eq!(app.doc.to_json().unwrap(), expected);
     assert_eq!(serde_json::to_value(&app.hist).unwrap(), history);
@@ -271,79 +313,132 @@ fn reopening_the_active_library_file_observes_its_own_pending_save_and_history()
 }
 
 #[test]
-fn cityos_temporary_views_cannot_save_autosave_or_create_history(){
-    let (mut s,_dir)=home_sim();
-    open(&mut s,"Welcome");
-    let library=lib(&s);let files=library.all_files().len();
-    let id=s.app().lib_file.as_ref().unwrap().id.clone();
-    let saved=library.load_file(&id).unwrap().to_json().unwrap();
-    let versions=library.list_versions(&id).len();
+fn cityos_temporary_views_cannot_save_autosave_or_create_history() {
+    let (mut s, _dir) = home_sim();
+    open(&mut s, "Welcome");
+    let library = lib(&s);
+    let files = library.all_files().len();
+    let id = s.app().lib_file.as_ref().unwrap().id.clone();
+    let saved = library.load_file(&id).unwrap().to_json().unwrap();
+    let versions = library.list_versions(&id).len();
     // An actual editor document underneath the catalog must stay dirty and unsaved.
-    s.shell.app.doc.name="Unsaved editor underneath catalog".into();
-    let document=s.app().doc.to_json().unwrap();let saved_hash=s.app().autosave.saved_hash;
-    s.shell.cityos=crate::cityos_catalog::tests::populated_browser();
-    for key in [Key::S,Key::Z,Key::Y,Key::D]{s.cmd_key(key);}
-    s.mods=Modifiers::COMMAND|Modifiers::ALT;s.key(Key::S);s.mods=Modifiers::NONE;
-    for _ in 0..120{s.frame(vec![]);}
-    assert_eq!(library.all_files().len(),files);assert_eq!(s.app().doc.to_json().unwrap(),document);assert!(s.app().history.save_modal.is_none());assert_eq!(s.app().autosave.saves,0);
-    assert_eq!(s.app().lib_file.as_ref().unwrap().id,id);
-    assert_eq!(s.app().autosave.saved_hash,saved_hash);
-    assert_eq!(library.load_file(&id).unwrap().to_json().unwrap(),saved);
-    assert_eq!(library.list_versions(&id).len(),versions);
+    s.shell.app.doc.name = "Unsaved editor underneath catalog".into();
+    let document = s.app().doc.to_json().unwrap();
+    let saved_hash = s.app().autosave.saved_hash;
+    s.shell.cityos = crate::cityos_catalog::tests::populated_browser();
+    for key in [Key::S, Key::Z, Key::Y, Key::D] {
+        s.cmd_key(key);
+    }
+    s.mods = Modifiers::COMMAND | Modifiers::ALT;
+    s.key(Key::S);
+    s.mods = Modifiers::NONE;
+    for _ in 0..120 {
+        s.frame(vec![]);
+    }
+    assert_eq!(library.all_files().len(), files);
+    assert_eq!(s.app().doc.to_json().unwrap(), document);
+    assert!(s.app().history.save_modal.is_none());
+    assert_eq!(s.app().autosave.saves, 0);
+    assert_eq!(s.app().lib_file.as_ref().unwrap().id, id);
+    assert_eq!(s.app().autosave.saved_hash, saved_hash);
+    assert_eq!(library.load_file(&id).unwrap().to_json().unwrap(), saved);
+    assert_eq!(library.list_versions(&id).len(), versions);
 }
 
 #[test]
-fn failed_flush_retains_dirty_revision_for_retry(){
-    let (mut s,_dir)=home_sim();let library=lib(&s);let id=library.all_files()[0].id.clone();s.shell.app.open_library_file(&id);
-    let project=s.app().lib_file.as_ref().unwrap().project_id.clone();let blocked=library.path("projects").join(project).join(".save.pending.json");std::fs::create_dir(&blocked).unwrap();
-    let previous=s.app().autosave.saved_hash;s.shell.app.doc.name="unsaved edit".into();s.shell.app.flush_autosave();
-    assert_eq!(s.app().autosave.saved_hash,previous);assert!(s.app().autosave.changed_at.is_some());
-    std::fs::remove_dir(blocked).unwrap();s.shell.app.flush_autosave();assert_ne!(s.app().autosave.saved_hash,previous);assert!(s.app().autosave.changed_at.is_none());
+fn failed_flush_retains_dirty_revision_for_retry() {
+    let (mut s, _dir) = home_sim();
+    let library = lib(&s);
+    let id = library.all_files()[0].id.clone();
+    s.shell.app.open_library_file(&id);
+    let project = s.app().lib_file.as_ref().unwrap().project_id.clone();
+    let blocked = library.path("projects").join(project).join(".save.pending.json");
+    std::fs::create_dir(&blocked).unwrap();
+    let previous = s.app().autosave.saved_hash;
+    s.shell.app.doc.name = "unsaved edit".into();
+    s.shell.app.flush_autosave();
+    assert_eq!(s.app().autosave.saved_hash, previous);
+    assert!(s.app().autosave.changed_at.is_some());
+    std::fs::remove_dir(blocked).unwrap();
+    s.shell.app.flush_autosave();
+    assert_ne!(s.app().autosave.saved_hash, previous);
+    assert!(s.app().autosave.changed_at.is_none());
 }
 
 #[test]
-fn failed_autosave_backs_off_without_clearing_dirty_state(){
-    let (mut s,_dir)=home_sim();let library=lib(&s);let id=library.all_files()[0].id.clone();s.shell.app.open_library_file(&id);
-    let project=s.app().lib_file.as_ref().unwrap().project_id.clone();
-    let blocked=library.path("projects").join(project).join(".save.pending.json");std::fs::create_dir(&blocked).unwrap();
-    let app=&mut s.shell.app;let saved=app.autosave.saved_hash;app.doc.name="Retry this revision".into();
-    app.autosave.changed_at=Some(0.);app.autosave.confirmed=true;app.now=10.;
-    let ctx=egui::Context::default();app.autosave_tick(&ctx);
-    assert_eq!(app.autosave.saved_hash,saved);assert_eq!(app.autosave.failures,1);assert_eq!(app.autosave.retry_at,Some(12.));
-    std::fs::remove_dir(blocked).unwrap();app.now=11.;app.autosave_tick(&ctx);
-    assert_eq!(app.autosave.saved_hash,saved);assert!(app.autosave.pending());
-    app.now=12.;app.autosave_tick(&ctx);
-    assert_ne!(app.autosave.saved_hash,saved);assert_eq!(app.autosave.failures,0);assert_eq!(app.autosave.retry_at,None);
-    assert_eq!(library.load_file(&id).unwrap().name,"Retry this revision");
+fn failed_autosave_backs_off_without_clearing_dirty_state() {
+    let (mut s, _dir) = home_sim();
+    let library = lib(&s);
+    let id = library.all_files()[0].id.clone();
+    s.shell.app.open_library_file(&id);
+    let project = s.app().lib_file.as_ref().unwrap().project_id.clone();
+    let blocked = library.path("projects").join(project).join(".save.pending.json");
+    std::fs::create_dir(&blocked).unwrap();
+    let app = &mut s.shell.app;
+    let saved = app.autosave.saved_hash;
+    app.doc.name = "Retry this revision".into();
+    app.autosave.changed_at = Some(0.);
+    app.autosave.confirmed = true;
+    app.now = 10.;
+    let ctx = egui::Context::default();
+    app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saved_hash, saved);
+    assert_eq!(app.autosave.failures, 1);
+    assert_eq!(app.autosave.retry_at, Some(12.));
+    std::fs::remove_dir(blocked).unwrap();
+    app.now = 11.;
+    app.autosave_tick(&ctx);
+    assert_eq!(app.autosave.saved_hash, saved);
+    assert!(app.autosave.pending());
+    app.now = 12.;
+    app.autosave_tick(&ctx);
+    assert_ne!(app.autosave.saved_hash, saved);
+    assert_eq!(app.autosave.failures, 0);
+    assert_eq!(app.autosave.retry_at, None);
+    assert_eq!(library.load_file(&id).unwrap().name, "Retry this revision");
 }
 
 #[test]
-fn failed_save_prevents_home_open_new_and_document_replacement(){
-    let (mut s,_dir)=home_sim();let library=lib(&s);let id=library.all_files()[0].id.clone();s.shell.app.open_library_file(&id);
-    let project=s.app().lib_file.as_ref().unwrap().project_id.clone();
-    let other=library.create_file(&project,None,"Other",&Document::new("Other")).unwrap();
-    s.shell.app.doc.name="Unsaved current".into();let document=s.app().doc.to_json().unwrap();
-    let blocked=library.path("projects").join(project).join(".save.pending.json");std::fs::create_dir(&blocked).unwrap();
-    s.shell.app.go_home();assert!(s.app().home.is_none());
-    s.shell.app.open_library_file(&other.id);assert_eq!(s.app().lib_file.as_ref().unwrap().id,id);
+fn failed_save_prevents_home_open_new_and_document_replacement() {
+    let (mut s, _dir) = home_sim();
+    let library = lib(&s);
+    let id = library.all_files()[0].id.clone();
+    s.shell.app.open_library_file(&id);
+    let project = s.app().lib_file.as_ref().unwrap().project_id.clone();
+    let other = library.create_file(&project, None, "Other", &Document::new("Other")).unwrap();
+    s.shell.app.doc.name = "Unsaved current".into();
+    let document = s.app().doc.to_json().unwrap();
+    let blocked = library.path("projects").join(project).join(".save.pending.json");
+    std::fs::create_dir(&blocked).unwrap();
+    s.shell.app.go_home();
+    assert!(s.app().home.is_none());
+    s.shell.app.open_library_file(&other.id);
+    assert_eq!(s.app().lib_file.as_ref().unwrap().id, id);
     s.shell.app.new_library_file(None);
-    assert!(!s.shell.app.replace_document(Document::new("Replacement"),None));
-    assert_eq!(s.app().doc.to_json().unwrap(),document);assert!(s.app().autosave.pending());
-    std::fs::remove_dir(blocked).unwrap();assert_eq!(library.all_files().len(),2);
+    assert!(!s.shell.app.replace_document(Document::new("Replacement"), None));
+    assert_eq!(s.app().doc.to_json().unwrap(), document);
+    assert!(s.app().autosave.pending());
+    std::fs::remove_dir(blocked).unwrap();
+    assert_eq!(library.all_files().len(), 2);
 }
 
 #[test]
 fn catalog_launcher_and_back_preserve_the_home_library() {
-    let (mut s,_dir)=home_sim();
-    let library=lib(&s);let files=library.all_files().len();
-    s.shell.cityos=crate::cityos_catalog::tests::populated_browser();s.shell.cityos.open=false;
+    let (mut s, _dir) = home_sim();
+    let library = lib(&s);
+    let files = library.all_files().len();
+    s.shell.cityos = crate::cityos_catalog::tests::populated_browser();
+    s.shell.cityos.open = false;
     s.shell.app.home.as_mut().unwrap().search = "Welcome".into();
     s.frame(vec![]);
     assert!(s.rect_of("home-cityos").right() <= theme::HOME_SIDEBAR_W);
-    click_rect(&mut s,"home-cityos");
-    assert!(s.shell.cityos.open);assert!(s.app().home.is_some());
-    click_rect(&mut s,"catalog-back");
-    assert!(!s.shell.cityos.open);assert!(s.app().home.is_some());assert_eq!(library.all_files().len(),files);
+    click_rect(&mut s, "home-cityos");
+    assert!(s.shell.cityos.open);
+    assert!(s.app().home.is_some());
+    click_rect(&mut s, "catalog-back");
+    assert!(!s.shell.cityos.open);
+    assert!(s.app().home.is_some());
+    assert_eq!(library.all_files().len(), files);
     assert_eq!(s.app().home.as_ref().unwrap().search, "Welcome");
 }
 
@@ -406,11 +501,7 @@ fn cityos_rail_returns_to_the_active_theme_variables_collection() {
 #[test]
 fn closing_cityos_saves_only_the_existing_document_and_cancels_close_on_failure() {
     fn close(s: &mut Sim) -> egui::FullOutput {
-        let mut raw = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1088.0))),
-            time: Some(s.t + 0.05),
-            ..Default::default()
-        };
+        let mut raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1088.0))), time: Some(s.t + 0.05), ..Default::default() };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
         let ctx = s.ctx.clone();
         ctx.run_ui(raw, |ui| s.shell.draw(ui))

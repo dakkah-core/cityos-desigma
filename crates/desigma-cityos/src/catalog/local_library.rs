@@ -66,7 +66,9 @@ pub fn unavailable_reason(entry: &Entry, specimen: Option<&Value>, snapshot: &Va
     if snapshot["mode"] != "committed" || !snapshot["canonicalCommit"].as_str().is_some_and(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())) {
         return Some("Create local libraries from committed source. Refresh GitLab main first; local overlays remain previews.".into());
     }
-    let Some(specimen) = specimen else { return Some("Load the selected values before creating an editable local copy.".into()); };
+    let Some(specimen) = specimen else {
+        return Some("Load the selected values before creating an editable local copy.".into());
+    };
     if !super::support::matches(entry, specimen) {
         return Some("The selected source changed. Select it again before creating a local library.".into());
     }
@@ -196,7 +198,7 @@ pub fn create(entry: &Entry, specimen: &Value, snapshot: &Value, preferred_mode:
                 doc.get_mut(text_id).unwrap().variables.bindings.insert("characters".into(), id.clone());
             }
         }
-        doc.get_mut(page).ok_or("Theme page disappeared")?.variables.modes.insert(collection_id.clone(),mode_id.clone());
+        doc.get_mut(page).ok_or("Theme page disappeared")?.variables.modes.insert(collection_id.clone(), mode_id.clone());
         let variables = collection.variables.clone();
         doc.variable_collections.insert(collection_id, collection);
         for id in variables {

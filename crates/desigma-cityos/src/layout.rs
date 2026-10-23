@@ -35,7 +35,9 @@ impl Layout {
         use std::io::Read;
         let mut bytes = Vec::new();
         file.take(65537).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-        if bytes.len() > 65536 { return Err("Workspace layout exceeds its size limit".into()); }
+        if bytes.len() > 65536 {
+            return Err("Workspace layout exceeds its size limit".into());
+        }
         let value: Self = serde_json::from_slice(&bytes).map_err(|e| format!("Invalid workspace layout: {e}"))?;
         value.validate()?;
         Ok(value)
@@ -54,8 +56,14 @@ impl Layout {
     }
     pub fn effective_view(&self, width: f32, narrow_preview: bool) -> View {
         if self.view == View::Split && width < 1100. {
-            if narrow_preview { View::Preview } else { View::Canvas }
-        } else { self.view }
+            if narrow_preview {
+                View::Preview
+            } else {
+                View::Canvas
+            }
+        } else {
+            self.view
+        }
     }
 }
 

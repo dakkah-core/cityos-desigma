@@ -94,12 +94,14 @@ mod uniform_compatibility_tests {
 
     #[test]
     fn effect_upload_matches_the_actual_shader_layout() {
-        use wgpu::naga::{front::wgsl, valid::{Capabilities, ValidationFlags, Validator}, TypeInner};
+        use wgpu::naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+            TypeInner,
+        };
         let shader = wgsl::parse_str(include_str!("shaders/fx.wgsl")).expect("effect shader parses");
         Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&shader).expect("effect shader validates");
-        let uniform = shader.types.iter().find_map(|(_, ty)| {
-            (ty.name.as_deref() == Some("P")).then_some(&ty.inner)
-        }).expect("effect uniform exists");
+        let uniform = shader.types.iter().find_map(|(_, ty)| (ty.name.as_deref() == Some("P")).then_some(&ty.inner)).expect("effect uniform exists");
         let TypeInner::Struct { members, span } = uniform else { panic!("effect uniform must be a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<FxParams>(), "upload and shader binding sizes differ");
         for (name, offset) in [
