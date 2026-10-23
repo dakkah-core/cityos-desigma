@@ -115,7 +115,7 @@ fn read_catalog<T>(
 }
 enum Reply {
     Scan(u64, Result<Value, String>),
-    Query(u64, Filters, usize, Result<Page, String>),
+    Query(u64, Box<Filters>, usize, Result<Page, String>),
     Materialize(u64, String, Result<Value, String>),
     SourceChanged,
 }
@@ -247,10 +247,8 @@ impl Browser {
                 let job = match requests.recv_timeout(interval) {
                     Ok(job) => job,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if client.as_mut().is_some_and(|c| c.take_source_changed()) {
-                            if !send_reply(&responses, &worker_repaint, Reply::SourceChanged) {
-                                break;
-                            }
+                        if client.as_mut().is_some_and(|c| c.take_source_changed()) && !send_reply(&responses, &worker_repaint, Reply::SourceChanged) {
+                            break;
                         }
                         continue;
                     }
@@ -341,7 +339,7 @@ impl Browser {
                     }
                     Job::Query(epoch, filters, offset, binding) => {
                         let result = read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.query(&filters, offset));
-                        Reply::Query(epoch, filters, offset, result)
+                        Reply::Query(epoch, Box::new(filters), offset, result)
                     }
                     Job::Materialize(epoch, id, binding) => {
                         let result = read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.materialize(&id));
@@ -562,6 +560,7 @@ impl Browser {
                     }
                 }
                 Reply::Query(epoch, filters, offset, result) if epoch == self.epoch => {
+                    let filters = *filters;
                     self.busy = false;
                     match result {
                         Ok(page) if filters == self.filters && self.usable_generation().is_some() => {

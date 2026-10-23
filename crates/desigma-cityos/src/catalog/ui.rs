@@ -21,6 +21,19 @@ const COLLECTIONS: [(&str, &str); 8] = [
     ("issues", "Needs attention"),
 ];
 
+fn preview_menu_height(available: f32) -> f32 {
+    // Preserve the previous min/max fallback for invalid viewport geometry.
+    if available.is_nan() { 320.0 } else { available.clamp(1.0, 320.0) }
+}
+
+#[test]
+fn preview_menu_height_retains_bounded_and_invalid_geometry_behavior() {
+    for (value, expected) in [(f32::NAN, 320.0), (f32::INFINITY, 320.0), (f32::NEG_INFINITY, 1.0),
+        (0.0, 1.0), (1.0, 1.0), (64.0, 64.0), (320.0, 320.0), (900.0, 320.0)] {
+        assert_eq!(preview_menu_height(value), expected);
+    }
+}
+
 pub(super) fn count(value: usize) -> String {
     let digits = value.to_string();
     digits.chars().enumerate().fold(String::new(), |mut out, (i, ch)| {
@@ -161,7 +174,7 @@ fn preview_choices_menu(ui: &mut Ui, services: CatalogUiServices, choices: &[Val
         ui.small("Choose the definition, version, profile and target for this source.");
         // Wrapping changes each choice's height. Fixed-height virtual rows would
         // overlap long labels and skip choices during keyboard navigation.
-        let height = ui.available_height().min(320.0).max(1.0);
+        let height = preview_menu_height(ui.available_height());
         let scroll =
             egui::ScrollArea::vertical().id_salt("catalog-preview-choices").max_height(height).min_scrolled_height(1.0).auto_shrink([false, true]).show(
                 ui,
@@ -1010,10 +1023,8 @@ impl Browser {
                     ui.small(format!("{total} records"));
                 });
                 ui.horizontal_wrapped(|ui| {
-                    for (label, number) in [("Data specimens", level.specimens)] {
-                        let number = number.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
-                        chip(ui, services, &format!("{label} · {number}"));
-                    }
+                    let number = level.specimens.map(|n| count(n as usize)).unwrap_or_else(|| "Unknown".into());
+                    chip(ui, services, &format!("Data specimens · {number}"));
                 });
                 ui.push_id(&level.id, |ui| {
                     ui.collapsing("Captured read-only source flags", |ui| {

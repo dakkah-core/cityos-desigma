@@ -44,7 +44,7 @@ impl<H: EditorHost> Workspace<H> {
         if !self.has_native_scene()
             || self.busy.is_some()
             || self.recovery_pending
-            || !self.pending.is_some_and(|at| at.elapsed() >= Duration::from_millis(250))
+            || self.pending.is_none_or(|at| at.elapsed() < Duration::from_millis(250))
         {
             return false;
         }

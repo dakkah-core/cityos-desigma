@@ -484,6 +484,7 @@ impl<H: EditorHost> Workspace<H> {
         self.themes.clear();
         self.themes_loaded = false;
     }
+    #[expect(clippy::too_many_arguments, reason = "Preserve the existing native host presentation contract during extension extraction")]
     pub fn show_inline(&mut self, app: &mut H, frame: &eframe::Frame, config: Config, pin: Value, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> String {
         let key = serde_json::to_string(&pin).unwrap_or_default();
         if self.inline_identity.as_deref() != Some(&key) {
@@ -1368,17 +1369,13 @@ impl<H: EditorHost> Workspace<H> {
                                                 self.error = Some(error);
                                                 return;
                                             }
-                                        } else {
-                                            if let Err(error) = app.install_edit(document) {
+                                        } else if let Err(error) = app.install_edit(document) {
                                                 self.error = Some(error);
                                                 return;
-                                            }
                                         }
-                                    } else {
-                                        if !self.install_resumed_projection(app, document) {
+                                    } else if !self.install_resumed_projection(app, document) {
                                             self.resume_presentation = projected_key;
                                             return;
-                                        }
                                     }
                                     if let Some(key) = projected_key {
                                         self.projection_attempted = Some(key.clone());
@@ -1690,10 +1687,8 @@ impl<H: EditorHost> Workspace<H> {
         if !self.recovery_pending {
             app.autosave_tick(&ctx);
         }
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self.recovery_pending || !app.flush_autosave() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            }
+        if ctx.input(|i| i.viewport().close_requested()) && (self.recovery_pending || !app.flush_autosave()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         if !ctx.egui_wants_keyboard_input() && self.busy.is_none() && !self.recovery_pending {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) && !self.preview_only {

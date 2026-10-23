@@ -36,15 +36,12 @@ fn text(doc: &mut Document, page: desigma_doc::NodeId, value: &str, x: f32, y: f
 }
 fn literal(row: &Value) -> Result<(VariableKind, VariableValue), String> {
     let value = &row["resolvedValue"];
-    match row["type"].as_str().unwrap_or("token") {
-        "color" => {
+    if row["type"].as_str().unwrap_or("token") == "color" {
             return value
                 .as_str()
                 .and_then(parse_color)
                 .map(|v| (VariableKind::Color, VariableValue::Color(v)))
                 .ok_or_else(|| "This color format is not supported by the native variable adapter.".into())
-        }
-        _ => {}
     }
     match value {
         Value::String(v) => Ok((VariableKind::String, VariableValue::String(v.clone()))),
