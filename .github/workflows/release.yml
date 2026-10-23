@@ -10,6 +10,8 @@ on:
 env:
   RUST_VERSION: "1.93.1"
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
 
 permissions:
   contents: read
@@ -18,6 +20,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +67,10 @@ jobs:
       # (rc.exe ships with the runner's Windows SDK); it fails the build under CI
       # if that step breaks, so an icon-less exe is never released.
       - name: Build desigma and desigma-diff
-        run: cargo build --release --locked --target ${{ matrix.target }} -p desigma-app -p desigma-diff
+        shell: bash
+        run: |
+          mkdir -p ".build/upstream/ci-native/${{ matrix.target }}"
+          cargo build --release --locked --message-format=json-render-diagnostics --target "${{ matrix.target }}" -p desigma-app -p desigma-diff > ".build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl"
 
       - name: Check the stamped version
         if: github.ref_type == 'tag'
@@ -75,6 +81,18 @@ jobs:
         shell: bash
         run: scripts/package.sh "${{ matrix.target }}" "${{ steps.version.outputs.version }}"
 
+      - name: Test compiler and package receipt boundaries
+        run: python scripts/upstream/native-build-receipt.test.py
+
+      - name: Record the actual compiler-selected binaries
+        shell: bash
+        run: python scripts/upstream/native-build-receipt.py --target "${{ matrix.target }}" --log ".build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl" --output ".build/upstream/ci-native/${{ matrix.target }}/build-receipt.json"
+
+      - name: Verify exact Windows package bytes
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python scripts/upstream/native-build-receipt.py --target "${{ matrix.target }}" --log ".build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl" --archive "dist/desigma-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip" --output ".build/upstream/ci-native/${{ matrix.target }}/package-receipt.json"
+
       - uses: actions/upload-artifact@v4
         with:
           name: desigma-${{ matrix.target }}
@@ -82,6 +100,8 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
             dist/*.sha256
+            .build/upstream/ci-native/${{ matrix.target }}/*.json
+            .build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl
           if-no-files-found: error
 
   # One job builds both Apple architectures and packages a universal desigma.app

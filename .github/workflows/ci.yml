@@ -12,6 +12,8 @@ concurrency:
 env:
   RUST_VERSION: "1.93.1"
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
   RUSTFLAGS: -D warnings
 
 jobs:
@@ -26,6 +28,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Test compiler and package receipt boundaries
+        run: python scripts/upstream/native-build-receipt.test.py
 
       - name: Install Linux system libraries
         if: runner.os == 'Linux'

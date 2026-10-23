@@ -27,6 +27,13 @@
   ],
   "changes": [
     {
+      "id": "compiler-selected-package-receipt",
+      "purpose": "Conserve the actual Cargo-selected release executables and exact canonical Windows package bytes during the existing release dry run.",
+      "invariant": "Clean source, locked Rust, serial resource settings, compiler results, archive entries, licenses and checksums agree; no installed GUI, persistence or activation qualification is inferred.",
+      "paths": [".github/workflows/release.yml"],
+      "tests": ["scripts/upstream/native-build-receipt.test.py"]
+    },
+    {
       "id": "native-host",
       "purpose": "Compose the native CityOS EditorHost, session/save/history adapters and plugin protections.",
       "invariant": "Failed or uncertain writes cannot replace sessions or grant ordinary editing.",
