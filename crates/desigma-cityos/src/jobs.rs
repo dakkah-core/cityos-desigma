@@ -26,8 +26,10 @@ fn progress_marker_does_not_schedule_animation_frames() {
 /// Window state affects speculative/refresh jobs, never saves or user commands.
 pub fn set_background_paused(paused: bool) { BACKGROUND_PAUSED.store(paused, Ordering::Release); }
 pub fn note_interaction() { *LAST_INTERACTION.lock().unwrap_or_else(|e|e.into_inner())=Some(Instant::now()); }
+#[cfg(any(windows, test))]
 #[derive(Default)]
-struct Pressure {memory_paused:bool,commit_paused:bool,cpu_paused:bool,high_since:Option<Instant>,low_since:Option<Instant>,last_check:Option<Instant>,last_cpu:Option<(u64,u64)>}
+struct Pressure {memory_paused:bool,commit_paused:bool,cpu_paused:bool,high_since:Option<Instant>,low_since:Option<Instant>,#[cfg(windows)] last_check:Option<Instant>,#[cfg(windows)] last_cpu:Option<(u64,u64)>}
+#[cfg(any(windows, test))]
 impl Pressure {
     fn update_commit(&mut self,bytes:u64)->bool {
         if bytes<1024*1024*1024 {self.commit_paused=true;}else if bytes>2*1024*1024*1024 {self.commit_paused=false;}
@@ -41,6 +43,7 @@ impl Pressure {
         if self.memory_paused{Some("Background indexing paused: less than 4 GiB available RAM")}else if self.cpu_paused{Some("Background indexing paused: system CPU pressure")}else{None}
     }
 }
+#[cfg(windows)]
 static PRESSURE:Mutex<Pressure>=Mutex::new(Pressure{memory_paused:false,commit_paused:false,cpu_paused:false,high_since:None,low_since:None,last_check:None,last_cpu:None});
 pub fn resource_status()->Option<&'static str>{
     if BACKGROUND_PAUSED.load(Ordering::Acquire) { return Some("Background work paused while the window is minimized or in use"); }

@@ -63,6 +63,16 @@ class NativeReceiptTests(unittest.TestCase):
                 Path(str(archive) + ".sha256").write_text(owner.digest(archive) + "  " + archive.name + "\n")
             pack()
             self.assertEqual(owner.qualify_zip(archive, selected, assets)["sha256"], owner.digest(archive))
+            checksum = Path(str(archive) + ".sha256")
+            checksum.write_text(owner.digest(archive) + " *" + archive.name + "\n")
+            self.assertEqual(owner.qualify_zip(archive, selected, assets)["sha256"], owner.digest(archive))
+            for invalid in ("0" * 64 + " *" + archive.name + "\n",
+                            owner.digest(archive) + " *other.zip\n",
+                            owner.digest(archive) + " *../candidate.zip\n",
+                            owner.digest(archive) + " *" + archive.name + "\nextra\n"):
+                checksum.write_text(invalid)
+                with self.assertRaises(ValueError):
+                    owner.qualify_zip(archive, selected, assets)
             for replacement, extra, changed_asset in ((True, False, False), (False, True, False), (False, False, True)):
                 pack(replacement, extra, changed_asset)
                 with self.assertRaises(ValueError):

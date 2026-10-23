@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
@@ -78,8 +79,11 @@ def qualify_zip(archive, selected, assets=None):
     if found != expected:
         raise ValueError("canonical Windows package is incomplete")
     result = {"path": str(archive.resolve()), "sha256": digest(archive), "bytes": archive.stat().st_size}
-    checksum = Path(str(archive) + ".sha256").read_text().split()
-    if len(checksum) != 2 or checksum != [result["sha256"], archive.name]:
+    # GNU sha256sum emits a space (text) or '*' (binary) mode marker.
+    # Accept either canonical record, retaining the exact digest and basename.
+    checksum = Path(str(archive) + ".sha256").read_text()
+    record = re.fullmatch(r"([a-f0-9]{64}) [ *]([^\r\n]+)\n?", checksum)
+    if record is None or record.groups() != (result["sha256"], archive.name):
         raise ValueError("canonical package checksum differs")
     return result
 

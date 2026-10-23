@@ -3,7 +3,6 @@ use crate::editor::{EditorHost, EditorSession, BaselineInstall, BaselineRecovery
 use crate::{bridge, host, layout, repaint, projection as native_projection};
 use crate::workspace_support::{presentation, history_commands, submission_recovery};
 pub use bridge::Config;
-use repaint::RENDER_ACK_TIMEOUT;
 use desigma_doc::{CityosOccurrence, Document};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

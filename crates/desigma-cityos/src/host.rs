@@ -1,7 +1,9 @@
 //! UI-thread-only child WebView2 adapter. WGPU retains ownership of the editor.
 use serde_json::Value;
 use std::cell::Cell;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
+#[cfg(any(windows, test))]
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 /// Convert one layout observation consistently at every supported Windows DPI.
