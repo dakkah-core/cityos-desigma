@@ -7,6 +7,7 @@
 mod board;
 mod board_blocks;
 mod brush;
+#[cfg(test)]
 mod cityos;
 mod code;
 mod comments;
@@ -33,7 +34,7 @@ mod vector_fit;
 pub use board::*;
 pub use board_blocks::*;
 pub use brush::*;
-pub use cityos::*;
+pub use desigma_cityos_contract::{CityosBase, CityosBinding, CityosOccurrence};
 pub use code::*;
 pub use comments::*;
 pub use components::*;

@@ -1,96 +1,15 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum CityosBase {
-    CanonicalGit { repository_id: String, commit: String },
-    NativeOwner { owner: String, resource: String, revision: String },
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CityosOccurrence {
-    pub definition_id: String,
-    pub source_node_id: String,
-    pub instance_id: Option<String>,
-    pub occurrence_id: String,
-    pub view_id: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CityosBinding {
-    pub schema_version: String,
-    pub document_id: String,
-    pub draft_id: String,
-    pub base: CityosBase,
-    pub semantic_base: Value,
-    pub dependency_pins: Vec<String>,
-    pub occurrences: BTreeMap<String, CityosOccurrence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exchange_v2: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exchange_v3: Option<Value>,
-}
-impl CityosBinding {
-    pub fn exchange(&self) -> Option<&Value> {
-        self.exchange_v3.as_ref().or(self.exchange_v2.as_ref())
-    }
-    pub fn exchange_mut(&mut self) -> Option<&mut Value> {
-        if self.exchange_v3.is_some() {
-            self.exchange_v3.as_mut()
-        } else {
-            self.exchange_v2.as_mut()
-        }
-    }
-    pub fn validate(&self) -> Result<(), String> {
-        if !["cityos.design-exchange.v1", "cityos.design-exchange.v2", "cityos.design-exchange.v3"].contains(&self.schema_version.as_str())
-            || self.document_id.is_empty()
-            || self.draft_id.is_empty()
-        {
-            return Err("Unsupported or incomplete CityOS binding".into());
-        }
-        match &self.base {
-            CityosBase::CanonicalGit { repository_id, commit }
-                if repository_id.is_empty() || commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) =>
-            {
-                return Err("Git drafts require a pinned canonical commit".into())
-            }
-            CityosBase::NativeOwner { owner, resource, revision } if owner.is_empty() || resource.is_empty() || revision.is_empty() => {
-                return Err("Native drafts require an authorized owner revision".into())
-            }
-            _ => {}
-        }
-        if self.schema_version == "cityos.design-exchange.v2" || self.schema_version == "cityos.design-exchange.v3" {
-            let v3 = self.schema_version == "cityos.design-exchange.v3";
-            if (v3 && (self.exchange_v3.is_none() || self.exchange_v2.is_some())) || (!v3 && (self.exchange_v2.is_none() || self.exchange_v3.is_some())) {
-                return Err("Exchange payload version mismatch".into());
-            }
-            let draft = self.exchange().ok_or("Missing exchange payload")?;
-            let CityosBase::CanonicalGit { repository_id, commit } = &self.base else { return Err("Native v2 drafts are unqualified".into()) };
-            if draft["schemaVersion"] != self.schema_version
-                || draft["draftId"] != self.draft_id
-                || draft["documentId"] != self.document_id
-                || draft["base"]["kind"] != "canonical-git"
-                || draft["base"]["commit"] != *commit
-                || draft["base"]["repositoryId"] != *repository_id
-                || draft["semanticBase"] != self.semantic_base
-                || draft["draftRevision"].as_u64().is_none()
-                || !draft["semanticDraft"].is_object()
-            {
-                return Err("Inconsistent v2 binding; trusted validation required before editing".into());
-            }
-            if v3 && (!draft["semanticContract"].is_string() || !draft["commandReceipts"].is_array()) {
-                return Err("Incomplete typed exchange payload".into());
-            }
-        } else if self.exchange_v2.is_some() || self.exchange_v3.is_some() {
-            return Err("Expanded payload cannot be stored in a legacy binding".into());
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn public_binding_types_are_the_contract_types() {
+        fn base(value: desigma_cityos_contract::CityosBase) -> CityosBase { value }
+        fn occurrence(value: desigma_cityos_contract::CityosOccurrence) -> CityosOccurrence { value }
+        fn binding(value: desigma_cityos_contract::CityosBinding) -> CityosBinding { value }
+        let _ = (base, occurrence, binding);
+    }
     fn v2_document() -> Document {
         let mut doc = Document::new("bound v2");
         doc.add_page("P");
@@ -225,6 +144,8 @@ mod tests {
         let reopened = Document::from_json(&doc.to_json().unwrap()).unwrap();
         assert_eq!(reopened.cityos.unwrap().semantic_base, base);
         let container = doc.to_json().unwrap();
+        assert!(container.contains("desigma.document.v2"));
+        assert!(Document::from_json(&container.replace("desigma.document.v2", "desigma.document.v1")).is_err());
         assert!(serde_json::from_str::<Document>(&container).is_err(), "legacy flat readers cannot silently strip bindings");
     }
 }

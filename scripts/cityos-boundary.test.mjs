@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const extension = join(root, 'crates/desigma-cityos');
+const contract = join(root, 'crates/desigma-cityos-contract');
 function files(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const path = join(directory, entry.name);
@@ -48,6 +49,63 @@ function assertEditorPort(source) {
     assert.doesNotMatch(returns, /\b(?:App|History|Library)\b/, `${name} returns an editor-owned handle`);
   }
 }
+
+function assertContractManifest(manifest) {
+  let section = '';
+  const dependencies = [];
+  for (const original of manifest.split(/\r?\n/)) {
+    const line = original.replace(/\s*#.*$/, '').trim();
+    if (!line) continue;
+    const header = line.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      section = header[1];
+      assert.ok(['package', 'dependencies'].includes(section), `Unexpected contract manifest section: ${section}`);
+    } else if (section === 'dependencies') {
+      const dependency = line.match(/^(serde|serde_json)\.workspace\s*=\s*true$/);
+      assert.ok(dependency, `Contract dependency must be an approved workspace dependency: ${line}`);
+      dependencies.push(dependency[1]);
+    } else {
+      assert.equal(section, 'package', `Unexpected manifest content: ${line}`);
+      assert.match(line, /^(?:name|description)\s*=\s*"[^"\r\n]*"$|^(?:version|edition|license)\.workspace\s*=\s*true$/,
+        `Unexpected contract package setting: ${line}`);
+    }
+  }
+  assert.deepEqual(dependencies.sort(), ['serde', 'serde_json']);
+}
+
+test('CityOS binding is owned by the dependency-light contract and re-exported by the document', () => {
+  const manifest = readFileSync(join(contract, 'Cargo.toml'), 'utf8');
+  assertContractManifest(manifest);
+  assert.equal(existsSync(join(contract, 'build.rs')), false, 'The contract must not execute a build script');
+  const workspace = readFileSync(join(root, 'Cargo.toml'), 'utf8');
+  assert.match(workspace, /"crates\/desigma-cityos-contract"/);
+  assert.match(workspace, /^desigma-cityos-contract\s*=\s*\{\s*path\s*=\s*"crates\/desigma-cityos-contract"\s*\}/m);
+  assert.match(workspace, /^serde\s*=\s*\{\s*version\s*=\s*"1",\s*features\s*=\s*\["derive"\]\s*\}/m);
+  assert.match(workspace, /^serde_json\s*=\s*"1"\s*$/m);
+  assert.match(readFileSync(join(root, 'crates/desigma-doc/Cargo.toml'), 'utf8'), /^desigma-cityos-contract\.workspace\s*=\s*true\s*$/m);
+  const doc = productionRust(readFileSync(join(root, 'crates/desigma-doc/src/lib.rs'), 'utf8'));
+  assert.match(doc, /pub\s+use\s+desigma_cityos_contract::\{CityosBase,\s*CityosBinding,\s*CityosOccurrence\}/);
+  const contractSource = files(join(contract, 'src')).map(path => readFileSync(path, 'utf8')).join('\n');
+  const contractProduction = productionRust(contractSource);
+  for (const type of ['CityosBase', 'CityosBinding', 'CityosOccurrence']) {
+    assert.match(contractProduction, new RegExp(`\\bpub\\s+(?:struct|enum)\\s+${type}\\b`));
+    for (const path of files(join(root, 'crates/desigma-doc/src'))) {
+      assert.doesNotMatch(productionRust(readFileSync(path, 'utf8')), new RegExp(`\\b(?:struct|enum|type)\\s+${type}\\b`), path);
+    }
+  }
+  assert.match(contractProduction, /impl\s+CityosBinding\s*\{/);
+  assert.match(contractProduction, /pub\s+fn\s+validate\s*\(/);
+  assert.doesNotMatch(contractSource, /\b(?:desigma_doc|desigma_app|include|include_str|include_bytes)\s*(?:::|!)/);
+  assert.doesNotMatch(contractSource, /#\s*\[\s*path\s*=/);
+});
+
+test('contract boundary rejects additional or disguised dependencies', () => {
+  const valid = '[package]\nname = "contract"\n[dependencies]\nserde.workspace = true\nserde_json.workspace = true\n';
+  assert.doesNotThrow(() => assertContractManifest(valid));
+  for (const extra of ['desigma-doc.workspace = true', 'alias = { package = "desigma-doc", path = "../desigma-doc" }', '[build-dependencies]\nserde.workspace = true', '[target.\'cfg(windows)\'.dependencies]\nserde.workspace = true', '[package]\nbuild = "../external.rs"']) {
+    assert.throws(() => assertContractManifest(`${valid}${extra}\n`), assert.AssertionError);
+  }
+});
 
 test('CityOS package has no reverse dependency or source inclusion into the editor', () => {
   const manifest = readFileSync(join(extension, 'Cargo.toml'), 'utf8');

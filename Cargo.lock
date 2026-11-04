@@ -1137,6 +1137,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "desigma-cityos-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "desigma-diff"
 version = "0.1.0"
 dependencies = [
@@ -1150,6 +1158,7 @@ dependencies = [
 name = "desigma-doc"
 version = "0.1.0"
 dependencies = [
+ "desigma-cityos-contract",
  "regex",
  "serde",
  "serde_json",
