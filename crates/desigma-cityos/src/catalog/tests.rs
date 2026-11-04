@@ -1464,6 +1464,48 @@ fn inspection_canvas_has_real_native_nodes_and_no_editor_binding_or_history() {
     assert!(canvas.nodes.values().any(|n| n.name == "colors.primary"));
     assert!(canvas.nodes.values().filter(|n| !canvas.pages.contains(&n.id)).all(|n| n.locked));
 }
+
+#[test]
+fn inspection_canvas_preserves_selected_theme_mode_colors_and_resolved_values() {
+    use desigma_doc::{Color, NodeKind, PaintKind};
+
+    let e = entry("theme");
+    let specimen = json!({"presentation":{"modes":{
+        "light":[{"name":"light.only","resolvedValue":"#fff"}],
+        "dark":[
+            {"name":"hex","resolvedValue":"#1234"},
+            {"name":"bare.hex","resolvedValue":"123456"},
+            {"name":"rgb","resolvedValue":"rgb(10, 20, 30)"},
+            {"name":"rgba","resolvedValue":"rgba(10, 20, 30, 0.5)"},
+            {"name":"clear","resolvedValue":"transparent"},
+            {"name":"number","resolvedValue":12},
+            {"name":"boolean","resolvedValue":false},
+            {"name":"structured","resolvedValue":{"x":1}},
+            {"name":"unresolved","resolvedValue":null}
+        ]
+    }},"data":{}});
+    let canvas = canvas::build_document(&e, &specimen, "dark");
+    for (name, color) in [
+        ("hex", Color::rgba(17, 34, 51, 68)),
+        ("bare.hex", Color::rgb(18, 52, 86)),
+        ("rgb", Color::rgb(10, 20, 30)),
+        ("rgba", Color { a: 0.5, ..Color::rgb(10, 20, 30) }),
+        ("clear", Color::TRANSPARENT),
+    ] {
+        let swatch = canvas.nodes.values().find(|node| node.name == name && matches!(node.kind, NodeKind::Rectangle)).expect("color swatch");
+        assert_eq!(swatch.fills[0].kind, PaintKind::Solid(color));
+        assert!(swatch.locked);
+    }
+    let texts = canvas.nodes.values().filter_map(|node| match &node.kind {
+        NodeKind::Text(text) => Some(text.content.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    for value in ["12", "false", r#"{"x":1}"#, "Unresolved / unavailable"] {
+        assert!(texts.contains(&value), "Missing value: {value}");
+    }
+    assert!(!texts.contains(&"light.only"));
+    assert!(canvas.cityos.is_none());
+}
 #[test]
 fn catalog_layout_keeps_search_and_results_reachable_at_supported_sizes() {
     for size in [egui::vec2(1600.0, 1000.0), egui::vec2(900.0, 600.0), egui::vec2(680.0, 600.0)] {

@@ -38,7 +38,7 @@ pub fn build_document(entry: &Entry, specimen: &Value, mode: &str) -> Document {
         for (i, row) in tokens.iter().enumerate() {
             let x = (i % 4) as f32 * 280.;
             let y = 124. + (i / 4) as f32 * 150.;
-            if let Some(value) = row["resolvedValue"].as_str().and_then(Color::from_hex) {
+            if let Some(value) = row["resolvedValue"].as_str().and_then(|value| super::local_library::parse_color(value).or_else(|| Color::from_hex(value))) {
                 let id = doc.alloc_id();
                 let mut swatch = Node::rectangle(id, Rect::new(x, y, 250., 64.));
                 swatch.name = row["name"].as_str().unwrap_or("Token").into();
@@ -47,8 +47,13 @@ pub fn build_document(entry: &Entry, specimen: &Value, mode: &str) -> Document {
                 doc.insert(page, swatch).expect("valid swatch parent");
             }
             label(&mut doc, page, row["name"].as_str().unwrap_or("Token"), x, y + 72., 260., 13.);
-            let text = row["resolvedValue"].as_str().unwrap_or("Unresolved / structured value");
-            label(&mut doc, page, text, x, y + 100., 260., 15.);
+            let value = &row["resolvedValue"];
+            let text = match value {
+                Value::Null => "Unresolved / unavailable".to_string(),
+                Value::String(text) => text.clone(),
+                _ => value.to_string(),
+            };
+            label(&mut doc, page, &text, x, y + 100., 260., 15.);
         }
     } else {
         let mut fields = vec![];
