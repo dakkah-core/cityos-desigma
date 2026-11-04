@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 mod input;
+mod chunk;
+pub mod federation;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -302,9 +304,16 @@ impl Client {
     }
 
     pub fn materialize(&mut self, id: &str) -> Result<Value, String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
         let result = self.request("Materialize", json!({"entryId":id}), Duration::from_secs(30))?;
         if result["encoding"] == "base64-json" {
-            return Err("This source exceeds the single-view limit. Source identity and contract metadata remain available.".into());
+            return chunk::reassemble(result, |offset| {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err("Catalog materialization timed out; prior catalog retained".into());
+                }
+                self.request("Materialize", json!({"entryId":id,"chunkOffset":offset}), remaining)
+            });
         }
         Ok(result)
     }
@@ -380,6 +389,38 @@ mod tests {
             assert!(!cache_restore_supported(&hello));
         }
         assert!(cache_restore_supported(&json!({"capabilities":{"cacheOnlyRestore":true}})));
+    }
+    #[test]
+    #[ignore = "requires the pinned packaged Node runtime"]
+    fn materialize_reassembles_verified_chunks_and_rejects_tampering() {
+        let directory = std::env::temp_dir().join(format!("desigma-reader-chunks-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap();
+        let reader = directory.join("chunks.mjs");
+        std::fs::write(&reader, r#"import {createInterface} from 'node:readline';import {createHash} from 'node:crypto';let generation=null;
+          const send=(r,result)=>process.stdout.write(JSON.stringify({protocolVersion:r.protocolVersion,sessionId:r.sessionId,requestId:r.requestId,generationId:generation,kind:'result',result})+'\n');
+          createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);
+            if(r.op==='Hello')return send(r,{});
+            if(r.op==='Scan'){generation='fixture';return send(r,{generationId:generation});}
+            if(r.op==='Materialize'){
+              const bytes=Buffer.from(JSON.stringify({id:r.entryId,text:'x'.repeat(2*1024*1024)}));
+              const offset=r.chunkOffset??0,end=Math.min(offset+1024*1024,bytes.length),chunk=Buffer.from(bytes.subarray(offset,end));
+              if(r.entryId==='tampered'&&offset===1024*1024)chunk[0]^=1;
+              return send(r,{encoding:'base64-json',chunk:chunk.toString('base64'),offset,totalBytes:bytes.length,
+                sha256:createHash('sha256').update(bytes).digest('hex'),nextOffset:end<bytes.length?end:null});
+            }
+          });"#).unwrap();
+        let config = ReaderConfig { node: std::env::var("CITYOS_DESIGN_WORKSPACE_NODE").unwrap().into(), reader,
+            repository: directory.clone(), cache: None, canonical_ref: None };
+        let mut client = Client::connect(&config).unwrap();
+        client.scan(&config, "committed").unwrap();
+        let value = client.materialize("correct").unwrap();
+        assert_eq!(value["id"], "correct");
+        assert_eq!(value["text"].as_str().unwrap().len(), 2 * 1024 * 1024);
+        assert!(client.materialize("tampered").unwrap_err().contains("digest mismatch"));
+        assert_eq!(client.materialize("correct").unwrap()["id"], "correct");
+        drop(client);
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     #[ignore = "requires the pinned packaged Node runtime"]
