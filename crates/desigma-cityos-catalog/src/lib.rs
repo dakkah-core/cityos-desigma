@@ -133,6 +133,7 @@ pub struct Client {
     cancelled: Arc<AtomicBool>,
     source_changed: bool,
     cache_only_restore: bool,
+    discovery_profiles: Option<Vec<String>>,
 }
 
 impl Client {
@@ -182,9 +183,11 @@ impl Client {
             cancelled,
             source_changed: false,
             cache_only_restore: false,
+            discovery_profiles: None,
         };
         let hello = client.request("Hello", json!({}), Duration::from_secs(10))?;
         client.cache_only_restore = cache_restore_supported(&hello);
+        client.discovery_profiles = discovery_profiles(&hello)?;
         Ok(client)
     }
 
@@ -277,13 +280,19 @@ impl Client {
     /// Never send this additive flag to an older reader which might ignore it
     /// and run a complete source scan on the foreground recovery budget.
     pub fn restore_cache(&mut self, config: &ReaderConfig, mode: &str) -> Result<Value, String> {
+        self.restore_cache_with_profile(config, mode, None)
+    }
+    pub fn restore_cache_with_profile(&mut self, config: &ReaderConfig, mode: &str, profile_id: Option<&str>) -> Result<Value, String> {
         if !self.cache_only_restore {
             return Err("CACHE_RESTORE_UNAVAILABLE: reader capability unavailable".into());
         }
+        self.require_profile(profile_id)?;
+        let mut args = json!({"repositoryRoot":config.repository,"mode":mode,"cacheRoot":config.cache,
+            "canonicalRef":config.canonical_ref,"preferCache":true,"cacheOnly":true});
+        if let Some(profile) = profile_id { args["profileId"] = json!(profile); }
         let result = self.request(
             "Scan",
-            json!({"repositoryRoot":config.repository,"mode":mode,"cacheRoot":config.cache,
-            "canonicalRef":config.canonical_ref,"preferCache":true,"cacheOnly":true}),
+            args,
             Duration::from_secs(30),
         )?;
         if result["restoredCache"] != true {
@@ -293,13 +302,27 @@ impl Client {
         Ok(result)
     }
     pub fn scan_with_cache(&mut self, config: &ReaderConfig, mode: &str, prefer_cache: bool) -> Result<Value, String> {
+        self.scan_with_profile(config, mode, prefer_cache, None)
+    }
+    pub fn scan_with_profile(&mut self, config: &ReaderConfig, mode: &str, prefer_cache: bool, profile_id: Option<&str>) -> Result<Value, String> {
+        self.require_profile(profile_id)?;
+        let mut args = json!({"repositoryRoot":config.repository,"mode":mode,"cacheRoot":config.cache,"canonicalRef":config.canonical_ref,"preferCache":prefer_cache});
+        if let Some(profile) = profile_id { args["profileId"] = json!(profile); }
         let result = self.request(
             "Scan",
-            json!({"repositoryRoot":config.repository,"mode":mode,"cacheRoot":config.cache,"canonicalRef":config.canonical_ref,"preferCache":prefer_cache}),
+            args,
             Duration::from_secs(600),
         )?;
         self.generation = Some(result["generationId"].as_str().ok_or("Missing generation identity")?.to_string());
         Ok(result)
+    }
+    fn require_profile(&self, profile_id: Option<&str>) -> Result<(), String> {
+        require_profile(self.discovery_profiles.as_deref(), profile_id)
+    }
+    /// `None` means the reader did not advertise profile selection; callers
+    /// may still use the existing default scan without a profile field.
+    pub fn supported_discovery_profiles(&self) -> Option<&[String]> {
+        self.discovery_profiles.as_deref()
     }
 
     pub fn query(&mut self, filters: &Filters, offset: usize) -> Result<Page, String> {
@@ -335,6 +358,38 @@ impl Client {
 
 fn cache_restore_supported(hello: &Value) -> bool {
     hello["capabilities"]["cacheOnlyRestore"] == true
+}
+
+fn discovery_profiles(hello: &Value) -> Result<Option<Vec<String>>, String> {
+    match &hello["capabilities"]["discoveryProfiles"] {
+        Value::Null | Value::Bool(false) => Ok(None),
+        Value::Bool(true) => {
+            let values = hello["discoveryProfileIds"].as_array().ok_or("Invalid discovery profile handshake")?;
+            if values.is_empty() || values.len() > 256 { return Err("Invalid discovery profile handshake".into()); }
+            let mut profiles = Vec::with_capacity(values.len());
+            for value in values {
+                let id = value.as_str().ok_or("Invalid discovery profile handshake")?;
+                let bytes = id.as_bytes();
+                let alphanumeric = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+                if bytes.is_empty() || bytes.len() > 160 || !alphanumeric(bytes[0]) || !alphanumeric(*bytes.last().unwrap())
+                    || bytes.iter().enumerate().any(|(index, byte)| !alphanumeric(*byte)
+                        && !(b"._-".contains(byte) && index > 0 && index + 1 < bytes.len() && alphanumeric(bytes[index-1]) && alphanumeric(bytes[index+1])))
+                    || profiles.iter().any(|previous| previous == id) {
+                    return Err("Invalid discovery profile handshake".into());
+                }
+                profiles.push(id.to_owned());
+            }
+            Ok(Some(profiles))
+        }
+        _ => Err("Invalid discovery profile handshake".into()),
+    }
+}
+fn require_profile(profiles: Option<&[String]>, requested: Option<&str>) -> Result<(), String> {
+    if let Some(requested) = requested {
+        let profiles = profiles.ok_or("Discovery profiles unavailable in this reader")?;
+        if !profiles.iter().any(|profile| profile == requested) { return Err("Unknown discovery profile".into()); }
+    }
+    Ok(())
 }
 
 impl Drop for Client {
@@ -399,6 +454,19 @@ mod tests {
             assert!(!cache_restore_supported(&hello));
         }
         assert!(cache_restore_supported(&json!({"capabilities":{"cacheOnlyRestore":true}})));
+    }
+    #[test]
+    fn discovery_profile_selection_requires_a_valid_negotiated_capability() {
+        assert_eq!(discovery_profiles(&json!({})).unwrap(), None);
+        assert!(require_profile(None, None).is_ok());
+        assert!(require_profile(None, Some("default")).is_err());
+        let profiles = discovery_profiles(&json!({"capabilities":{"discoveryProfiles":true},"discoveryProfileIds":["default","studio.v1"]})).unwrap().unwrap();
+        assert!(require_profile(Some(&profiles), Some("studio.v1")).is_ok());
+        assert!(require_profile(Some(&profiles), Some("missing")).is_err());
+        for ids in [json!([]),json!(["default","default"]),json!(["../bad"]),json!(["Studio"]),json!([false]),Value::Null] {
+            assert!(discovery_profiles(&json!({"capabilities":{"discoveryProfiles":true},"discoveryProfileIds":ids})).is_err());
+        }
+        assert!(discovery_profiles(&json!({"capabilities":{"discoveryProfiles":"yes"}})).is_err());
     }
     #[test]
     #[ignore = "requires the pinned packaged Node runtime"]

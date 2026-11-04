@@ -48,6 +48,7 @@ struct Location {
 enum Job {
     Restore(u64, ReaderConfig, String),
     Scan(u64, ReaderConfig, String, bool),
+    Switch(u64, ReaderConfig, String),
     Query(u64, Filters, usize, CatalogBinding),
     Materialize(u64, String, CatalogBinding),
 }
@@ -57,6 +58,23 @@ struct CatalogBinding {
     config: ReaderConfig,
     mode: String,
     generation: String,
+}
+
+// Encode the complete canonical path, rather than using a collision-prone hash.
+// Chunking also avoids a single path component exceeding filesystem limits.
+fn repository_cache(root: Option<&std::path::Path>, repository: &std::path::Path, mode: &str) -> Result<Option<PathBuf>, String> {
+    let Some(root) = root else { return Ok(None) };
+    if !matches!(mode, "committed" | "local") {
+        return Err("Unsupported catalog source mode".into());
+    }
+    let path = std::fs::canonicalize(repository).map_err(|e| format!("Repository is unavailable: {e}"))?;
+    let path = path.to_str().ok_or("Repository path cannot be represented safely")?;
+    let encoded: String = path.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut cache = root.join("repository-connections-v1").join(mode);
+    for chunk in encoded.as_bytes().chunks(64) {
+        cache.push(std::str::from_utf8(chunk).map_err(|_| "Invalid repository path encoding")?);
+    }
+    Ok(Some(cache))
 }
 
 fn scan_cancelled(error: &str) -> bool {
@@ -115,6 +133,7 @@ fn read_catalog<T>(
 }
 enum Reply {
     Scan(u64, Result<Value, String>),
+    Switch(u64, Result<Value, (String, bool)>),
     Query(u64, Box<Filters>, usize, Result<Page, String>),
     Materialize(u64, String, Result<Value, String>),
     SourceChanged,
@@ -146,6 +165,11 @@ pub struct Browser {
     reader: String,
     node: String,
     cache: Option<PathBuf>,
+    cache_root: Option<PathBuf>,
+    draft_repository: String,
+    draft_reader: String,
+    draft_node: String,
+    switching: Option<(ReaderConfig, String)>,
     canonical_ref: Option<String>,
     mode: String,
     filters: Filters,
@@ -386,6 +410,38 @@ impl Browser {
                         }
                         Reply::Scan(epoch, result)
                     }
+                    Job::Switch(epoch, config, mode) => {
+                        // Keep only one reader alive. A failed connection can recover
+                        // the old generation only from its exact saved cache.
+                        let previous = session.take();
+                        client = None;
+                        fence = false;
+                        let result = crate::jobs::run(false, Some(&worker_cancel), || {
+                            let mut candidate = Client::connect_with_cancel(&config, worker_cancel.clone())?;
+                            let summary = candidate.scan_with_cache(&config, &mode, true)?;
+                            if summary["snapshot"]["mode"].as_str() != Some(mode.as_str()) {
+                                return Err("The reader returned a different source mode".into());
+                            }
+                            let generation = summary["generationId"].as_str().filter(|id| !id.is_empty()).ok_or("Missing generation identity")?;
+                            session = Some(CatalogBinding { config, mode, generation: generation.into() });
+                            client = Some(candidate);
+                            Ok(summary)
+                        });
+                        let result = result.map_err(|error| {
+                            let mut recovered = false;
+                            if !worker_cancel.load(Ordering::Acquire) {
+                                if let Some(binding) = previous.filter(|binding| binding.config.cache.is_some()) {
+                                    if let Ok((restored, _)) = crate::jobs::run(true, Some(&worker_cancel), || recover_previous_catalog(&binding, worker_cancel.clone(), &error)) {
+                                        client = Some(restored);
+                                        session = Some(binding);
+                                        recovered = true;
+                                    }
+                                }
+                            }
+                            (error, recovered)
+                        });
+                        Reply::Switch(epoch, result)
+                    }
                     Job::Query(epoch, filters, offset, binding) => {
                         let result = read_catalog(&mut client, &mut session, &mut fence, &binding, |c| c.query(&filters, offset));
                         Reply::Query(epoch, Box::new(filters), offset, result)
@@ -402,6 +458,10 @@ impl Browser {
         });
         let open = repository.is_some();
         let reader = Some(crate::bridge::Config::reader_path(reader));
+        let repository = repository.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let reader = reader.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let node = node.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "node".into());
+        let scoped_cache = repository_cache(cache.as_deref(), std::path::Path::new(&repository), "committed").ok().flatten();
         let mut browser = Self {
             services,
             open,
@@ -413,10 +473,15 @@ impl Browser {
             host_diagnostic_request: false,
             inline_preview: None,
             inline_status: String::new(),
-            repository: repository.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
-            reader: reader.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
-            node: node.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "node".into()),
-            cache,
+            draft_repository: repository.clone(),
+            draft_reader: reader.clone(),
+            draft_node: node.clone(),
+            repository,
+            reader,
+            node,
+            cache: scoped_cache,
+            cache_root: cache,
+            switching: None,
             canonical_ref,
             mode: "committed".into(),
             filters: Filters { collection: "design".into(), ..Default::default() },
@@ -474,6 +539,42 @@ impl Browser {
             canonical_ref: self.canonical_ref.clone(),
         }
     }
+    fn connect_draft(&mut self, mode: &str) {
+        if self.busy { return; }
+        let repository = match std::fs::canonicalize(self.draft_repository.trim()) {
+            Ok(path) if path.is_dir() => path,
+            Ok(_) => { self.error = Some("The selected repository is not a directory".into()); return; }
+            Err(error) => { self.error = Some(format!("Repository is unavailable: {error}")); return; }
+        };
+        let cache = match repository_cache(self.cache_root.as_deref(), &repository, mode) {
+            Ok(cache) => cache,
+            Err(error) => { self.error = Some(error); return; }
+        };
+        let same_repository = std::fs::canonicalize(&self.repository).is_ok_and(|old| old == repository);
+        let config = ReaderConfig {
+            node: self.draft_node.trim().into(),
+            reader: self.draft_reader.trim().into(),
+            repository,
+            cache,
+            canonical_ref: if same_repository { self.canonical_ref.clone() } else { None },
+        };
+        if config == self.reader_config() && mode == self.mode {
+            self.refresh();
+            return;
+        }
+        self.cancelled.store(false, Ordering::Release);
+        self.epoch += 1;
+        self.busy = true;
+        self.activity = "Connecting repository";
+        self.error = None;
+        self.last_interaction = Instant::now();
+        self.switching = Some((config.clone(), mode.into()));
+        if self.jobs.send(Job::Switch(self.epoch, config, mode.into())).is_err() {
+            self.busy = false;
+            self.switching = None;
+            self.error = Some("Catalog worker is unavailable; previous view retained".into());
+        }
+    }
     fn usable_generation(&self) -> Option<&CatalogBinding> {
         self.catalog_binding.as_ref().filter(|binding| {
             binding.config == self.reader_config()
@@ -519,7 +620,7 @@ impl Browser {
         });
     }
     pub fn yield_to_design(&self) {
-        if self.busy && matches!(self.activity, "Reading repository" | "Refreshing repository" | "Restoring saved library") {
+        if self.busy && matches!(self.activity, "Reading repository" | "Refreshing repository" | "Restoring saved library" | "Connecting repository") {
             self.cancelled.store(true, Ordering::Release);
         }
     }
@@ -541,6 +642,59 @@ impl Browser {
     fn poll(&mut self) {
         while let Ok(reply) = self.replies.try_recv() {
             match reply {
+                Reply::Switch(epoch, result) if epoch == self.epoch => {
+                    self.busy = false;
+                    self.cancelled.store(false, Ordering::Release);
+                    let Some((config, mode)) = self.switching.take() else { continue };
+                    match result {
+                        Ok(summary) => {
+                            let Some(generation) = summary["generationId"].as_str().filter(|id| !id.is_empty()) else {
+                                self.catalog_binding = None;
+                                self.error = Some("Connection returned no generation; previous view retained, reconnect to browse".into());
+                                continue;
+                            };
+                            if summary["snapshot"]["mode"].as_str() != Some(mode.as_str()) {
+                                self.catalog_binding = None;
+                                self.error = Some("Connection returned a different source mode; previous view retained, reconnect to browse".into());
+                                continue;
+                            }
+                            self.repository = config.repository.to_string_lossy().into_owned();
+                            self.reader = config.reader.to_string_lossy().into_owned();
+                            self.node = config.node.to_string_lossy().into_owned();
+                            self.cache = config.cache.clone();
+                            self.canonical_ref = config.canonical_ref.clone();
+                            self.mode = mode.clone();
+                            self.catalog_binding = Some(CatalogBinding { config, mode, generation: generation.into() });
+                            self.summary = Some(summary);
+                            self.entries.clear();
+                            self.total = 0;
+                            self.next = None;
+                            self.selected = None;
+                            self.clear_preview();
+                            self.workspace_request = None;
+                            self.workspace_theme = None;
+                            self.local_design_request = None;
+                            self.navigation_back.clear();
+                            self.navigation_forward.clear();
+                            self.pending_selection = false;
+                            self.source_changed = false;
+                            self.filter_changed = None;
+                            self.results_visible = true;
+                            self.refresh_failures = 0;
+                            self.last_refresh = Instant::now();
+                            self.error = None;
+                            self.query(0);
+                        }
+                        Err((error, recovered)) => {
+                            if !recovered { self.catalog_binding = None; }
+                            self.error = Some(if recovered {
+                                format!("Connection failed: {error}. Previous saved catalog restored.")
+                            } else {
+                                format!("Connection failed: {error}. Previous view retained; reconnect to browse it.")
+                            });
+                        }
+                    }
+                }
                 Reply::Scan(epoch, result) if epoch == self.epoch => {
                     self.busy = false;
                     self.last_refresh = Instant::now();

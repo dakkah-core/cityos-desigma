@@ -95,6 +95,12 @@ impl Federation {
     /// Existing cache recovery requires a separate qualified lease and is not
     /// implemented by this entry point.
     pub fn open(&mut self, selection_id: &str, mode: &str, config: &ReaderConfig, expected_repository: Option<&str>) -> Result<Selected<Value>, String> {
+        self.open_with_profile(selection_id, mode, config, expected_repository, None)
+    }
+
+    /// An explicit profile is sent only after the reader advertises it. The
+    /// observed profile identity is checked before the session is installed.
+    pub fn open_with_profile(&mut self, selection_id: &str, mode: &str, config: &ReaderConfig, expected_repository: Option<&str>, profile_id: Option<&str>) -> Result<Selected<Value>, String> {
         if !valid_selection_id(selection_id) || !matches!(mode, "committed" | "local") {
             return Err("FEDERATION_SELECTION_INVALID".into());
         }
@@ -114,7 +120,17 @@ impl Federation {
         let mut config = config.clone();
         config.cache = Some(cache.clone());
         let mut client = Client::connect(&config)?;
-        let summary = client.scan(&config, mode)?;
+        let summary = client.scan_with_profile(&config, mode, false, profile_id)?;
+        let snapshot = &summary["snapshot"];
+        if let Some(profile) = profile_id {
+            let digest = snapshot["profileDigest"].as_str().unwrap_or("");
+            if snapshot["profileId"].as_str() != Some(profile) || snapshot["discoveryAuthority"] != "registry"
+                || digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err("FEDERATION_PROFILE_MISMATCH".into());
+            }
+        } else if snapshot["profileId"].as_str().is_some_and(|profile| profile != "default") {
+            return Err("FEDERATION_PROFILE_MISMATCH".into());
+        }
         let binding = Binding::from_summary(selection_id, &client.session, mode, &summary, expected_repository, config.canonical_ref.as_deref())?;
         self.install(binding.clone(), cache, Box::new(client), &summary)?;
         Ok(Selected { binding, value: summary })
@@ -303,9 +319,10 @@ mod tests {
         std::fs::write(&reader, r#"import {createInterface} from 'node:readline';let generation=null,repository=null;
           const send=(r,result)=>process.stdout.write(JSON.stringify({protocolVersion:r.protocolVersion,sessionId:r.sessionId,requestId:r.requestId,generationId:generation,kind:'result',result})+'\n');
           createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);
-            if(r.op==='Hello')return send(r,{});
+            if(r.op==='Hello')return send(r,{capabilities:{discoveryProfiles:true},discoveryProfileIds:['default','fixture']});
             if(r.op==='Scan'){repository=String(r.repositoryRoot).endsWith('repo-a')?'a':'b';generation=(repository==='a'?'c':'d').repeat(64);
-              return send(r,{generationId:generation,snapshot:{repositoryId:repository.repeat(64),canonicalCommit:'e'.repeat(40),mode:r.mode}});}
+              return send(r,{generationId:generation,snapshot:{repositoryId:repository.repeat(64),canonicalCommit:'e'.repeat(40),mode:r.mode,
+                profileId:r.profileId??'default',profileDigest:'f'.repeat(64),discoveryAuthority:'registry'}});}
             if(r.op==='Query')return send(r,{entries:[],total:0,nextOffset:null});
             if(r.op==='Materialize')return send(r,{repository,id:r.entryId});
           });"#).unwrap();
@@ -314,7 +331,8 @@ mod tests {
             repository: root.join(name), cache: Some(root.join(cache)), canonical_ref: Some("e".repeat(40)) };
         let mut federation = Federation::new();
         let a = federation.open("a", "committed", &config("repo-a", "cache-a"), Some(&"a".repeat(64))).unwrap();
-        let b = federation.open("b", "committed", &config("repo-b", "cache-b"), Some(&"b".repeat(64))).unwrap();
+        let b = federation.open_with_profile("b", "committed", &config("repo-b", "cache-b"), Some(&"b".repeat(64)), Some("fixture")).unwrap();
+        assert_eq!(b.value["snapshot"]["profileId"], "fixture");
         assert_eq!(federation.materialize(&a.binding, "same-id").unwrap().value["repository"], "a");
         assert_eq!(federation.materialize(&b.binding, "same-id").unwrap().value["repository"], "b");
         assert!(federation.open("wrong", "committed", &config("repo-a", "cache-wrong"), Some(&"b".repeat(64))).is_err());
