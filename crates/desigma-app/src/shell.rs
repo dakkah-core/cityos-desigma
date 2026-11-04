@@ -655,15 +655,16 @@ impl eframe::App for Shell {
                 self.cityos.host_diagnostic_request = false;
                 self.cityos.open = false;
                 self.workspace.begin_harness(self.cityos.workspace_config());
-            } else if let Some(request) = self.cityos.workspace_request.take() {
+            } else if let Some(request) = self.cityos.take_workspace_request() {
                 self.cityos.yield_to_design();
                 self.cityos.open = false;
+                let config = request.config();
                 if request.resume {
-                    self.workspace.resume(self.cityos.workspace_config(), &self.app);
+                    self.workspace.resume(config, &self.app);
                 } else if let Some(pin) = request.resource_pin {
-                    self.workspace.begin_pinned_preview(self.cityos.workspace_config(), pin);
+                    self.workspace.begin_pinned_preview(config, pin);
                 } else {
-                    self.workspace.begin(self.cityos.workspace_config(), request.source_path, request.preview_only);
+                    self.workspace.begin(config, request.source_path, request.preview_only);
                 }
                 if let Some(theme) = self.cityos.workspace_theme.take() {
                     self.workspace.set_preview_theme(theme);
@@ -672,12 +673,12 @@ impl eframe::App for Shell {
                 self.workspace.resume(self.cityos.workspace_config(), &self.app);
             }
             if !self.workspace.open && self.cityos.open {
-                if let Some((pin, rect)) = self.cityos.inline_preview.take() {
+                if let Some((request, rect)) = self.cityos.take_inline_preview() {
                     if !self.cityos.inline_status.starts_with("Current") {
                         self.cityos.yield_to_design();
                     }
                     self.cityos.inline_status =
-                        self.workspace.show_inline(&mut self.app, _frame, self.cityos.workspace_config(), pin, rect, ui.ctx().pixels_per_point(), ui.ctx());
+                        self.workspace.show_inline(&mut self.app, _frame, request, rect, ui.ctx().pixels_per_point(), ui.ctx());
                     if self.workspace.inline_pending() {
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                     }

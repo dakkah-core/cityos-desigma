@@ -1,5 +1,4 @@
 use super::super::test_support::services;
-use super::super::WorkspaceRequest;
 use super::preview_choices_menu;
 use egui::{Context, Event, FullOutput, Id, Key, Modifiers, PointerButton, Rect, Vec2};
 use serde_json::{json, Value};
@@ -25,7 +24,7 @@ struct Menu {
     size: Vec2,
     panel_width: f32,
     choices: Vec<Value>,
-    request: Option<WorkspaceRequest>,
+    request: Option<Value>,
 }
 
 impl Menu {
@@ -173,9 +172,7 @@ fn preview_menu_resize_preserves_focus_and_keyboard_activation_keeps_exact_locat
         assert!(menu.request.is_none(), "Focus must not implicitly select");
         menu.key(key);
         let request = menu.request.as_ref().expect("Keyboard activation must open the focused preview");
-        assert_eq!(request.source_path.as_deref(), menu.choices[1]["sourcePath"].as_str());
-        assert_eq!(request.resource_pin.as_ref(), Some(&menu.choices[1]), "Every captured field and locator must survive unchanged");
-        assert!(request.preview_only && !request.resume);
+        assert_eq!(request, &menu.choices[1], "Every captured field and locator must survive unchanged");
     }
 }
 
@@ -222,8 +219,7 @@ fn preview_menu_pointer_activation_keeps_the_exact_nondefault_locator() {
         menu.assert_bounds();
         menu.click("catalog-preview-choice-1");
         let request = menu.request.as_ref().expect("Click must open the chosen preview");
-        assert_eq!(request.source_path.as_deref(), Some("packages/shared.tsx"));
-        assert_eq!(request.resource_pin.as_ref(), Some(&menu.choices[1]));
-        assert!(request.preview_only && !request.resume);
+        assert_eq!(request["sourcePath"], "packages/shared.tsx");
+        assert_eq!(request, &menu.choices[1]);
     }
 }

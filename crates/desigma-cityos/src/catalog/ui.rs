@@ -167,7 +167,7 @@ fn action_button(ui: &mut Ui, services: CatalogUiServices, id: &str, label: &str
     clicked
 }
 
-fn preview_choices_menu(ui: &mut Ui, services: CatalogUiServices, choices: &[Value]) -> Option<super::WorkspaceRequest> {
+fn preview_choices_menu(ui: &mut Ui, services: CatalogUiServices, choices: &[Value]) -> Option<Value> {
     // Bound the whole popup, including its frame, to the panel and viewport.
     // Use the panel width rather than the space left in the wrapped action row.
     let margin = Frame::popup(ui.style()).total_margin().sum();
@@ -205,7 +205,7 @@ fn preview_choices_menu(ui: &mut Ui, services: CatalogUiServices, choices: &[Val
                             choice.scroll_to_me(Some(Align::Center));
                         }
                         if choice.clicked() {
-                            selected = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                            selected = Some(pin.clone());
                             ui.close();
                         }
                     }
@@ -329,10 +329,10 @@ impl Browser {
             ui.label(RichText::new("CityOS").size(theme.catalog_title).strong());
             ui.label(RichText::new("Design library").size(theme.catalog_title).color(theme.text_secondary));
             if ui.button("Design files…").clicked() {
-                self.workspace_request = Some(super::WorkspaceRequest::browse());
+                self.workspace_request = Some(self.browse_request(false));
             }
             if self.has_bound_draft && ui.button("Resume canvas draft").clicked() {
-                self.workspace_request = Some(super::WorkspaceRequest { source_path: None, resource_pin: None, preview_only: false, resume: true });
+                self.workspace_request = Some(self.browse_request(true));
             }
             self.atlas_tools.menu(ui, services);
             ui.with_layout(Layout::right_to_left(Align::Center).with_main_wrap(true), |ui| {
@@ -556,7 +556,7 @@ impl Browser {
                             let open = ui.button("Open selected composition workspace");
                             services.record(ui, &format!("catalog-hierarchy-open-{salt}"), open.rect);
                             if open.clicked() {
-                                self.workspace_request = Some(super::WorkspaceRequest::selected(path, true));
+                                self.workspace_request = self.selected_request(path, true);
                             }
                         }
                         if ui
@@ -737,7 +737,7 @@ impl Browser {
                             self.pending_selection = true;
                         }
                     } else if let Some(source) = &actions.source {
-                        self.workspace_request = Some(super::WorkspaceRequest::selected(source, true));
+                        self.workspace_request = self.selected_request(source, true);
                     }
                 }
                 if actions.preview_here
@@ -750,12 +750,12 @@ impl Browser {
                     )
                 {
                     if let Some(pin) = &actions.inline_pin {
-                        self.workspace_request = Some(super::WorkspaceRequest::pinned_preview(pin.clone()));
+                        self.workspace_request = self.pinned_request(pin.clone());
                     }
                 }
                 if !actions.preview_choices.is_empty() {
-                    if let Some(request) = preview_choices_menu(ui, services, &actions.preview_choices) {
-                        self.workspace_request = Some(request);
+                    if let Some(pin) = preview_choices_menu(ui, services, &actions.preview_choices) {
+                        self.workspace_request = self.pinned_request(pin);
                     }
                 }
                 let snapshot = self.summary.as_ref().map(|summary| &summary["snapshot"]).unwrap_or(&Value::Null);
@@ -792,7 +792,7 @@ impl Browser {
                 };
                 if action_button(ui, services, "catalog-edit-action", label, unavailable) {
                     if let Some(source) = &actions.source {
-                        self.workspace_request = Some(super::WorkspaceRequest::selected(source, false));
+                        self.workspace_request = self.selected_request(source, false);
                     }
                 }
             });
@@ -846,8 +846,8 @@ impl Browser {
         }
         if entry.kind == "theme" {
             if action_button(ui, services, "catalog-theme-preview-action", "Preview theme on canonical web frame", actions.theme_reason.as_deref()) {
-                self.workspace_theme = Some(entry.semantic_id.clone());
-                self.workspace_request = Some(super::WorkspaceRequest::selected("config/experience/living-canvas-frame/cityos-web.input.json", true));
+                self.workspace_request = self.selected_request("config/experience/living-canvas-frame/cityos-web.input.json", true);
+                self.workspace_theme = self.workspace_request.as_ref().map(|_| entry.semantic_id.clone());
             }
             ui.small(
                 actions
@@ -929,7 +929,7 @@ impl Browser {
                 let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width().max(1.), 360.0));
                 let rect = rect.intersect(ui.clip_rect());
                 if rect.width() > 1.0 && rect.height() > 1.0 {
-                    self.inline_preview = Some((pin, rect));
+                    self.inline_preview = self.pinned_request(pin).map(|request| (request, rect));
                 }
                 return;
             }
@@ -998,7 +998,7 @@ impl Browser {
                 self.filters_changed();
             }
             if ui.button("Choose a design file →").clicked() {
-                self.workspace_request = Some(super::WorkspaceRequest::browse());
+                self.workspace_request = Some(self.browse_request(false));
             }
         });
         ui.add_space(16.);

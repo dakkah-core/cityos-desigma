@@ -9,13 +9,20 @@ mod chunk;
 pub mod federation;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
 
 pub const PROTOCOL: &str = "cityos.design-catalog.ipc.v1";
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
+
+fn new_session() -> Result<String, String> {
+    let sequence = NEXT_SESSION.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
+        .map_err(|_| "Catalog session identities exhausted")?;
+    Ok(format!("desktop-{}-{sequence}", std::process::id()))
+}
 
 /// Limit helper threads and inherited Git children; never constrain the UI/GPU process.
 pub fn limit_background_cpu(child: &Child) -> Result<(), String> {
@@ -136,6 +143,7 @@ impl Client {
         if !config.reader.is_absolute() || !config.reader.is_file() {
             return Err("Select the absolute path of the packaged CityOS reader.mjs".into());
         }
+        let session = new_session()?;
         let mut command = Command::new(&config.node);
         command.arg(&config.reader).arg("--stdio").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(windows)]
@@ -164,8 +172,6 @@ impl Client {
                 }
             }
         });
-        let session =
-            format!("desktop-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
         let mut client = Self {
             child,
             input: input::Input::new(input),
@@ -381,6 +387,10 @@ fn read_frame(reader: &mut impl BufRead, output: &mut Vec<u8>) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_ids_are_distinct_even_without_clock_changes() {
+        assert_ne!(new_session().unwrap(), new_session().unwrap());
+    }
     #[test]
     fn foreground_cache_recovery_requires_an_explicit_reader_capability() {
         for hello in

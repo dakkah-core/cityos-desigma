@@ -236,7 +236,7 @@ pub struct Workspace<H: EditorHost> {
     $visibility tabs:BTreeMap<String,DraftTab<H::Session>>,
     $visibility changes_mode:bool,
     $visibility incoming:Option<Value>,
-    $visibility inline_identity:Option<String>,
+    $visibility inline_identity:Option<(crate::catalog::WorkspaceIdentity, Value)>,
     $visibility requested_pin:Option<Value>,
     $visibility layout: layout::Layout,
     $visibility layout_loaded: bool,
@@ -484,13 +484,23 @@ impl<H: EditorHost> Workspace<H> {
         self.themes.clear();
         self.themes_loaded = false;
     }
-    #[expect(clippy::too_many_arguments, reason = "Preserve the existing native host presentation contract during extension extraction")]
-    pub fn show_inline(&mut self, app: &mut H, frame: &eframe::Frame, config: Config, pin: Value, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> String {
-        let key = serde_json::to_string(&pin).unwrap_or_default();
-        if self.inline_identity.as_deref() != Some(&key) {
+    pub fn show_inline(&mut self, app: &mut H, frame: &eframe::Frame, request: crate::catalog::WorkspaceRequest, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> String {
+        let identity = request.identity();
+        let config = request.config();
+        let Some(pin) = request.resource_pin else {
+            self.host.hide();
+            return "Preview source unavailable".into();
+        };
+        let key = (identity, pin.clone());
+        if self.inline_identity.as_ref() != Some(&key) {
             let source = pin["sourcePath"].as_str().map(str::to_owned);
             if source.is_none() && pin["kind"] != "registered-specimen" {
+                self.host.hide();
                 return "Preview source unavailable".into();
+            }
+            if self.recovery_pending {
+                self.host.hide();
+                return "Recover the pending document generation before opening another workspace.".into();
             }
             self.begin_request(config, source, true, Some(pin));
             self.open = false;

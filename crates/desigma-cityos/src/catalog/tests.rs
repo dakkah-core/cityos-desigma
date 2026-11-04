@@ -4,12 +4,13 @@ use serde_json::json;
 
 #[test]
 fn selected_workspace_requests_preserve_the_source_and_do_not_resume_unrelated_drafts() {
-    let request = WorkspaceRequest::selected("config/experience/another-page.input.json", true);
+    let (browser, _, _) = fixture();
+    let request = browser.selected_request("config/experience/another-page.input.json", true).unwrap();
     assert_eq!(request.source_path.as_deref(), Some("config/experience/another-page.input.json"));
     assert!(request.preview_only);
     assert!(!request.resume);
     assert!(request.resource_pin.is_none());
-    let browse = WorkspaceRequest::browse();
+    let browse = browser.browse_request(false);
     assert!(browse.source_path.is_none());
     assert!(!browse.resume);
 }
@@ -17,14 +18,77 @@ fn selected_workspace_requests_preserve_the_source_and_do_not_resume_unrelated_d
 #[test]
 fn design_preview_requests_preserve_the_complete_captured_locator_without_draft_authority() {
     let pin = exact_specimen_profile("fixture.second", "2", "Second", "authoring-two", "web");
-    let request = WorkspaceRequest::pinned_preview(pin.clone());
+    let (browser, _, _) = fixture();
+    let request = browser.pinned_request(pin.clone()).unwrap();
     assert!(request.preview_only && !request.resume);
     assert_eq!(request.source_path.as_deref(), pin["sourcePath"].as_str());
     assert_eq!(request.resource_pin, Some(pin));
 }
 
+fn change_handoff_context(browser: &mut Browser, change: usize) {
+    match change {
+        0 => browser.repository = "different-repository".into(),
+        1 => browser.reader = "different-reader".into(),
+        2 => browser.node = "different-node".into(),
+        3 => browser.cache = Some(PathBuf::from("different-cache")),
+        4 => browser.canonical_ref = Some("different-ref".into()),
+        5 => browser.mode = "local".into(),
+        _ => {
+            browser.catalog_binding.as_mut().unwrap().generation = "second".into();
+            browser.summary.as_mut().unwrap()["generationId"] = json!("second");
+        }
+    }
+}
+
+#[test]
+fn workspace_handoff_captures_configuration_and_rejects_changed_context() {
+    for change in 0..7 {
+        let (mut browser, _, _) = fixture();
+        let request = browser.selected_request("config/experience/page.json", true).unwrap();
+        let original_repository = request.config.repository.clone();
+        browser.workspace_request = Some(request);
+        browser.workspace_theme = Some("theme".into());
+        change_handoff_context(&mut browser, change);
+        assert_eq!(browser.workspace_request.as_ref().unwrap().config.repository, original_repository);
+        assert!(browser.take_workspace_request().is_none(), "change {change}");
+        assert!(browser.workspace_theme.is_none());
+    }
+    let (mut browser, _, _) = fixture();
+    browser.workspace_request = browser.selected_request("config/experience/page.json", true);
+    assert!(browser.take_workspace_request().is_some());
+    browser.catalog_binding = None;
+    assert!(browser.selected_request("config/experience/page.json", true).is_none());
+    browser.workspace_request = Some(browser.browse_request(false));
+    assert!(browser.take_workspace_request().is_some(), "Browsing remains available without a catalog generation");
+}
+
+#[test]
+fn inline_handoff_rejects_changed_context_and_distinguishes_identical_pins() {
+    let pin = exact_specimen_profile("fixture.second", "2", "Second", "authoring-two", "web");
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100., 100.));
+    for change in 0..7 {
+        let (mut browser, _, _) = fixture();
+        browser.inline_preview = browser.pinned_request(pin.clone()).map(|request| (request, rect));
+        change_handoff_context(&mut browser, change);
+        assert!(browser.take_inline_preview().is_none(), "change {change}");
+    }
+    let (mut first, _, _) = fixture();
+    first.inline_preview = first.pinned_request(pin.clone()).map(|request| (request, rect));
+    let first = first.take_inline_preview().unwrap().0;
+    let (mut second, _, _) = fixture();
+    second.repository = "other-repository".into();
+    second.catalog_binding.as_mut().unwrap().config.repository = second.repository.clone().into();
+    let second = second.pinned_request(pin.clone()).unwrap();
+    assert_eq!(first.resource_pin, second.resource_pin);
+    assert_ne!((first.identity.clone(), pin.clone()), (second.identity, pin.clone()));
+    let (mut newer, _, _) = fixture();
+    change_handoff_context(&mut newer, 6);
+    let newer = newer.pinned_request(pin.clone()).unwrap();
+    assert_ne!((first.identity, pin.clone()), (newer.identity, pin));
+}
+
 fn profile_summary() -> Value {
-    json!({"snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[
+    json!({"generationId":"first","snapshot":{"mode":"committed","canonicalCommit":"a".repeat(40)},"workspaceProfiles":[
         {"sourcePath":"config/experience/living-canvas-frame/cityos-web.input.json","kind":"composition","fixture":"cityos-web-frame"},
         {"sourcePath":"packages/design-system/src/components/ui/accordion.tsx","publicExport":"Accordion","kind":"component-specimen","fixture":"cityos-accordion"}
     ]})

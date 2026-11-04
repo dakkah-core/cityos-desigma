@@ -140,7 +140,7 @@ pub struct Browser {
     pub local_design_error: Option<String>,
     pub has_bound_draft: bool,
     pub host_diagnostic_request: bool,
-    pub inline_preview: Option<(Value, egui::Rect)>,
+    pub inline_preview: Option<(WorkspaceRequest, egui::Rect)>,
     pub inline_status: String,
     repository: String,
     reader: String,
@@ -190,25 +190,74 @@ pub struct Browser {
     atlas_tools: tools::AtlasTools,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkspaceIdentity {
+    config: ReaderConfig,
+    mode: String,
+    binding: Option<CatalogBinding>,
+}
+
 pub struct WorkspaceRequest {
+    config: crate::bridge::Config,
+    identity: WorkspaceIdentity,
     pub source_path: Option<String>,
     pub resource_pin: Option<Value>,
     pub preview_only: bool,
     pub resume: bool,
 }
 impl WorkspaceRequest {
-    pub fn browse() -> Self {
-        Self { source_path: None, resource_pin: None, preview_only: true, resume: false }
+    pub fn config(&self) -> crate::bridge::Config {
+        self.config.clone()
     }
-    pub fn selected(source: &str, preview_only: bool) -> Self {
-        Self { source_path: Some(source.into()), resource_pin: None, preview_only, resume: false }
+    pub fn identity(&self) -> WorkspaceIdentity {
+        self.identity.clone()
     }
-    pub fn pinned_preview(resource: Value) -> Self {
-        Self { source_path: resource["sourcePath"].as_str().map(str::to_owned), resource_pin: Some(resource), preview_only: true, resume: false }
+    fn browse(config: crate::bridge::Config, identity: WorkspaceIdentity) -> Self {
+        Self { config, identity, source_path: None, resource_pin: None, preview_only: true, resume: false }
+    }
+    fn selected(config: crate::bridge::Config, identity: WorkspaceIdentity, source: &str, preview_only: bool) -> Self {
+        Self { config, identity, source_path: Some(source.into()), resource_pin: None, preview_only, resume: false }
+    }
+    fn pinned_preview(config: crate::bridge::Config, identity: WorkspaceIdentity, resource: Value) -> Self {
+        Self { config, identity, source_path: resource["sourcePath"].as_str().map(str::to_owned), resource_pin: Some(resource), preview_only: true, resume: false }
     }
 }
 
 impl Browser {
+    fn workspace_identity(&self) -> WorkspaceIdentity {
+        WorkspaceIdentity { config: self.reader_config(), mode: self.mode.clone(), binding: self.usable_generation().cloned() }
+    }
+    fn browse_request(&self, resume: bool) -> WorkspaceRequest {
+        let mut request = WorkspaceRequest::browse(self.workspace_config(), self.workspace_identity());
+        request.resume = resume;
+        request.preview_only = !resume;
+        request
+    }
+    fn selected_request(&self, source: &str, preview_only: bool) -> Option<WorkspaceRequest> {
+        self.usable_generation()?;
+        Some(WorkspaceRequest::selected(self.workspace_config(), self.workspace_identity(), source, preview_only))
+    }
+    fn pinned_request(&self, pin: Value) -> Option<WorkspaceRequest> {
+        self.usable_generation()?;
+        Some(WorkspaceRequest::pinned_preview(self.workspace_config(), self.workspace_identity(), pin))
+    }
+    fn request_is_current(&self, request: &WorkspaceRequest) -> bool {
+        request.identity == self.workspace_identity()
+    }
+    pub fn take_workspace_request(&mut self) -> Option<WorkspaceRequest> {
+        let request = self.workspace_request.take()?;
+        if self.request_is_current(&request) {
+            Some(request)
+        } else {
+            self.workspace_theme = None;
+            self.error = Some("Catalog connection or generation changed; select the resource again.".into());
+            None
+        }
+    }
+    pub fn take_inline_preview(&mut self) -> Option<(WorkspaceRequest, egui::Rect)> {
+        let (request, rect) = self.inline_preview.take()?;
+        self.request_is_current(&request).then_some((request, rect))
+    }
     /// Reuse only the currently bound loaded generation. No query, scan or source read.
     pub fn coverage_observation(&self) -> Option<CoverageObservation> {
         self.usable_generation()?;
