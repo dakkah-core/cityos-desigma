@@ -240,6 +240,7 @@ pub struct WorkspaceRequest {
     config: crate::bridge::Config,
     identity: WorkspaceIdentity,
     pub source_path: Option<String>,
+    pub source_identity: Option<crate::workspace::CanonicalSourceIdentity>,
     pub resource_pin: Option<Value>,
     pub preview_only: bool,
     pub resume: bool,
@@ -252,13 +253,13 @@ impl WorkspaceRequest {
         self.identity.clone()
     }
     fn browse(config: crate::bridge::Config, identity: WorkspaceIdentity) -> Self {
-        Self { config, identity, source_path: None, resource_pin: None, preview_only: true, resume: false }
+        Self { config, identity, source_path: None, source_identity: None, resource_pin: None, preview_only: true, resume: false }
     }
     fn selected(config: crate::bridge::Config, identity: WorkspaceIdentity, source: &str, preview_only: bool) -> Self {
-        Self { config, identity, source_path: Some(source.into()), resource_pin: None, preview_only, resume: false }
+        Self { config, identity, source_path: Some(source.into()), source_identity: None, resource_pin: None, preview_only, resume: false }
     }
     fn pinned_preview(config: crate::bridge::Config, identity: WorkspaceIdentity, resource: Value) -> Self {
-        Self { config, identity, source_path: resource["sourcePath"].as_str().map(str::to_owned), resource_pin: Some(resource), preview_only: true, resume: false }
+        Self { config, identity, source_path: resource["sourcePath"].as_str().map(str::to_owned), source_identity: None, resource_pin: Some(resource), preview_only: true, resume: false }
     }
 }
 
@@ -275,6 +276,38 @@ impl Browser {
     fn selected_request(&self, source: &str, preview_only: bool) -> Option<WorkspaceRequest> {
         self.usable_generation()?;
         Some(WorkspaceRequest::selected(self.workspace_config(), self.workspace_identity(), source, preview_only))
+    }
+    fn composition_request(&self, source: &str, digest: &str, observation: &str, resource_id: Option<&str>, preview_only: bool) -> Option<WorkspaceRequest> {
+        self.usable_generation()?;
+        let snapshot = &self.summary.as_ref()?["snapshot"];
+        if self.mode != "committed" || snapshot["mode"] != "committed" {
+            return None;
+        }
+        let commit = snapshot["canonicalCommit"].as_str()?;
+        if !snapshot["observations"].as_array()?.iter().any(|item| {
+            item["id"] == observation && item["kind"] == "git" && item["revision"] == commit
+        }) {
+            return None;
+        }
+        let source_identity = crate::workspace::CanonicalSourceIdentity::new(source, commit, digest, resource_id)?;
+        let mut request = WorkspaceRequest::selected(self.workspace_config(), self.workspace_identity(), source, preview_only);
+        request.source_identity = Some(source_identity);
+        Some(request)
+    }
+    fn navigation_composition_request(&self, child: &Value) -> Option<WorkspaceRequest> {
+        let source = child["sourcePath"].as_str()?;
+        let digest = child["sourceDigest"].as_str()?;
+        let observation = child["observationId"].as_str()?;
+        if child["classificationStatus"] != "classified" {
+            return None;
+        }
+        let sources = child["sources"].as_array()?;
+        if sources.is_empty() || !sources.iter().all(|item| {
+            item["sourcePath"] == source && item["sourceDigest"] == digest && item["observationId"] == observation && item["classificationStatus"] == "classified"
+        }) {
+            return None;
+        }
+        self.composition_request(source, digest, observation, Some(child["id"].as_str()?), true)
     }
     fn pinned_request(&self, pin: Value) -> Option<WorkspaceRequest> {
         self.usable_generation()?;

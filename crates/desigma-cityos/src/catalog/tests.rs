@@ -646,6 +646,11 @@ fn protected_canvas_opens_the_exact_canonical_composition_without_editing_or_ren
     let request = browser.workspace_request.take().expect("Protected canonical structure should open directly");
     assert_eq!(request.source_path.as_deref(), Some(selected.source_path.as_str()));
     assert!(!request.preview_only && !request.resume);
+    let identity = request.source_identity.as_ref().unwrap();
+    assert_eq!(identity.source_path, selected.source_path);
+    assert_eq!(identity.commit, "a".repeat(40));
+    assert_eq!(identity.source_digest, selected.source_digest);
+    assert_eq!(identity.resource_id.as_deref(), Some(selected.semantic_id.as_str()));
     assert!(request.resource_pin.is_none(), "Pinned requests use the preview-only route");
     let actions = support::actions(&selected, browser.specimen.as_ref(), browser.summary.as_ref(), "committed");
     assert!(!actions.editable && !actions.actual_preview);
@@ -830,10 +835,13 @@ fn nested_target_composition_opens_its_exact_registered_source_without_a_frame_s
     browser.displayed_filters = browser.filters.clone();
     browser.location_filters = browser.filters.clone();
     let source = "config/experience/registered-page.input.json";
+    browser.summary.as_mut().unwrap()["snapshot"]["canonicalCommit"] = json!("a".repeat(40));
+    browser.summary.as_mut().unwrap()["snapshot"]["observations"] = json!([{"id":"git:fixture","kind":"git","revision":"a".repeat(40)}]);
     browser.summary.as_mut().unwrap()["navigation"]["products"] = json!([{
         "id":"alpha","name":"Alpha","targets":[{"id":"web","kind":"target","shells":[{
             "id":"main","name":"Main shell","routes":[{"id":"overview","path":"/overview","compositions":[{
-                "id":"composition.page","kind":"composition","sourcePath":source,"sourceDigest":"d".repeat(64)
+                "id":"composition.page","kind":"composition","sourcePath":source,"sourceDigest":"d".repeat(64),"observationId":"git:fixture",
+                "classificationStatus":"classified","sources":[{"sourcePath":source,"sourceDigest":"d".repeat(64),"observationId":"git:fixture","classificationStatus":"classified"}]
             }]}]
         }]}]
     }]);
@@ -849,11 +857,156 @@ fn nested_target_composition_opens_its_exact_registered_source_without_a_frame_s
     }
     let request = browser.workspace_request.take().expect("Registered composition action should open its selected workspace");
     assert_eq!(request.source_path.as_deref(), Some(source));
+    let identity = request.source_identity.unwrap();
+    assert_eq!(identity.commit, "a".repeat(40));
+    assert_eq!(identity.source_digest, "d".repeat(64));
+    assert_eq!(identity.resource_id.as_deref(), Some("composition.page"));
     assert!(request.preview_only && !request.resume);
+}
+
+#[test]
+fn composition_handoff_rejects_missing_or_local_source_identity() {
+    let mut browser = protected_canvas_browser();
+    let entry = browser.selected.clone().unwrap();
+    assert!(browser.composition_request(&entry.source_path, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true).is_some());
+    assert!(browser.composition_request(&entry.source_path, "missing", &entry.observation_id, Some(&entry.semantic_id), true).is_none());
+    assert!(browser.composition_request(&entry.source_path, &entry.source_digest, "other-observation", Some(&entry.semantic_id), true).is_none());
+    let mut child = json!({"id":entry.semantic_id,"sourcePath":entry.source_path,"sourceDigest":entry.source_digest,
+        "observationId":entry.observation_id,"classificationStatus":"classified","sources":[{"sourcePath":entry.source_path,
+        "sourceDigest":entry.source_digest,"observationId":entry.observation_id,"classificationStatus":"classified"}]});
+    assert!(browser.navigation_composition_request(&child).is_some());
+    child["sources"].as_array_mut().unwrap().push(json!({"sourcePath":entry.source_path,"sourceDigest":"c".repeat(64),
+        "observationId":entry.observation_id,"classificationStatus":"classified"}));
+    assert!(browser.navigation_composition_request(&child).is_none());
+    browser.mode = "local".into();
+    assert!(browser.composition_request(&entry.source_path, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true).is_none());
 }
 
 fn fixture() -> (Browser, Sender<Reply>, Receiver<Job>) {
     super::test_support::captured_browser(services())
+}
+
+// Exercises the Browser worker and an owned JSONL process, not real repositories
+// or an installed desktop. Run separately from other stateful work.
+#[test]
+#[ignore = "requires the pinned packaged Node runtime in CITYOS_DESIGN_WORKSPACE_NODE"]
+fn browser_worker_switches_repositories_and_fences_workspace_handoffs() {
+    fn settle(browser: &mut Browser) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while browser.busy {
+            browser.poll();
+            if !browser.busy { break; }
+            if Instant::now() >= deadline {
+                browser.cancelled.store(true, Ordering::Release);
+                panic!("Browser worker did not settle; activity: {}", browser.activity);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("desigma-browser-switch-{}", uuid::Uuid::new_v4()));
+    let repo_a = root.join("repo-a");
+    let repo_b = root.join("repo-b");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&repo_a).unwrap();
+    std::fs::create_dir(&repo_b).unwrap();
+    let repo_a = std::fs::canonicalize(repo_a).unwrap();
+    let repo_b = std::fs::canonicalize(repo_b).unwrap();
+    let reader = root.join("reader.mjs");
+    let alternate_reader = root.join("alternate-reader.mjs");
+    let script = r#"import {createInterface} from 'node:readline';
+      import {basename} from 'node:path';
+      let generation=null,repository=null;
+      const send=(r,result)=>process.stdout.write(JSON.stringify({protocolVersion:r.protocolVersion,sessionId:r.sessionId,requestId:r.requestId,generationId:generation,kind:'result',result})+'\n');
+      createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);
+        if(r.op==='Hello')return send(r,{});
+        if(r.op==='Scan'){
+          const name=basename(r.repositoryRoot);
+          if(name!=='repo-a' && name!=='repo-b')throw Error('unexpected repository');
+          repository=name==='repo-a'?'a':'b';
+          generation=(repository==='a'?'c':'d').repeat(64);
+          return send(r,{generationId:generation,readerProcess:process.pid,readerSession:r.sessionId,snapshot:{repositoryId:repository.repeat(64),canonicalCommit:(repository==='a'?'e':'f').repeat(40),mode:r.mode}});
+        }
+        if(r.op==='Query')return send(r,{entries:[{id:'entry-'+repository,semanticId:'fixture-'+repository,label:'fixture',level:'L0',family:'foundations',kind:'token',owner:'fixture',package:null,product:null,targets:[],locales:[],sourcePath:'tokens.json',sourcePointer:'',sourceDigest:'fixture',observationId:'fixture',dependencies:[],generationStatus:'not-applicable',classificationStatus:'classified',temporaryView:'token-sheet',persistentDraft:false,editable:false,rendererQualified:false,diagnostics:[]}],total:1,nextOffset:null});
+        throw Error('unexpected operation '+r.op);
+      });"#;
+    std::fs::write(&reader, script).unwrap();
+    std::fs::write(&alternate_reader, script).unwrap();
+    let node: PathBuf = std::env::var_os("CITYOS_DESIGN_WORKSPACE_NODE")
+        .expect("set CITYOS_DESIGN_WORKSPACE_NODE to the pinned Node executable").into();
+    assert!(node.is_absolute() && node.is_file(), "the pinned Node executable must be an absolute file path");
+
+    let mut browser = Browser::new(None, Some(reader.clone()), Some(node.clone()), None, None, services());
+    browser.draft_repository = repo_a.to_string_lossy().into_owned();
+    browser.connect_draft("committed");
+    assert!(browser.busy);
+    settle(&mut browser);
+    assert!(browser.error.is_none(), "{:?}", browser.error);
+    assert_eq!(browser.reader_config().repository, repo_a);
+    assert_eq!(browser.reader_config().reader, reader);
+    assert_eq!(browser.reader_config().node, node);
+    assert_eq!(browser.mode, "committed");
+    assert_eq!(browser.summary.as_ref().unwrap()["snapshot"]["repositoryId"], "a".repeat(64));
+    assert_eq!(browser.summary.as_ref().unwrap()["snapshot"]["canonicalCommit"], "e".repeat(40));
+    assert_eq!(browser.usable_generation().unwrap().generation, "c".repeat(64));
+    assert_eq!(browser.entries[0].id, "entry-a");
+    assert!(browser.summary.as_ref().unwrap()["readerProcess"].as_u64().unwrap() > 0);
+    let a_session = browser.summary.as_ref().unwrap()["readerSession"].as_str().unwrap().to_owned();
+    let old_a = browser.selected_request("tokens.json", true).unwrap();
+    browser.workspace_request = browser.selected_request("tokens.json", true);
+
+    browser.draft_repository = repo_b.to_string_lossy().into_owned();
+    browser.connect_draft("committed");
+    assert!(browser.busy && browser.switching.is_some());
+    assert!(browser.take_workspace_request().is_none());
+    // Even a request queued during the in-flight switch is discarded on completion.
+    browser.workspace_request = Some(browser.browse_request(false));
+    settle(&mut browser);
+    assert!(browser.error.is_none(), "{:?}", browser.error);
+    assert_eq!(browser.reader_config().repository, repo_b);
+    assert_eq!(browser.summary.as_ref().unwrap()["snapshot"]["repositoryId"], "b".repeat(64));
+    assert_eq!(browser.summary.as_ref().unwrap()["snapshot"]["canonicalCommit"], "f".repeat(40));
+    assert_eq!(browser.usable_generation().unwrap().generation, "d".repeat(64));
+    assert_eq!(browser.entries[0].id, "entry-b");
+    assert!(browser.summary.as_ref().unwrap()["readerProcess"].as_u64().unwrap() > 0);
+    assert_ne!(a_session, browser.summary.as_ref().unwrap()["readerSession"].as_str().unwrap());
+    assert!(browser.take_workspace_request().is_none());
+    browser.workspace_request = Some(old_a);
+    assert!(browser.take_workspace_request().is_none(), "an A handoff must not open under B");
+    let old_b = browser.selected_request("tokens.json", true).unwrap();
+
+    browser.draft_repository = repo_a.to_string_lossy().into_owned();
+    browser.connect_draft("committed");
+    assert!(browser.busy);
+    settle(&mut browser);
+    assert!(browser.error.is_none(), "{:?}", browser.error);
+    assert_eq!(browser.reader_config().repository, repo_a);
+    assert_eq!(browser.usable_generation().unwrap().generation, "c".repeat(64));
+    assert_eq!(browser.entries[0].id, "entry-a");
+    browser.workspace_request = Some(old_b);
+    assert!(browser.take_workspace_request().is_none(), "a B handoff must not open under A");
+    assert!(browser.selected_request("tokens.json", true).is_some());
+    drop(browser);
+
+    // A same-repository connection preserves its immutable pin. The alternate
+    // script path forces a real Switch without changing the repository identity.
+    let mut wrong_pin = Browser::new(None, Some(reader), Some(node), None, Some("f".repeat(40)), services());
+    wrong_pin.repository = repo_a.to_string_lossy().into_owned();
+    wrong_pin.draft_repository = wrong_pin.repository.clone();
+    wrong_pin.draft_reader = alternate_reader.to_string_lossy().into_owned();
+    let previous_config = wrong_pin.reader_config();
+    wrong_pin.connect_draft("committed");
+    assert!(wrong_pin.busy);
+    settle(&mut wrong_pin);
+    assert!(wrong_pin.error.as_deref().is_some_and(|error| error.contains("invalid or mismatched source identity")));
+    assert_eq!(wrong_pin.reader_config(), previous_config);
+    assert!(wrong_pin.summary.is_none() && wrong_pin.usable_generation().is_none());
+    drop(wrong_pin);
+    let resolved_root = std::fs::canonicalize(&root).unwrap();
+    let resolved_temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    assert_eq!(resolved_root.parent(), Some(resolved_temp.as_path()));
+    assert!(resolved_root.file_name().unwrap().to_string_lossy().starts_with("desigma-browser-switch-"));
+    std::fs::remove_dir_all(resolved_root).unwrap();
 }
 
 #[test]

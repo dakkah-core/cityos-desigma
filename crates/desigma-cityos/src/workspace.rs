@@ -80,6 +80,42 @@ pub fn specimen_locator(resource: &Value) -> Option<Value> {
     Some(Value::Object(locator))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalSourceIdentity {
+    pub source_path: String,
+    pub commit: String,
+    pub source_digest: String,
+    pub resource_id: Option<String>,
+}
+
+impl CanonicalSourceIdentity {
+    pub fn new(source_path: &str, commit: &str, source_digest: &str, resource_id: Option<&str>) -> Option<Self> {
+        let hex = |value: &str, length| value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if source_path.is_empty() || !hex(commit, 40) || !hex(source_digest, 64) || resource_id.is_some_and(str::is_empty) {
+            return None;
+        }
+        Some(Self { source_path: source_path.into(), commit: commit.to_ascii_lowercase(), source_digest: source_digest.to_ascii_lowercase(), resource_id: resource_id.map(str::to_owned) })
+    }
+}
+
+fn exact_canonical_resource(resources: &[Value], identity: &CanonicalSourceIdentity) -> Result<Value, String> {
+    let mut matches = resources.iter().filter(|resource| {
+        resource["kind"] != "registered-specimen"
+            && resource["sourcePath"].as_str() == Some(identity.source_path.as_str())
+            && resource["commit"].as_str() == Some(identity.commit.as_str())
+            && resource["sourceDigest"].as_str() == Some(identity.source_digest.as_str())
+            && identity.resource_id.as_ref().is_none_or(|id| resource["resourceId"].as_str() == Some(id.as_str()))
+    });
+    let first = matches.next().ok_or("The selected canonical source revision is missing or stale; refresh the catalog and renderer package.")?;
+    if matches.next().is_some() {
+        return Err("The selected canonical source revision is ambiguous; no resource was opened.".into());
+    }
+    if first["openAvailable"] == false {
+        return Err("The selected canonical source revision is unavailable in this renderer package.".into());
+    }
+    Ok(first.clone())
+}
+
 pub fn semantic_change_label(change: &Value) -> String {
     let field = change.get("field").and_then(Value::as_str).filter(|s| !s.is_empty());
     let node = change.get("nodeId").and_then(Value::as_str).filter(|s| !s.is_empty());
@@ -231,6 +267,7 @@ pub struct Workspace<H: EditorHost> {
     $visibility resource_search: String,
     $visibility coverage: crate::workspace_support::coverage::Coverage,
     $visibility requested_source: Option<String>,
+    $visibility requested_identity: Option<CanonicalSourceIdentity>,
     $visibility open_after_preview: bool,
     $visibility temporary_canvas: Option<H::Canvas>,
     $visibility tabs:BTreeMap<String,DraftTab<H::Session>>,
@@ -304,6 +341,7 @@ impl<H: EditorHost> Default for Workspace<H> {
             resource_search: String::new(),
             coverage: Default::default(),
             requested_source: None,
+            requested_identity: None,
             open_after_preview: false,
             temporary_canvas: None,
             tabs: BTreeMap::new(),
@@ -364,6 +402,14 @@ impl<H: EditorHost> Workspace<H> {
         let source = resource["sourcePath"].as_str().map(str::to_owned);
         self.begin_request(config, source, true, Some(resource));
     }
+    pub fn begin_selected(&mut self, config: Config, identity: CanonicalSourceIdentity, preview_only: bool) {
+        if self.recovery_pending {
+            self.error = Some("Recover the pending document generation before opening another workspace.".into());
+            return;
+        }
+        self.begin_request(config, Some(identity.source_path.clone()), preview_only, None);
+        self.requested_identity = Some(identity);
+    }
     pub fn begin_request(&mut self, config: Config, source: Option<String>, preview_only: bool, pin: Option<Value>) {
         if self.recovery_pending {
             self.error = Some("Recover the pending document generation before opening another workspace.".into());
@@ -387,6 +433,7 @@ impl<H: EditorHost> Workspace<H> {
         self.load_layout(&config);
         self.inline_identity = None;
         self.requested_pin = None;
+        self.requested_identity = None;
         self.changes_mode = false;
         self.host.reset();
         self.bridge = Some(bridge::Bridge::spawn(config.clone()));
@@ -763,6 +810,9 @@ impl<H: EditorHost> Workspace<H> {
         }
         self.host.configure_storage(&config.cache);
         self.coverage = Default::default();
+        self.requested_source = None;
+        self.requested_identity = None;
+        self.requested_pin = None;
         self.invalidate_specimen_request();
         self.resource = None;
         self.host.reset();
@@ -805,6 +855,8 @@ impl<H: EditorHost> Workspace<H> {
         self.load_layout(&config);
         self.inline_identity = None;
         self.requested_pin = None;
+        self.requested_identity = None;
+        self.requested_source = None;
         self.host.reset();
         self.config = Some(config);
         self.bridge = None;
@@ -1308,7 +1360,12 @@ impl<H: EditorHost> Workspace<H> {
                             self.capture_resources(&value);
                             self.resource_diagnostics = value["diagnostics"].as_array().cloned().unwrap_or_default();
                             if let Some(source) = self.requested_source.take() {
-                                if let Some(resource) = self.resources.iter().find(|r| r["sourcePath"] == source && r["openAvailable"] != false).cloned() {
+                                if let Some(identity) = self.requested_identity.take() {
+                                    match exact_canonical_resource(&self.resources, &identity) {
+                                        Ok(resource) => self.open_resource(resource),
+                                        Err(error) => { self.error = Some(error); self.picker_open = true; }
+                                    }
+                                } else if let Some(resource) = self.resources.iter().find(|r| r["sourcePath"] == source && r["openAvailable"] != false).cloned() {
                                     let resource = self.requested_pin.take().unwrap_or(resource);
                                     self.open_resource(resource);
                                 } else {

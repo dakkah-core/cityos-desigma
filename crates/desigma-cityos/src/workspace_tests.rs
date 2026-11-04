@@ -360,6 +360,47 @@ fn transport(workspace: &mut Workspace<FakeHost>) -> (Receiver<Value>, Sender<Re
     (requests, responses)
 }
 
+#[test]
+fn selected_canonical_resource_requires_one_exact_available_identity() {
+    let identity = crate::workspace::CanonicalSourceIdentity::new("config/experience/page.json", &"a".repeat(40), &"b".repeat(64), Some("page")).unwrap();
+    let resource = json!({"sourcePath":identity.source_path,"commit":identity.commit,"sourceDigest":identity.source_digest,"resourceId":"page","openAvailable":true});
+    let mut other_commit = resource.clone();
+    other_commit["commit"] = json!("c".repeat(40));
+    let mut other_digest = resource.clone();
+    other_digest["sourceDigest"] = json!("d".repeat(64));
+    let mut other_id = resource.clone();
+    other_id["resourceId"] = json!("other");
+    let mut unavailable = resource.clone();
+    unavailable["openAvailable"] = json!(false);
+    for (rows, expected) in [
+        (vec![other_commit.clone(), resource.clone()], true),
+        (vec![other_commit], false),
+        (vec![other_digest], false),
+        (vec![other_id], false),
+        (vec![], false),
+        (vec![resource.clone(), resource.clone()], false),
+        (vec![unavailable], false),
+    ] {
+        let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+        let mut workspace = ready_workspace();
+        let (requests, responses) = transport(&mut workspace);
+        workspace.requested_source = Some(identity.source_path.clone());
+        workspace.requested_identity = Some(identity.clone());
+        workspace.send(json!({"op":"Resources"}));
+        assert_eq!(requests.try_recv().unwrap()["op"], "Resources");
+        responses.send(Ok(json!({"resources":rows}))).unwrap();
+        workspace.poll(&mut host);
+        if expected {
+            let open = requests.try_recv().expect("the exact resource should open");
+            assert_eq!(open["op"], "Open");
+            assert_eq!(open["resource"], resource);
+        } else {
+            assert!(workspace.error.is_some());
+            assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)), "no substitute may open");
+        }
+    }
+}
+
 fn property_field() -> Value {
     json!({"nodeId":"root", "property":"elevation"})
 }

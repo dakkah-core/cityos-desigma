@@ -802,6 +802,29 @@ mod tests {
         let mut checkpoint = library.load_checkpoint(&file).unwrap();
         checkpoint.install_baseline(accepted.clone());
         library.prepare_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file, &accepted_record, &checkpoint).unwrap();
+        // Wrong operation or receipt must not resume the durable intent or
+        // replace the active document/history, and failure must leave it frozen.
+        let original_document = app.doc.clone();
+        let before_document = app.doc.to_json().unwrap();
+        let before_history = serde_json::to_value(&app.hist).unwrap();
+        for mismatch in ["operation", "receipt", "file", "draft", "live"] {
+            let mut wrong = accepted_record.clone();
+            match mismatch {
+                "operation" => wrong.command.operation_id = "other-operation".into(),
+                "receipt" => wrong.outcome = Some(json!({"receiptRef":"other"})),
+                "file" => app.lib_file.as_mut().unwrap().id = "other-file".into(),
+                "draft" => app.doc.cityos.as_mut().unwrap().draft_id = "other-draft".into(),
+                "live" => app.doc.name = "changed while frozen".into(),
+                _ => unreachable!(),
+            }
+            assert!(<App as desigma_cityos::editor::EditorHost>::recover_submission(&mut app, &wrong).is_err(), "{mismatch}");
+            assert!(app.cityos_submission_frozen(), "{mismatch}");
+            if mismatch == "file" { app.lib_file.as_mut().unwrap().id = file.clone(); }
+            if mismatch == "live" || mismatch == "draft" { app.doc = original_document.clone(); }
+            assert_eq!(app.doc.to_json().unwrap(), before_document, "{mismatch}");
+            assert_eq!(serde_json::to_value(&app.hist).unwrap(), before_history, "{mismatch}");
+            assert_eq!(library.load_submission_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id).unwrap(), accepted_record);
+        }
         // Restart before any accepted projection is installed; recover the durable
         // generation without requesting a new proposal or owner operation.
         app.lib = Some(desigma_library::Library::open(&root).unwrap());

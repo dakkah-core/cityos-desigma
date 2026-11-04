@@ -663,6 +663,8 @@ impl eframe::App for Shell {
                     self.workspace.resume(config, &self.app);
                 } else if let Some(pin) = request.resource_pin {
                     self.workspace.begin_pinned_preview(config, pin);
+                } else if let Some(identity) = request.source_identity {
+                    self.workspace.begin_selected(config, identity, request.preview_only);
                 } else {
                     self.workspace.begin(config, request.source_path, request.preview_only);
                 }

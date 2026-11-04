@@ -7,6 +7,7 @@ use crate::app::App;
 use desigma_cityos::draft::{draft, revision};
 use desigma_cityos::editor::{BaselineInstall, BaselineRecovery, EditorHost, EditorStatus, EditorToast};
 use desigma_cityos::history::{CityosHistory, CityosHistoryStep};
+use desigma_cityos::workspace_support::submission_recovery::{recover_accepted, AcceptedRecoveryHost};
 use desigma_doc::{Command, Document, DocumentCheckpoint};
 use desigma_library::{Library, SubmissionRecord, SubmissionState};
 use serde_json::Value;
@@ -198,6 +199,50 @@ fn draw(app: &mut App, ui: &mut egui::Ui, native_scene: bool, state: &mut Option
     }
     crate::canvas::draw::overlays(app, ui, rect);
     selected
+}
+
+impl AcceptedRecoveryHost for App {
+    fn freeze_for_recovery(&mut self) {
+        freeze(self);
+    }
+
+    fn recovery_context(&self) -> Result<(String, Vec<SubmissionRecord>), String> {
+        let library = self.lib.as_ref().ok_or("Draft library unavailable")?;
+        let file = self.lib_file.as_ref().ok_or("Draft file unavailable")?;
+        let records = library
+            .document_submissions_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &file.id)
+            .map_err(|error| error.to_string())?;
+        Ok((file.id.clone(), records))
+    }
+
+    fn recovery_intent(&self, operation_id: &str) -> Result<Option<desigma_library::SubmissionSyncIntent>, String> {
+        let library = self.lib.as_ref().ok_or("Draft library unavailable")?;
+        match library.load_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, operation_id) {
+            Ok(intent) => Ok(Some(intent)),
+            Err(desigma_library::LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn live_matches_checkpoint(&self, checkpoint: &DocumentCheckpoint) -> Result<bool, String> {
+        same_live_state(self, checkpoint)
+    }
+
+    fn resume_recovery(&self, operation_id: &str) -> Result<desigma_library::SubmissionSyncReceipt, String> {
+        self.lib
+            .as_ref()
+            .ok_or("Draft library unavailable")?
+            .resume_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, operation_id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn adopt_recovery(&mut self, checkpoint: DocumentCheckpoint) -> Result<(), String> {
+        adopt(self, checkpoint)
+    }
+
+    fn refresh_recovery_freeze(&mut self) -> Result<(), String> {
+        refresh_submission_freeze(self)
+    }
 }
 
 impl EditorHost for App {
@@ -562,27 +607,7 @@ impl EditorHost for App {
     }
 
     fn recover_submission(&mut self, record: &SubmissionRecord) -> Result<bool, String> {
-        freeze(self);
-        let (library, file_id) = submission_context(self, record)?;
-        let intent = match library.load_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id) {
-            Ok(intent) => intent,
-            Err(desigma_library::LibraryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.to_string()),
-        };
-        if intent.file_id != file_id || intent.accepted != *record {
-            return Err("Accepted-state recovery does not match the original document and operation".into());
-        }
-        let original = DocumentCheckpoint::from_json(&intent.previous_checkpoint).map_err(|error| error.to_string())?;
-        let accepted = DocumentCheckpoint::from_json(&intent.accepted_checkpoint).map_err(|error| error.to_string())?;
-        if !same_live_state(self, &original)? && !same_live_state(self, &accepted)? {
-            return Err("Frozen submitted document changed; reload its durable generation".into());
-        }
-        let receipt = library
-            .resume_submission_sync_with_policy(&desigma_cityos::storage_policy::CITYOS_STORAGE_POLICY, &record.command.operation_id)
-            .map_err(|error| error.to_string())?;
-        adopt(self, receipt.checkpoint)?;
-        refresh_submission_freeze(self)?;
-        Ok(true)
+        recover_accepted(self, record)
     }
 
     fn install_accepted(&mut self, record: &SubmissionRecord, mut document: Document) -> Result<(), String> {

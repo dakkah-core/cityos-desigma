@@ -557,10 +557,12 @@ impl Browser {
                     if let Some(path) = path {
                         ui.label(path);
                         if key == "compositions" && child["kind"] == "composition" {
-                            let open = ui.button("Open selected composition workspace");
+                            let request = self.navigation_composition_request(child);
+                            let open = ui.add_enabled(request.is_some(), egui::Button::new("Open selected composition workspace"))
+                                .on_hover_text("Requires a captured committed source identity; refresh the canonical catalog if unavailable.");
                             services.record(ui, &format!("catalog-hierarchy-open-{salt}"), open.rect);
                             if open.clicked() {
-                                self.workspace_request = self.selected_request(path, true);
+                                self.workspace_request = request;
                             }
                         }
                         if ui
@@ -712,6 +714,10 @@ impl Browser {
         ui.label(RichText::new(&entry.label).small().color(theme.text_secondary));
         ui.label(RichText::new(&entry.source_path).small().color(theme.text_secondary));
         let actions = support::actions(&entry, self.specimen.as_ref(), self.summary.as_ref(), &self.mode);
+        let composition_identity_available = actions.source.as_deref().is_some_and(|source| {
+            entry.classification_status == "classified" && source == entry.source_path
+                && self.composition_request(source, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true).is_some()
+        });
         ui.horizontal_wrapped(|ui| {
             for (label, status, reason) in actions.capability_rows() {
                 ui.small(format!("{label} · {status}")).on_hover_text(reason);
@@ -725,7 +731,11 @@ impl Browser {
                         .is_none()
                         .then_some("Switch to committed source and refresh the matching captured implementation before previewing this registered definition.")
                 } else {
-                    actions.source.is_none().then_some(actions.preview_reason.as_str())
+                    if entry.kind == "authored-composition" && !composition_identity_available {
+                        Some("Refresh the committed catalog to capture this composition's exact source identity.")
+                    } else {
+                        actions.source.is_none().then_some(actions.preview_reason.as_str())
+                    }
                 };
                 let label = if actions.preview_here {
                     "Preview here"
@@ -741,7 +751,7 @@ impl Browser {
                             self.pending_selection = true;
                         }
                     } else if let Some(source) = &actions.source {
-                        self.workspace_request = self.selected_request(source, true);
+                        self.workspace_request = if entry.kind == "authored-composition" { self.composition_request(source, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true) } else { self.selected_request(source, true) };
                     }
                 }
                 if actions.preview_here
@@ -785,8 +795,10 @@ impl Browser {
                             && specimen["data"]["composition"]["schemaVersion"] == "cityos.experience-composition.v1"
                             && specimen["workspaceProfile"]["kind"] != "registered-specimen"
                     });
-                let unavailable =
-                    actions.workspace_reason.as_deref().or_else(|| (!actions.editable && !protected_canvas).then_some(actions.edit_reason.as_str()));
+                let unavailable = actions.workspace_reason.as_deref()
+                    .or_else(|| (entry.kind == "authored-composition" && !composition_identity_available)
+                        .then_some("Refresh the committed catalog to capture this composition's exact source identity."))
+                    .or_else(|| (!actions.editable && !protected_canvas).then_some(actions.edit_reason.as_str()));
                 let label = if self.mode == "local" {
                     "Open canonical draft"
                 } else if protected_canvas {
@@ -796,7 +808,7 @@ impl Browser {
                 };
                 if action_button(ui, services, "catalog-edit-action", label, unavailable) {
                     if let Some(source) = &actions.source {
-                        self.workspace_request = self.selected_request(source, false);
+                        self.workspace_request = if entry.kind == "authored-composition" { self.composition_request(source, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), false) } else { self.selected_request(source, false) };
                     }
                 }
             });
