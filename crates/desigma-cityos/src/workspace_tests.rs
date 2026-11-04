@@ -394,9 +394,78 @@ fn selected_canonical_resource_requires_one_exact_available_identity() {
             let open = requests.try_recv().expect("the exact resource should open");
             assert_eq!(open["op"], "Open");
             assert_eq!(open["resource"], resource);
+            assert!(open.get("authoredPreviewIdentity").is_none(), "legacy opens keep their existing shape");
         } else {
             assert!(workspace.error.is_some());
             assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)), "no substitute may open");
+        }
+    }
+}
+
+#[test]
+fn authored_preview_never_falls_back_to_a_different_resource() {
+    let identity = crate::workspace::CanonicalSourceIdentity::new("config/experience/page.json", &"a".repeat(40), &"b".repeat(64), Some("page")).unwrap();
+    let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+    let mut workspace = ready_workspace();
+    let (requests, responses) = transport(&mut workspace);
+    workspace.requested_source = Some(identity.source_path.clone());
+    workspace.requested_identity = Some(identity.clone());
+    workspace.requested_authored_preview_identity = Some(json!({"resourceId":"page"}));
+    workspace.send(json!({"op":"Resources"}));
+    requests.try_recv().unwrap();
+    responses.send(Ok(json!({"resources":[{"sourcePath":identity.source_path,"commit":identity.commit,
+        "sourceDigest":"c".repeat(64),"resourceId":"page","openAvailable":true,"actualWebPreview":true}]}))).unwrap();
+    workspace.poll(&mut host);
+    assert!(workspace.error.is_some());
+    assert!(workspace.requested_authored_preview_identity.is_none());
+    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn authored_preview_open_transports_exact_selection_and_requires_explicit_bridge_confirmation() {
+    let identity = crate::workspace::CanonicalSourceIdentity::new("config/experience/page.json", &"a".repeat(40), &"b".repeat(64), Some("page")).unwrap();
+    let selection = json!({"repositoryId":"c".repeat(64),"commit":identity.commit,"sourcePath":identity.source_path,
+        "sourceDigest":identity.source_digest,"resourceId":"page","revision":"1","profileRef":"profile",
+        "targetProfileRef":"web","componentId":"component","componentVersion":"1","adapterId":"adapter",
+        "adapterDigest":"d".repeat(64),"rendererDigest":"e".repeat(64),"packageIdentity":"f".repeat(64),"referenceClosureDigest":"1".repeat(64)});
+    let resource = json!({"sourcePath":identity.source_path,"commit":identity.commit,"sourceDigest":identity.source_digest,
+        "resourceId":"page","openAvailable":true,"actualWebPreview":true});
+    for outcome in ["missing", "false", "no-renderer", "error", "verified"] {
+        let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+        let mut workspace = ready_workspace();
+        let (requests, responses) = transport(&mut workspace);
+        workspace.requested_source = Some(identity.source_path.clone());
+        workspace.requested_identity = Some(identity.clone());
+        workspace.requested_authored_preview_identity = Some(selection.clone());
+        workspace.send(json!({"op":"Resources"}));
+        requests.try_recv().unwrap();
+        responses.send(Ok(json!({"resources":[resource.clone()]}))).unwrap();
+        workspace.poll(&mut host);
+        let open = requests.try_recv().unwrap();
+        assert_eq!(open["op"], "Open");
+        assert_eq!(open["resource"], resource);
+        assert_eq!(open["authoredPreviewIdentity"], selection);
+        assert!(!workspace.actual_preview(), "the resource listing is not a confirmation");
+        assert!(workspace.preview_only && !workspace.open_after_preview);
+        if outcome == "error" {
+            responses.send(Err("DESIGN_AUTHORED_IDENTITY_MISMATCH".into())).unwrap();
+        } else {
+            let mut response = fixture_bundle("selected", 0, "flat");
+            response["resource"]["actualWebPreview"] = json!(outcome != "no-renderer");
+            if outcome != "missing" { response["authoredPreviewVerified"] = json!(outcome != "false"); }
+            responses.send(Ok(response)).unwrap();
+        }
+        workspace.poll(&mut host);
+        if outcome == "verified" {
+            assert!(workspace.actual_preview());
+            assert!(workspace.validated && workspace.staged.is_some());
+            assert!(workspace.preview_only, "verification must not install a persistent draft");
+        } else {
+            assert!(!workspace.actual_preview());
+            assert!(!workspace.validated && workspace.staged.is_none());
+            let error = workspace.error.as_deref().unwrap();
+            if outcome == "error" { assert_eq!(error, "DESIGN_AUTHORED_IDENTITY_MISMATCH"); }
+            else { assert!(error.contains("did not confirm")); }
         }
     }
 }

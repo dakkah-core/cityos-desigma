@@ -241,6 +241,7 @@ pub struct WorkspaceRequest {
     identity: WorkspaceIdentity,
     pub source_path: Option<String>,
     pub source_identity: Option<crate::workspace::CanonicalSourceIdentity>,
+    pub authored_preview_identity: Option<Value>,
     pub resource_pin: Option<Value>,
     pub preview_only: bool,
     pub resume: bool,
@@ -253,13 +254,13 @@ impl WorkspaceRequest {
         self.identity.clone()
     }
     fn browse(config: crate::bridge::Config, identity: WorkspaceIdentity) -> Self {
-        Self { config, identity, source_path: None, source_identity: None, resource_pin: None, preview_only: true, resume: false }
+        Self { config, identity, source_path: None, source_identity: None, authored_preview_identity: None, resource_pin: None, preview_only: true, resume: false }
     }
     fn selected(config: crate::bridge::Config, identity: WorkspaceIdentity, source: &str, preview_only: bool) -> Self {
-        Self { config, identity, source_path: Some(source.into()), source_identity: None, resource_pin: None, preview_only, resume: false }
+        Self { config, identity, source_path: Some(source.into()), source_identity: None, authored_preview_identity: None, resource_pin: None, preview_only, resume: false }
     }
     fn pinned_preview(config: crate::bridge::Config, identity: WorkspaceIdentity, resource: Value) -> Self {
-        Self { config, identity, source_path: resource["sourcePath"].as_str().map(str::to_owned), source_identity: None, resource_pin: Some(resource), preview_only: true, resume: false }
+        Self { config, identity, source_path: resource["sourcePath"].as_str().map(str::to_owned), source_identity: None, authored_preview_identity: None, resource_pin: Some(resource), preview_only: true, resume: false }
     }
 }
 
@@ -292,6 +293,28 @@ impl Browser {
         let source_identity = crate::workspace::CanonicalSourceIdentity::new(source, commit, digest, resource_id)?;
         let mut request = WorkspaceRequest::selected(self.workspace_config(), self.workspace_identity(), source, preview_only);
         request.source_identity = Some(source_identity);
+        Some(request)
+    }
+    // The materialized entry retains fields not represented by the typed list
+    // row. This is a candidate for bridge verification, never a capability.
+    fn authored_preview_request(&self, entry: &Entry) -> Option<WorkspaceRequest> {
+        if entry.kind != "authored-composition" || entry.classification_status != "classified" {
+            return None;
+        }
+        let specimen = self.specimen.as_ref().filter(|specimen| support::matches(entry, specimen))?;
+        let selection = specimen.get("entry")?.get("previewAvailability")?.get("selection")?;
+        let object = selection.as_object()?;
+        for key in ["repositoryId", "commit", "sourcePath", "sourceDigest", "resourceId", "revision", "profileRef", "targetProfileRef", "componentId", "componentVersion", "adapterId", "adapterDigest", "rendererDigest", "packageIdentity", "referenceClosureDigest"] {
+            object.get(key)?.as_str().filter(|value| !value.is_empty())?;
+        }
+        let snapshot = &self.summary.as_ref()?["snapshot"];
+        if selection["repositoryId"] != snapshot["repositoryId"] || selection["commit"] != snapshot["canonicalCommit"]
+            || selection["sourcePath"] != entry.source_path || selection["sourceDigest"] != entry.source_digest
+            || selection["resourceId"] != entry.semantic_id {
+            return None;
+        }
+        let mut request = self.composition_request(&entry.source_path, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true)?;
+        request.authored_preview_identity = Some(selection.clone());
         Some(request)
     }
     fn navigation_composition_request(&self, child: &Value) -> Option<WorkspaceRequest> {

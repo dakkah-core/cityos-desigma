@@ -882,6 +882,53 @@ fn composition_handoff_rejects_missing_or_local_source_identity() {
     assert!(browser.composition_request(&entry.source_path, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true).is_none());
 }
 
+fn authored_preview_browser() -> (Browser, Value) {
+    let mut browser = protected_canvas_browser();
+    let entry = browser.selected.as_ref().unwrap();
+    let selection = json!({"repositoryId":"c".repeat(64),"commit":"a".repeat(40),"sourcePath":entry.source_path,
+        "sourceDigest":entry.source_digest,"resourceId":entry.semantic_id,"revision":"revision/1",
+        "profileRef":"authoring/profile","targetProfileRef":"target/web","componentId":"fixture.protected",
+        "componentVersion":"1.0.0","adapterId":"authored-adapter","adapterDigest":"d".repeat(64),
+        "rendererDigest":"e".repeat(64),"packageIdentity":"f".repeat(64),"referenceClosureDigest":"1".repeat(64)});
+    browser.summary.as_mut().unwrap()["snapshot"]["repositoryId"] = selection["repositoryId"].clone();
+    browser.specimen.as_mut().unwrap()["entry"]["previewAvailability"] = json!({"status":"unverified", "actualWebPreview":false,
+        "qualification":"unqualified", "editable":false, "ownerWrites":false, "requiresBridgeRevalidation":true, "selection":selection});
+    (browser, selection)
+}
+
+#[test]
+fn authored_preview_button_passes_unverified_selection_without_granting_capability_or_opening_canvas() {
+    let (mut browser, selection) = authored_preview_browser();
+    let ctx = egui::Context::default();
+    let output = catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1000.), vec![]);
+    let mut text = String::new();
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.contains("Verify and preview"));
+    let entry = browser.selected.as_ref().unwrap();
+    assert!(!support::actions(entry, browser.specimen.as_ref(), browser.summary.as_ref(), "committed").actual_preview);
+    click_catalog(&mut browser, &ctx, egui::vec2(1600., 1000.), "catalog-preview-action");
+    let request = browser.workspace_request.take().unwrap();
+    assert_eq!(request.authored_preview_identity, Some(selection));
+    assert!(request.preview_only && !request.resume && request.resource_pin.is_none());
+    assert!(request.source_identity.is_some());
+}
+
+#[test]
+fn authored_preview_candidate_requires_complete_current_committed_selection() {
+    for barrier in ["local", "snapshot", "stale", "repositoryId", "commit", "sourcePath", "sourceDigest", "resourceId", "missing", "unclassified"] {
+        let (mut browser, _) = authored_preview_browser();
+        match barrier {
+            "local" => browser.mode = "local".into(),
+            "snapshot" => browser.summary.as_mut().unwrap()["snapshot"]["mode"] = json!("local"),
+            "stale" => browser.specimen.as_mut().unwrap()["digest"] = json!("stale"),
+            "unclassified" => browser.selected.as_mut().unwrap().classification_status = "conflicting".into(),
+            "missing" => { browser.specimen.as_mut().unwrap()["entry"]["previewAvailability"]["selection"].as_object_mut().unwrap().remove("referenceClosureDigest"); },
+            field => browser.specimen.as_mut().unwrap()["entry"]["previewAvailability"]["selection"][field] = json!("other"),
+        }
+        assert!(browser.authored_preview_request(browser.selected.as_ref().unwrap()).is_none(), "barrier {barrier}");
+    }
+}
+
 fn fixture() -> (Browser, Sender<Reply>, Receiver<Job>) {
     super::test_support::captured_browser(services())
 }

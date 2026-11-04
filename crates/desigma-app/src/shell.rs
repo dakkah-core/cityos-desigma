@@ -664,7 +664,11 @@ impl eframe::App for Shell {
                 } else if let Some(pin) = request.resource_pin {
                     self.workspace.begin_pinned_preview(config, pin);
                 } else if let Some(identity) = request.source_identity {
-                    self.workspace.begin_selected(config, identity, request.preview_only);
+                    if let Some(authored) = request.authored_preview_identity {
+                        self.workspace.begin_selected_authored_preview(config, identity, authored);
+                    } else {
+                        self.workspace.begin_selected(config, identity, request.preview_only);
+                    }
                 } else {
                     self.workspace.begin(config, request.source_path, request.preview_only);
                 }

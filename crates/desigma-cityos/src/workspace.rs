@@ -268,6 +268,8 @@ pub struct Workspace<H: EditorHost> {
     $visibility coverage: crate::workspace_support::coverage::Coverage,
     $visibility requested_source: Option<String>,
     $visibility requested_identity: Option<CanonicalSourceIdentity>,
+    $visibility requested_authored_preview_identity: Option<Value>,
+    $visibility authored_open_pending: bool,
     $visibility open_after_preview: bool,
     $visibility temporary_canvas: Option<H::Canvas>,
     $visibility tabs:BTreeMap<String,DraftTab<H::Session>>,
@@ -342,6 +344,8 @@ impl<H: EditorHost> Default for Workspace<H> {
             coverage: Default::default(),
             requested_source: None,
             requested_identity: None,
+            requested_authored_preview_identity: None,
+            authored_open_pending: false,
             open_after_preview: false,
             temporary_canvas: None,
             tabs: BTreeMap::new(),
@@ -410,6 +414,14 @@ impl<H: EditorHost> Workspace<H> {
         self.begin_request(config, Some(identity.source_path.clone()), preview_only, None);
         self.requested_identity = Some(identity);
     }
+    pub fn begin_selected_authored_preview(&mut self, config: Config, identity: CanonicalSourceIdentity, authored: Value) {
+        if self.recovery_pending {
+            self.error = Some("Recover the pending document generation before opening another workspace.".into());
+            return;
+        }
+        self.begin_selected(config, identity, true);
+        self.requested_authored_preview_identity = Some(authored);
+    }
     pub fn begin_request(&mut self, config: Config, source: Option<String>, preview_only: bool, pin: Option<Value>) {
         if self.recovery_pending {
             self.error = Some("Recover the pending document generation before opening another workspace.".into());
@@ -434,6 +446,8 @@ impl<H: EditorHost> Workspace<H> {
         self.inline_identity = None;
         self.requested_pin = None;
         self.requested_identity = None;
+        self.requested_authored_preview_identity = None;
+        self.authored_open_pending = false;
         self.changes_mode = false;
         self.host.reset();
         self.bridge = Some(bridge::Bridge::spawn(config.clone()));
@@ -474,6 +488,9 @@ impl<H: EditorHost> Workspace<H> {
         }
     }
     pub fn open_resource(&mut self, resource: Value) {
+        self.open_resource_with_authored_identity(resource, None);
+    }
+    fn open_resource_with_authored_identity(&mut self, resource: Value, authored: Option<Value>) {
         if self.busy.is_some() {
             return;
         }
@@ -489,7 +506,15 @@ impl<H: EditorHost> Workspace<H> {
                 self.error = Some(registered_availability_reason(&resource));
             }
         } else {
-            self.send(json!({"op":"Open","resource":resource}));
+            let mut request = json!({"op":"Open","resource":resource});
+            if let Some(identity) = authored {
+                request["authoredPreviewIdentity"] = identity;
+                self.authored_open_pending = true;
+                if let Some(resource) = self.resource.as_mut() {
+                    resource["actualWebPreview"] = json!(false);
+                }
+            }
+            self.send(request);
         }
     }
     pub fn invalidate_specimen_request(&mut self) {
@@ -501,6 +526,7 @@ impl<H: EditorHost> Workspace<H> {
         self.resource.as_ref().is_some_and(|r| r["kind"] == "registered-specimen")
     }
     pub fn prepare_resource(&mut self, resource: Value) {
+        self.authored_open_pending = false;
         self.invalidate_specimen_request();
         self.harness = false;
         self.error = None;
@@ -812,6 +838,8 @@ impl<H: EditorHost> Workspace<H> {
         self.coverage = Default::default();
         self.requested_source = None;
         self.requested_identity = None;
+        self.requested_authored_preview_identity = None;
+        self.authored_open_pending = false;
         self.requested_pin = None;
         self.invalidate_specimen_request();
         self.resource = None;
@@ -856,6 +884,8 @@ impl<H: EditorHost> Workspace<H> {
         self.inline_identity = None;
         self.requested_pin = None;
         self.requested_identity = None;
+        self.requested_authored_preview_identity = None;
+        self.authored_open_pending = false;
         self.requested_source = None;
         self.host.reset();
         self.config = Some(config);
@@ -1344,6 +1374,12 @@ impl<H: EditorHost> Workspace<H> {
             let history_command = if op == "Command" { self.history_command.take() } else { None };
             match result {
                 Err(error) => {
+                    if op == "Open" && self.authored_open_pending {
+                        self.authored_open_pending = false;
+                    }
+                    if op == "Resources" {
+                        self.requested_authored_preview_identity = None;
+                    }
                     if op == "FixturePreview" {
                         self.specimen_request = None;
                     }
@@ -1362,8 +1398,11 @@ impl<H: EditorHost> Workspace<H> {
                             if let Some(source) = self.requested_source.take() {
                                 if let Some(identity) = self.requested_identity.take() {
                                     match exact_canonical_resource(&self.resources, &identity) {
-                                        Ok(resource) => self.open_resource(resource),
-                                        Err(error) => { self.error = Some(error); self.picker_open = true; }
+                                        Ok(resource) => {
+                                            let authored = self.requested_authored_preview_identity.take();
+                                            self.open_resource_with_authored_identity(resource, authored);
+                                        },
+                                        Err(error) => { self.requested_authored_preview_identity = None; self.error = Some(error); self.picker_open = true; }
                                     }
                                 } else if let Some(resource) = self.resources.iter().find(|r| r["sourcePath"] == source && r["openAvailable"] != false).cloned() {
                                     let resource = self.requested_pin.take().unwrap_or(resource);
@@ -1385,6 +1424,13 @@ impl<H: EditorHost> Workspace<H> {
                             self.render_started = None;
                         }
                         "Open" | "Command" | "Project" => {
+                            if op == "Open" && self.authored_open_pending {
+                                self.authored_open_pending = false;
+                                if value["authoredPreviewVerified"] != true || value["resource"]["actualWebPreview"] != true {
+                                    self.error = Some("The workspace bridge did not confirm the selected authored preview identity. Refresh the catalog and installed renderer package.".into());
+                                    return;
+                                }
+                            }
                             if op == "Project" && !self.project_response_current(app, &value, presentation.as_ref()) {
                                 self.pending = Some(Instant::now());
                                 return;

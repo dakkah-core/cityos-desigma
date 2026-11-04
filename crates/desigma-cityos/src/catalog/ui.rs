@@ -718,6 +718,7 @@ impl Browser {
             entry.classification_status == "classified" && source == entry.source_path
                 && self.composition_request(source, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true).is_some()
         });
+        let authored_preview_request = self.authored_preview_request(&entry);
         ui.horizontal_wrapped(|ui| {
             for (label, status, reason) in actions.capability_rows() {
                 ui.small(format!("{label} · {status}")).on_hover_text(reason);
@@ -725,7 +726,9 @@ impl Browser {
         });
         if !actions.foundation {
             ui.horizontal_wrapped(|ui| {
-                let unavailable = if actions.preview_here {
+                let unavailable = if authored_preview_request.is_some() {
+                    None
+                } else if actions.preview_here {
                     actions
                         .inline_pin
                         .is_none()
@@ -737,7 +740,9 @@ impl Browser {
                         actions.source.is_none().then_some(actions.preview_reason.as_str())
                     }
                 };
-                let label = if actions.preview_here {
+                let label = if authored_preview_request.is_some() {
+                    "Verify and preview"
+                } else if actions.preview_here {
                     "Preview here"
                 } else if actions.source.is_some() && !actions.actual_preview {
                     "Open structure workspace"
@@ -745,7 +750,9 @@ impl Browser {
                     "Open actual preview"
                 };
                 if action_button(ui, services, "catalog-preview-action", label, unavailable) {
-                    if actions.preview_here {
+                    if let Some(request) = authored_preview_request {
+                        self.workspace_request = Some(request);
+                    } else if actions.preview_here {
                         self.detail_tab = DetailTab::Preview;
                         if self.specimen.is_none() {
                             self.pending_selection = true;
