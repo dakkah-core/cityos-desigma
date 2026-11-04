@@ -855,6 +855,176 @@ fn nested_target_composition_opens_its_exact_registered_source_without_a_frame_s
 fn fixture() -> (Browser, Sender<Reply>, Receiver<Job>) {
     super::test_support::captured_browser(services())
 }
+
+#[test]
+fn repository_connection_draft_is_separate_and_success_fences_previous_view() {
+    let (mut browser, tx, requests) = fixture();
+    browser.canonical_ref = Some("old-repository-pin".into());
+    browser.catalog_binding.as_mut().unwrap().config.canonical_ref = browser.canonical_ref.clone();
+    let previous_identity = browser.workspace_identity();
+    let old_request = browser.selected_request("tokens.json", true).unwrap();
+    browser.selected = Some(entry("one"));
+    browser.specimen = Some(json!({"data":"old preview"}));
+    browser.workspace_request = browser.selected_request("tokens.json", true);
+    browser.inline_preview = Some((browser.selected_request("tokens.json", true).unwrap(), egui::Rect::NOTHING));
+    browser.navigation_back.push(browser.location());
+    browser.draft_repository = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    browser.cache_root = Some(std::env::temp_dir().join("catalog-cache-root"));
+    browser.connect_draft("local");
+    let (epoch, config) = match requests.try_recv().unwrap() {
+        Job::Switch(epoch, config, mode) => { assert_eq!(mode, "local"); (epoch, config) }
+        _ => panic!("expected a connection switch"),
+    };
+    assert_eq!(browser.workspace_identity().config, previous_identity.config);
+    assert_eq!(browser.mode, "committed");
+    assert!(config.canonical_ref.is_none());
+    assert_eq!(browser.selected.as_ref().unwrap().id, "one");
+    assert!(browser.take_workspace_request().is_none());
+    assert!(browser.take_inline_preview().is_none());
+    tx.send(Reply::Switch(epoch - 1, Ok(json!({"generationId":"obsolete","snapshot":{"mode":"local"}})))).unwrap();
+    browser.poll();
+    assert!(browser.busy && browser.selected.is_some());
+    tx.send(Reply::Switch(epoch, Ok(json!({"generationId":"second","snapshot":{"mode":"local"}})))).unwrap();
+    browser.poll();
+    assert_eq!(browser.reader_config(), config);
+    assert_eq!(browser.mode, "local");
+    assert!(browser.selected.is_none() && browser.specimen.is_none() && browser.inline_preview.is_none());
+    assert!(browser.workspace_request.is_none() && browser.navigation_back.is_empty());
+    assert!(!browser.request_is_current(&old_request));
+    assert!(matches!(requests.try_recv(), Ok(Job::Query(_, _, 0, binding)) if binding.generation == "second" && binding.mode == "local"));
+    tx.send(Reply::Materialize(epoch, "one".into(), Ok(json!({"data":"late"})))).unwrap();
+    browser.poll();
+    assert!(browser.specimen.is_none());
+}
+
+#[test]
+fn failed_repository_connection_retains_view_and_only_uses_confirmed_recovery() {
+    for recovered in [false, true] {
+        let (mut browser, tx, requests) = fixture();
+        browser.selected = Some(entry("one"));
+        browser.specimen = Some(json!({"data":"retained"}));
+        let original = browser.reader_config();
+        browser.draft_repository = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        browser.connect_draft("committed");
+        let epoch = match requests.try_recv().unwrap() { Job::Switch(epoch, _, _) => epoch, _ => panic!("expected switch") };
+        tx.send(Reply::Switch(epoch, Err(("reader unavailable".into(), recovered)))).unwrap();
+        browser.poll();
+        assert_eq!(browser.reader_config(), original);
+        assert_eq!(browser.selected.as_ref().unwrap().id, "one");
+        assert_eq!(browser.specimen.as_ref().unwrap()["data"], "retained");
+        assert_eq!(browser.usable_generation().is_some(), recovered);
+        assert!(browser.error.as_ref().unwrap().contains("reader unavailable"));
+        browser.query(0);
+        assert_eq!(requests.try_recv().is_ok(), recovered);
+    }
+}
+
+#[test]
+fn draft_bound_during_successful_switch_keeps_old_config_and_fences_worker() {
+    let (mut browser, tx, requests) = fixture();
+    let original = browser.reader_config();
+    let original_mode = browser.mode.clone();
+    browser.selected = Some(entry("one"));
+    browser.specimen = Some(json!({"data":"retained"}));
+    browser.draft_repository = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    browser.connect_draft("local");
+    let epoch = match requests.try_recv().unwrap() { Job::Switch(epoch, _, _) => epoch, _ => panic!("expected switch") };
+    browser.has_bound_draft = true;
+    browser.workspace_request = Some(browser.browse_request(true));
+    browser.workspace_theme = Some("theme".into());
+    browser.inline_preview = browser.selected_request("tokens.json", true).map(|request| (request, egui::Rect::NOTHING));
+    tx.send(Reply::Switch(epoch, Ok(json!({"generationId":"second","snapshot":{"mode":"local"}})))).unwrap();
+    browser.poll();
+    assert_eq!(browser.reader_config(), original);
+    assert_eq!(browser.mode, original_mode);
+    assert_eq!(browser.selected.as_ref().unwrap().id, "one");
+    assert_eq!(browser.specimen.as_ref().unwrap()["data"], "retained");
+    assert!(browser.catalog_binding.is_none() && browser.usable_generation().is_none());
+    assert!(browser.workspace_request.is_none() && browser.workspace_theme.is_none() && browser.inline_preview.is_none());
+    assert!(browser.take_workspace_request().is_none() && browser.take_inline_preview().is_none());
+    let error = browser.error.as_ref().unwrap();
+    assert!(error.contains("draft") && error.contains("Close") && error.contains("reconnect"));
+    assert!(!browser.busy && browser.switching.is_none());
+    assert!(requests.try_recv().is_err());
+    browser.query(0);
+    assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn failed_switch_discards_handoffs_queued_before_and_during_switch() {
+    for recovered in [false, true] {
+        let (mut browser, tx, requests) = fixture();
+        browser.workspace_request = Some(browser.browse_request(false));
+        browser.workspace_theme = Some("theme".into());
+        browser.inline_preview = browser.selected_request("tokens.json", true).map(|request| (request, egui::Rect::NOTHING));
+        browser.draft_repository = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        browser.connect_draft("local");
+        let epoch = match requests.try_recv().unwrap() { Job::Switch(epoch, _, _) => epoch, _ => panic!("expected switch") };
+        assert!(browser.workspace_request.is_none() && browser.workspace_theme.is_none() && browser.inline_preview.is_none());
+
+        browser.workspace_request = Some(browser.browse_request(false));
+        browser.workspace_theme = Some("theme".into());
+        browser.inline_preview = browser.selected_request("tokens.json", true).map(|request| (request, egui::Rect::NOTHING));
+        assert!(browser.take_workspace_request().is_none() && browser.take_inline_preview().is_none());
+        assert!(browser.workspace_request.is_none() && browser.workspace_theme.is_none() && browser.inline_preview.is_none());
+
+        browser.workspace_request = Some(browser.browse_request(false));
+        browser.workspace_theme = Some("theme".into());
+        browser.inline_preview = browser.selected_request("tokens.json", true).map(|request| (request, egui::Rect::NOTHING));
+        tx.send(Reply::Switch(epoch, Err(("reader unavailable".into(), recovered)))).unwrap();
+        browser.poll();
+        assert_eq!(browser.usable_generation().is_some(), recovered);
+        assert!(browser.workspace_request.is_none() && browser.workspace_theme.is_none() && browser.inline_preview.is_none());
+        assert!(browser.take_workspace_request().is_none() && browser.take_inline_preview().is_none());
+    }
+}
+
+#[test]
+fn cache_isolated_by_physical_repository_and_source_mode() {
+    let repo = std::env::current_dir().unwrap();
+    let other = repo.parent().unwrap();
+    let root = std::env::temp_dir().join("catalog-cache-root");
+    let committed = repository_cache(Some(&root), &repo, "committed").unwrap().unwrap();
+    let local = repository_cache(Some(&root), &repo, "local").unwrap().unwrap();
+    let other_repo = repository_cache(Some(&root), other, "committed").unwrap().unwrap();
+    assert_ne!(committed, local);
+    assert_ne!(committed, other_repo);
+    assert_eq!(committed, repository_cache(Some(&root), &repo, "committed").unwrap().unwrap());
+    assert!(repository_cache(Some(&root), &repo, "unsupported").is_err());
+}
+
+#[test]
+fn repository_switch_rejects_malformed_identity_and_wrong_immutable_pin() {
+    let (browser, _, _) = fixture();
+    let mut config = browser.reader_config();
+    let pin = "a".repeat(40);
+    config.canonical_ref = Some(pin.to_uppercase());
+    let valid = json!({"generationId":"b".repeat(64),"snapshot":{
+        "mode":"committed","repositoryId":"c".repeat(64),"canonicalCommit":pin}});
+    assert_eq!(switch_generation(&config, "committed", &valid).unwrap(), "b".repeat(64));
+    for field in ["generationId", "repositoryId", "canonicalCommit", "mode"] {
+        let mut bad = valid.clone();
+        if field == "generationId" { bad[field] = json!("wrong"); }
+        else { bad["snapshot"][field] = json!("wrong"); }
+        assert!(switch_generation(&config, "committed", &bad).is_err(), "{field}");
+    }
+    let mut wrong_commit = valid.clone();
+    wrong_commit["snapshot"]["canonicalCommit"] = json!("d".repeat(40));
+    assert!(switch_generation(&config, "committed", &wrong_commit).is_err());
+    config.canonical_ref = Some("main".into());
+    assert!(switch_generation(&config, "committed", &valid).is_err());
+}
+
+#[test]
+fn bound_canvas_prevents_switching_when_host_cannot_verify_its_repository() {
+    let (mut browser, _, requests) = fixture();
+    browser.has_bound_draft = true;
+    browser.draft_repository = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    browser.connect_draft("local");
+    assert!(requests.try_recv().is_err());
+    assert!(browser.usable_generation().is_some());
+    assert!(browser.error.as_ref().unwrap().contains("canvas draft"));
+}
 #[test]
 fn filter_change_cannot_install_old_results_or_old_preview() {
     let (mut browser, tx, _) = fixture();

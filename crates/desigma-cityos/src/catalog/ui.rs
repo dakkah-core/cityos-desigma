@@ -349,19 +349,23 @@ impl Browser {
                 } else if ui.button("Refresh").clicked() {
                     self.refresh();
                 }
-                let old = self.mode.clone();
+                let mut requested_mode = self.mode.clone();
                 ui.add_enabled_ui(!self.busy, |ui| {
                     egui::ComboBox::from_id_salt("catalog-mode")
                         .width(155.0)
-                        .selected_text(if self.mode == "local" { "Local preview" } else { "GitLab main" })
+                        .selected_text(if self.mode == "local" { "Local preview" } else { "Committed source" })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.mode, "committed".into(), "GitLab main");
-                            ui.selectable_value(&mut self.mode, "local".into(), "Local preview");
+                            ui.selectable_value(&mut requested_mode, "committed".into(), "Committed source");
+                            ui.selectable_value(&mut requested_mode, "local".into(), "Local preview");
                         });
                 });
-                if old != self.mode {
-                    self.last_interaction = Instant::now();
-                    self.refresh();
+                if requested_mode != self.mode {
+                    let draft = (self.draft_repository.clone(), self.draft_reader.clone(), self.draft_node.clone());
+                    self.draft_repository = self.repository.clone();
+                    self.draft_reader = self.reader.clone();
+                    self.draft_node = self.node.clone();
+                    self.connect_draft(&requested_mode);
+                    (self.draft_repository, self.draft_reader, self.draft_node) = draft;
                 }
             });
         });
@@ -719,7 +723,7 @@ impl Browser {
                     actions
                         .inline_pin
                         .is_none()
-                        .then_some("Switch to GitLab main and refresh the matching captured implementation before previewing this registered definition.")
+                        .then_some("Switch to committed source and refresh the matching captured implementation before previewing this registered definition.")
                 } else {
                     actions.source.is_none().then_some(actions.preview_reason.as_str())
                 };
@@ -1074,7 +1078,7 @@ impl Browser {
                         } else if summary["snapshot"]["resolution"] == "explicit-pinned" {
                             "Pinned commit"
                         } else {
-                            "GitLab main"
+                            "Committed source"
                         },
                         sha.get(..10).unwrap_or(sha)
                     ))
@@ -1095,30 +1099,33 @@ impl Browser {
         let theme = services.theme();
         let mut open = self.settings_open;
         egui::Window::new("Catalog connection").id(egui::Id::new("catalog-settings")).open(&mut open).default_width(540.0).resizable(true).show(ctx, |ui| {
-            ui.label("CityOS repository");
+            if !self.repository.is_empty() { ui.label(format!("Active repository: {}", self.repository)); }
+            ui.label("Select a repository connection");
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.repository).desired_width(400.0));
+                ui.add(egui::TextEdit::singleline(&mut self.draft_repository).desired_width(400.0));
                 if ui.button("Browse…").clicked() {
                     if let Some(path) = (services.pick_repository)() {
-                        self.repository = path.to_string_lossy().into_owned();
+                        self.draft_repository = path.to_string_lossy().into_owned();
                     }
                 }
             });
             ui.collapsing("Reader settings", |ui| {
                 ui.label("Packaged reader");
-                ui.text_edit_singleline(&mut self.reader);
+                ui.text_edit_singleline(&mut self.draft_reader);
                 if ui.button("Choose reader…").clicked() {
                     if let Some(path) = (services.pick_reader)() {
-                        self.reader = path.to_string_lossy().into_owned();
+                        self.draft_reader = path.to_string_lossy().into_owned();
                     }
                 }
                 ui.label("Node executable");
-                ui.text_edit_singleline(&mut self.node);
+                ui.text_edit_singleline(&mut self.draft_node);
             });
+            ui.small("Uses the selected reader's default discovery. Other discovery profiles are unavailable in this view.");
+            if let Some(error) = &self.error { ui.label(error); }
             ui.add_space(theme.catalog_gap);
-            if ui.add_enabled(!self.busy && !self.repository.trim().is_empty(), egui::Button::new("Connect & refresh")).clicked() {
-                self.refresh();
-                self.settings_open = false;
+            if ui.add_enabled(!self.busy && !self.draft_repository.trim().is_empty(), egui::Button::new("Connect & refresh")).clicked() {
+                let mode = self.mode.clone();
+                self.connect_draft(&mode);
             }
         });
         self.settings_open &= open;

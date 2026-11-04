@@ -85,6 +85,21 @@ fn retain_cancelled_refresh(result: &Result<Value, String>, cancelled: bool, sam
     cancelled && same_session && had_generation && result.as_ref().is_err_and(|error| scan_cancelled(error))
 }
 
+// A reader response can establish an observed identity, but it does not prove
+// the identity of the selected repository unless a trusted expectation exists.
+fn switch_generation(config: &ReaderConfig, mode: &str, summary: &Value) -> Result<String, String> {
+    let pin = config.canonical_ref.as_deref().map(|value| {
+        if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("The canonical pin must be a full commit identity".to_string());
+        }
+        Ok(value.to_ascii_lowercase())
+    }).transpose()?;
+    desigma_cityos_catalog::federation::Binding::from_summary(
+        "switch", "reader", mode, summary, None, pin.as_deref(),
+    ).map(|binding| binding.generation_id)
+      .map_err(|_| "The reader returned an invalid or mismatched source identity".into())
+}
+
 fn recover_previous_catalog(binding: &CatalogBinding, cancelled: Arc<AtomicBool>, refresh_error: &str) -> Result<(Client, Value), String> {
     if binding.config.cache.is_none() {
         return Err("Saved-library recovery is unavailable without a cache".into());
@@ -269,6 +284,11 @@ impl Browser {
         request.identity == self.workspace_identity()
     }
     pub fn take_workspace_request(&mut self) -> Option<WorkspaceRequest> {
+        if self.switching.is_some() {
+            self.workspace_request = None;
+            self.workspace_theme = None;
+            return None;
+        }
         let request = self.workspace_request.take()?;
         if self.request_is_current(&request) {
             Some(request)
@@ -279,6 +299,10 @@ impl Browser {
         }
     }
     pub fn take_inline_preview(&mut self) -> Option<(WorkspaceRequest, egui::Rect)> {
+        if self.switching.is_some() {
+            self.inline_preview = None;
+            return None;
+        }
         let (request, rect) = self.inline_preview.take()?;
         self.request_is_current(&request).then_some((request, rect))
     }
@@ -419,11 +443,8 @@ impl Browser {
                         let result = crate::jobs::run(false, Some(&worker_cancel), || {
                             let mut candidate = Client::connect_with_cancel(&config, worker_cancel.clone())?;
                             let summary = candidate.scan_with_cache(&config, &mode, true)?;
-                            if summary["snapshot"]["mode"].as_str() != Some(mode.as_str()) {
-                                return Err("The reader returned a different source mode".into());
-                            }
-                            let generation = summary["generationId"].as_str().filter(|id| !id.is_empty()).ok_or("Missing generation identity")?;
-                            session = Some(CatalogBinding { config, mode, generation: generation.into() });
+                            let generation = switch_generation(&config, &mode, &summary)?;
+                            session = Some(CatalogBinding { config, mode, generation });
                             client = Some(candidate);
                             Ok(summary)
                         });
@@ -562,12 +583,21 @@ impl Browser {
             self.refresh();
             return;
         }
+        // The host resumes a bound canvas using the active catalog config, but
+        // does not expose its repository identity to this module. Do not retarget it.
+        if self.has_bound_draft {
+            self.error = Some("Connection switching is unavailable while a CityOS canvas draft is bound. Close the bound draft first.".into());
+            return;
+        }
         self.cancelled.store(false, Ordering::Release);
         self.epoch += 1;
         self.busy = true;
         self.activity = "Connecting repository";
         self.error = None;
         self.last_interaction = Instant::now();
+        self.workspace_request = None;
+        self.workspace_theme = None;
+        self.inline_preview = None;
         self.switching = Some((config.clone(), mode.into()));
         if self.jobs.send(Job::Switch(self.epoch, config, mode.into())).is_err() {
             self.busy = false;
@@ -646,8 +676,20 @@ impl Browser {
                     self.busy = false;
                     self.cancelled.store(false, Ordering::Release);
                     let Some((config, mode)) = self.switching.take() else { continue };
+                    // Handoffs queued during the switch belong to an uncertain session,
+                    // including when the old session was successfully recovered.
+                    self.workspace_request = None;
+                    self.workspace_theme = None;
+                    self.inline_preview = None;
                     match result {
                         Ok(summary) => {
+                            if self.has_bound_draft {
+                                // The worker has already replaced its old session. Keep the
+                                // old configuration but do not claim its binding is usable.
+                                self.catalog_binding = None;
+                                self.error = Some("Connection switch stopped because a CityOS canvas draft became bound. Close the bound draft, then reconnect to browse.".into());
+                                continue;
+                            }
                             let Some(generation) = summary["generationId"].as_str().filter(|id| !id.is_empty()) else {
                                 self.catalog_binding = None;
                                 self.error = Some("Connection returned no generation; previous view retained, reconnect to browse".into());
