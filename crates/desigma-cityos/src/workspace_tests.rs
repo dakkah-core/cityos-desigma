@@ -432,6 +432,7 @@ fn authored_preview_open_transports_exact_selection_and_requires_explicit_bridge
         "resourceId":"page","openAvailable":true,"actualWebPreview":true});
     for outcome in ["missing", "false", "no-renderer", "error", "verified"] {
         let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+        let original_session = host.active.snapshot();
         let mut workspace = ready_workspace();
         let (requests, responses) = transport(&mut workspace);
         workspace.requested_source = Some(identity.source_path.clone());
@@ -456,6 +457,7 @@ fn authored_preview_open_transports_exact_selection_and_requires_explicit_bridge
             responses.send(Ok(response)).unwrap();
         }
         workspace.poll(&mut host);
+        assert_eq!(host.active.snapshot(), original_session, "Temporary verification must preserve the active editor session");
         if outcome == "verified" {
             assert!(workspace.actual_preview());
             assert!(workspace.validated && workspace.staged.is_some());
@@ -468,6 +470,34 @@ fn authored_preview_open_transports_exact_selection_and_requires_explicit_bridge
             else { assert!(error.contains("did not confirm")); }
         }
     }
+}
+
+#[test]
+fn inline_poll_preserves_pending_editor_history_and_ignores_renderer_selection() {
+    let mut host = FakeHost::new(FakeSession::seeded("active-file", "active"));
+    host.history_request = host.active.checkpoint.history.prepare_cityos(host.document(), false).unwrap();
+    assert!(host.history_request.is_some());
+    let original = host.active.snapshot();
+    let mut workspace = ready_workspace();
+    workspace.open = false;
+    workspace.preview_only = true;
+    workspace.inline_identity = Some((crate::catalog::WorkspaceIdentity::inline_test_identity(), json!({"selection":"fixture"})));
+    workspace.poll(&mut host);
+    assert!(host.history_request.is_some(), "Catalog preview cannot consume editor undo or redo");
+    assert_eq!(host.active.snapshot(), original);
+    let receipt = json!({"sessionId":"session", "requestId":"request", "draftId":"draft", "draftRevision":0,
+        "semanticDigest":"digest", "scenario":workspace.scenario()});
+    workspace.preview = Some(receipt.clone());
+    workspace.staged = Some(fixture_document("inline", 0, "flat"));
+    let staged = draft(workspace.staged.as_ref().unwrap()).unwrap();
+    let mut event = receipt;
+    for field in ["draftId", "draftRevision", "semanticDigest"] { event[field] = staged[field].clone(); }
+    workspace.preview = Some(event.clone());
+    event["kind"] = json!("selection");
+    event["nodeId"] = json!("unrelated-node");
+    assert!(workspace.matches_preview_event(&host, &event));
+    workspace.handle_preview_event(&mut host, &event);
+    assert_eq!(host.active.snapshot(), original, "Inline renderer events cannot change the editor selection");
 }
 
 fn property_field() -> Value {

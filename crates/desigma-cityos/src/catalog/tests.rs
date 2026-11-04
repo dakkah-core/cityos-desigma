@@ -897,20 +897,80 @@ fn authored_preview_browser() -> (Browser, Value) {
 }
 
 #[test]
-fn authored_preview_button_passes_unverified_selection_without_granting_capability_or_opening_canvas() {
+fn authored_preview_is_queued_inline_without_granting_capability_or_opening_canvas() {
     let (mut browser, selection) = authored_preview_browser();
     let ctx = egui::Context::default();
-    let output = catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1000.), vec![]);
+    let output = catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1400.), vec![]);
     let mut text = String::new();
     for shape in output.shapes { shape_text(&shape.shape, &mut text); }
     assert!(text.contains("Verify and preview"));
     let entry = browser.selected.as_ref().unwrap();
     assert!(!support::actions(entry, browser.specimen.as_ref(), browser.summary.as_ref(), "committed").actual_preview);
-    click_catalog(&mut browser, &ctx, egui::vec2(1600., 1000.), "catalog-preview-action");
-    let request = browser.workspace_request.take().unwrap();
-    assert_eq!(request.authored_preview_identity, Some(selection));
+    let (request, _) = browser.take_inline_preview().expect("The selected authored composition should queue inline verification");
+    assert_eq!(request.authored_preview_identity, Some(selection.clone()));
     assert!(request.preview_only && !request.resume && request.resource_pin.is_none());
-    assert!(request.source_identity.is_some());
+    click_catalog(&mut browser, &ctx, egui::vec2(1600., 1400.), "catalog-preview-action");
+    assert!(browser.workspace_request.is_none(), "Inline preview must not open a persistent canvas");
+    assert_eq!(browser.take_inline_preview().unwrap().0.authored_preview_identity, Some(selection));
+}
+
+#[test]
+fn authored_inline_generation_fences_selection_retry_and_changed_package_identity() {
+    let (mut browser, selection) = authored_preview_browser();
+    let ctx = egui::Context::default();
+    let size = egui::vec2(1600., 1400.);
+    catalog_frame(&mut browser, &ctx, size, vec![]);
+    let first = browser.inline_preview.as_ref().unwrap().0.inline_key().unwrap();
+    browser.inline_status = "Current · revision 0".into();
+    browser.specimen.as_mut().unwrap()["entry"]["previewAvailability"]["selection"]["packageIdentity"] = json!("9".repeat(64));
+    catalog_frame(&mut browser, &ctx, size, vec![]);
+    let changed = browser.inline_preview.as_ref().unwrap().0.inline_key().unwrap();
+    assert_ne!(first, changed);
+    assert!(browser.inline_status.is_empty(), "An old current status must not describe a new package");
+    browser.inline_status = "Preview unavailable: verification failed. Refresh and retry.".into();
+    click_catalog(&mut browser, &ctx, size, "catalog-inline-retry");
+    let retry = browser.inline_preview.as_ref().unwrap().0.inline_key().unwrap();
+    assert_ne!(changed, retry);
+    assert!(browser.inline_status.is_empty());
+    let stale = browser.inline_preview.take().unwrap();
+    browser.select(browser.selected.clone().unwrap());
+    browser.inline_preview = Some(stale);
+    assert!(browser.take_inline_preview().is_none(), "A previous selection attempt cannot be handed off");
+    browser.specimen = Some(json!({"entry": {"id":browser.selected.as_ref().unwrap().id,"previewAvailability":{"selection":selection}},
+        "digest":browser.selected.as_ref().unwrap().source_digest}));
+    assert_ne!(first, {
+        let mut request = browser.authored_preview_request(browser.selected.as_ref().unwrap()).unwrap();
+        browser.prepare_inline_preview(&mut request);
+        request.inline_key().unwrap()
+    }, "Selecting the same identity again starts a fresh session");
+}
+
+#[test]
+fn authored_inline_key_covers_every_field_of_the_exact_selection() {
+    let (browser, selection) = authored_preview_browser();
+    let entry = browser.selected.as_ref().unwrap();
+    let baseline = browser.authored_preview_request(entry).unwrap().inline_key().unwrap();
+    for field in ["repositoryId", "commit", "sourcePath", "sourceDigest", "resourceId", "revision", "profileRef", "targetProfileRef", "componentId", "componentVersion", "adapterId", "adapterDigest", "rendererDigest", "packageIdentity", "referenceClosureDigest"] {
+        let mut request = browser.authored_preview_request(entry).unwrap();
+        let mut changed = selection.clone();
+        changed[field] = json!("different-exact-value");
+        request.authored_preview_identity = Some(changed);
+        assert_ne!(baseline, request.inline_key().unwrap(), "The inline session key omitted {field}");
+    }
+}
+
+#[test]
+fn opening_a_workspace_retires_the_inline_attempt_and_its_verified_status() {
+    let (mut browser, _) = authored_preview_browser();
+    let ctx = egui::Context::default();
+    catalog_frame(&mut browser, &ctx, egui::vec2(1600., 1400.), vec![]);
+    let stale = browser.inline_preview.take().unwrap();
+    browser.inline_status = "Current · revision 0".into();
+    browser.workspace_request = browser.selected_request("config/experience/page.json", false);
+    assert!(browser.take_workspace_request().is_some());
+    assert!(browser.inline_status.is_empty());
+    browser.inline_preview = Some(stale);
+    assert!(browser.take_inline_preview().is_none());
 }
 
 #[test]

@@ -558,38 +558,49 @@ impl<H: EditorHost> Workspace<H> {
         self.themes_loaded = false;
     }
     pub fn show_inline(&mut self, app: &mut H, frame: &eframe::Frame, request: crate::catalog::WorkspaceRequest, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> String {
-        let identity = request.identity();
         let config = request.config();
-        let Some(pin) = request.resource_pin else {
+        let authored = request.authored_preview_identity.is_some();
+        let Some(key) = request.inline_key().filter(|_| request.preview_only && !request.resume) else {
             self.host.hide();
             return "Preview source unavailable".into();
         };
-        let key = (identity, pin.clone());
         if self.inline_identity.as_ref() != Some(&key) {
-            let source = pin["sourcePath"].as_str().map(str::to_owned);
-            if source.is_none() && pin["kind"] != "registered-specimen" {
-                self.host.hide();
-                return "Preview source unavailable".into();
-            }
+            self.host.hide();
             if self.recovery_pending {
-                self.host.hide();
                 return "Recover the pending document generation before opening another workspace.".into();
             }
-            self.begin_request(config, source, true, Some(pin));
+            if let (Some(source), Some(selection)) = (request.source_identity, request.authored_preview_identity) {
+                self.begin_selected_authored_preview(config, source, selection);
+            } else if let Some(pin) = request.resource_pin {
+                let source = pin["sourcePath"].as_str().map(str::to_owned);
+                if source.is_none() && pin["kind"] != "registered-specimen" {
+                    return "Preview source unavailable".into();
+                }
+                self.begin_request(config, source, true, Some(pin));
+            } else {
+                return "Preview source unavailable".into();
+            }
             self.open = false;
             self.inline_identity = Some(key);
+        }
+        if authored {
+            self.observe_preview_viewport((rect.width().round().clamp(240., 4096.) as u32, rect.height().round().clamp(240., 4096.) as u32));
         }
         self.poll(app);
         if let Some(error) = &self.error {
             self.host.hide();
-            return error.clone();
+            return if authored {
+                format!("Preview unavailable: {error}. Refresh the catalog and matching renderer package, then retry.")
+            } else {
+                error.clone()
+            };
         }
         if let Some(url) = self.preview.as_ref().and_then(|p| p["url"].as_str()) {
             if let Err(error) = self.host.show(frame, url, rect, scale, ctx) {
                 self.render_started = None;
                 self.pending = None;
                 self.error = Some(error.clone());
-                return error;
+                return if authored { format!("Preview unavailable: {error}. Check the preview host and retry.") } else { error };
             }
         }
         if self.current {
@@ -1338,8 +1349,10 @@ impl<H: EditorHost> Workspace<H> {
                 self.render_started = None;
             }
             Some("selection") => {
-                if let Some(node) = event["nodeId"].as_str() {
-                    self.select(app, node);
+                if self.inline_identity.is_none() {
+                    if let Some(node) = event["nodeId"].as_str() {
+                        self.select(app, node);
+                    }
                 }
             }
             Some("focus-editor") if self.open && matches!(event["key"].as_str(), Some("F6" | "Escape")) => {
@@ -1362,7 +1375,9 @@ impl<H: EditorHost> Workspace<H> {
         }
     }
     pub fn poll(&mut self, app: &mut H) {
-        self.dispatch_history_request(app);
+        if self.inline_identity.is_none() {
+            self.dispatch_history_request(app);
+        }
         let result = self.bridge.as_ref().and_then(|b| b.replies.try_recv().ok());
         if let Some(result) = result {
             let op = self.busy.take().unwrap_or_default();
@@ -1629,7 +1644,9 @@ impl<H: EditorHost> Workspace<H> {
         for event in self.host.poll() {
             self.handle_preview_event(app, &event);
         }
-        self.dispatch_history_request(app);
+        if self.inline_identity.is_none() {
+            self.dispatch_history_request(app);
+        }
         if !self.preview_work_visible() {
             self.release_inactive_preview();
         }

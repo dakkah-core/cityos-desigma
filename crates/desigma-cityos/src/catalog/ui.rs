@@ -311,6 +311,7 @@ impl Browser {
             ctx.request_repaint_after(delay);
         }
         if !self.open {
+            self.retry_inline_preview();
             if let Ok(mut repaint) = self.repaint.lock() {
                 *repaint = None;
             }
@@ -718,10 +719,20 @@ impl Browser {
             entry.classification_status == "classified" && source == entry.source_path
                 && self.composition_request(source, &entry.source_digest, &entry.observation_id, Some(&entry.semantic_id), true).is_some()
         });
-        let authored_preview_request = self.authored_preview_request(&entry);
+        let mut authored_preview_request = self.authored_preview_request(&entry);
+        if let Some(request) = &mut authored_preview_request {
+            self.prepare_inline_preview(request);
+        }
         ui.horizontal_wrapped(|ui| {
             for (label, status, reason) in actions.capability_rows() {
-                ui.small(format!("{label} · {status}")).on_hover_text(reason);
+                if label == "Actual preview" && authored_preview_request.is_some() {
+                    let state = if self.inline_status.starts_with("Current") { "Verified in preview" }
+                        else if self.inline_status.starts_with("Preview unavailable:") { "Verification or rendering failed" }
+                        else { "Awaiting verification" };
+                    ui.small(format!("{label} · {state}")).on_hover_text("The workspace bridge independently verifies the selected source and installed package before preview.");
+                } else {
+                    ui.small(format!("{label} · {status}")).on_hover_text(reason);
+                }
             }
         });
         if !actions.foundation {
@@ -750,8 +761,12 @@ impl Browser {
                     "Open actual preview"
                 };
                 if action_button(ui, services, "catalog-preview-action", label, unavailable) {
-                    if let Some(request) = authored_preview_request {
-                        self.workspace_request = Some(request);
+                    if authored_preview_request.is_some() {
+                        self.specimen_canvas = None;
+                        self.detail_tab = DetailTab::Preview;
+                        if self.inline_status.starts_with("Preview unavailable:") {
+                            self.retry_inline_preview();
+                        }
                     } else if actions.preview_here {
                         self.detail_tab = DetailTab::Preview;
                         if self.specimen.is_none() {
@@ -819,7 +834,12 @@ impl Browser {
                     }
                 }
             });
-            ui.label(RichText::new(&actions.preview_reason).small().color(theme.text_secondary));
+            let preview_reason = if authored_preview_request.is_some() {
+                "The selected authored preview requires bridge verification and stays temporary."
+            } else {
+                &actions.preview_reason
+            };
+            ui.label(RichText::new(preview_reason).small().color(theme.text_secondary));
             if !actions.editable {
                 ui.small(&actions.edit_reason);
             }
@@ -944,6 +964,26 @@ impl Browser {
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 360.0), Layout::top_down(Align::Min), |ui| canvas.show(ui));
                 return;
             }
+            if let Some(mut request) = self.authored_preview_request(&entry) {
+                self.prepare_inline_preview(&mut request);
+                ui.label("Authored preview · bridge verification required · temporary");
+                if !self.inline_status.is_empty() {
+                    ui.small(&self.inline_status);
+                }
+                if self.inline_status.starts_with("Preview unavailable:") {
+                    let retry = ui.button("Retry verified preview");
+                    services.record(ui, "catalog-inline-retry", retry.rect);
+                    if retry.clicked() {
+                        self.retry_inline_preview();
+                    }
+                }
+                let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width().max(1.), 360.0));
+                let rect = rect.intersect(ui.clip_rect());
+                if rect.width() > 1.0 && rect.height() > 1.0 {
+                    self.queue_inline_preview(request, rect);
+                }
+                return;
+            }
             if let Some(pin) = actions.inline_pin {
                 ui.label("Actual renderer · pinned captured source · temporary preview");
                 if !self.inline_status.is_empty() {
@@ -952,7 +992,9 @@ impl Browser {
                 let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width().max(1.), 360.0));
                 let rect = rect.intersect(ui.clip_rect());
                 if rect.width() > 1.0 && rect.height() > 1.0 {
-                    self.inline_preview = self.pinned_request(pin).map(|request| (request, rect));
+                    if let Some(request) = self.pinned_request(pin) {
+                        self.queue_inline_preview(request, rect);
+                    }
                 }
                 return;
             }

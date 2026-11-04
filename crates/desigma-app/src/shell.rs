@@ -683,8 +683,11 @@ impl eframe::App for Shell {
                     if !self.cityos.inline_status.starts_with("Current") {
                         self.cityos.yield_to_design();
                     }
-                    self.cityos.inline_status =
-                        self.workspace.show_inline(&mut self.app, _frame, request, rect, ui.ctx().pixels_per_point(), ui.ctx());
+                    let status = self.workspace.show_inline(&mut self.app, _frame, request, rect, ui.ctx().pixels_per_point(), ui.ctx());
+                    if self.cityos.inline_status != status {
+                        self.cityos.inline_status = status;
+                        ui.ctx().request_repaint();
+                    }
                     if self.workspace.inline_pending() {
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                     }

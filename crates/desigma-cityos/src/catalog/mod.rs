@@ -176,6 +176,8 @@ pub struct Browser {
     pub host_diagnostic_request: bool,
     pub inline_preview: Option<(WorkspaceRequest, egui::Rect)>,
     pub inline_status: String,
+    inline_generation: u64,
+    inline_display_key: Option<(WorkspaceIdentity, Value)>,
     repository: String,
     reader: String,
     node: String,
@@ -236,17 +238,35 @@ pub struct WorkspaceIdentity {
     binding: Option<CatalogBinding>,
 }
 
+#[cfg(test)]
+impl WorkspaceIdentity {
+    pub(crate) fn inline_test_identity() -> Self {
+        Self { config: ReaderConfig { node: PathBuf::new(), reader: PathBuf::new(), repository: PathBuf::new(), cache: None, canonical_ref: None },
+            mode: "committed".into(), binding: None }
+    }
+}
+
 pub struct WorkspaceRequest {
     config: crate::bridge::Config,
     identity: WorkspaceIdentity,
     pub source_path: Option<String>,
     pub source_identity: Option<crate::workspace::CanonicalSourceIdentity>,
     pub authored_preview_identity: Option<Value>,
+    inline_generation: u64,
     pub resource_pin: Option<Value>,
     pub preview_only: bool,
     pub resume: bool,
 }
 impl WorkspaceRequest {
+    pub(crate) fn inline_key(&self) -> Option<(WorkspaceIdentity, Value)> {
+        let selection = match (&self.resource_pin, &self.source_identity, &self.authored_preview_identity) {
+            (Some(pin), None, None) => serde_json::json!({"pin":pin}),
+            (None, Some(source), Some(authored)) => serde_json::json!({"sourcePath":source.source_path,"commit":source.commit,
+                "sourceDigest":source.source_digest,"resourceId":source.resource_id,"authoredPreviewIdentity":authored}),
+            _ => return None,
+        };
+        Some((self.identity.clone(), serde_json::json!({"selection":selection,"generation":self.inline_generation})))
+    }
     pub fn config(&self) -> crate::bridge::Config {
         self.config.clone()
     }
@@ -254,13 +274,13 @@ impl WorkspaceRequest {
         self.identity.clone()
     }
     fn browse(config: crate::bridge::Config, identity: WorkspaceIdentity) -> Self {
-        Self { config, identity, source_path: None, source_identity: None, authored_preview_identity: None, resource_pin: None, preview_only: true, resume: false }
+        Self { config, identity, source_path: None, source_identity: None, authored_preview_identity: None, inline_generation: 0, resource_pin: None, preview_only: true, resume: false }
     }
     fn selected(config: crate::bridge::Config, identity: WorkspaceIdentity, source: &str, preview_only: bool) -> Self {
-        Self { config, identity, source_path: Some(source.into()), source_identity: None, authored_preview_identity: None, resource_pin: None, preview_only, resume: false }
+        Self { config, identity, source_path: Some(source.into()), source_identity: None, authored_preview_identity: None, inline_generation: 0, resource_pin: None, preview_only, resume: false }
     }
     fn pinned_preview(config: crate::bridge::Config, identity: WorkspaceIdentity, resource: Value) -> Self {
-        Self { config, identity, source_path: resource["sourcePath"].as_str().map(str::to_owned), source_identity: None, authored_preview_identity: None, resource_pin: Some(resource), preview_only: true, resume: false }
+        Self { config, identity, source_path: resource["sourcePath"].as_str().map(str::to_owned), source_identity: None, authored_preview_identity: None, inline_generation: 0, resource_pin: Some(resource), preview_only: true, resume: false }
     }
 }
 
@@ -347,6 +367,7 @@ impl Browser {
         }
         let request = self.workspace_request.take()?;
         if self.request_is_current(&request) {
+            self.retry_inline_preview();
             Some(request)
         } else {
             self.workspace_theme = None;
@@ -360,7 +381,26 @@ impl Browser {
             return None;
         }
         let (request, rect) = self.inline_preview.take()?;
-        self.request_is_current(&request).then_some((request, rect))
+        (self.request_is_current(&request) && request.inline_generation == self.inline_generation).then_some((request, rect))
+    }
+    fn prepare_inline_preview(&mut self, request: &mut WorkspaceRequest) -> bool {
+        request.inline_generation = self.inline_generation;
+        let Some(key) = request.inline_key() else { return false };
+        if self.inline_display_key.as_ref() != Some(&key) {
+            self.inline_status.clear();
+            self.inline_display_key = Some(key);
+        }
+        true
+    }
+    fn queue_inline_preview(&mut self, mut request: WorkspaceRequest, rect: egui::Rect) {
+        if !self.prepare_inline_preview(&mut request) { return; }
+        self.inline_preview = Some((request, rect));
+    }
+    fn retry_inline_preview(&mut self) {
+        self.inline_generation = self.inline_generation.wrapping_add(1);
+        self.inline_display_key = None;
+        self.inline_status.clear();
+        self.inline_preview = None;
     }
     /// Reuse only the currently bound loaded generation. No query, scan or source read.
     pub fn coverage_observation(&self) -> Option<CoverageObservation> {
@@ -550,6 +590,8 @@ impl Browser {
             host_diagnostic_request: false,
             inline_preview: None,
             inline_status: String::new(),
+            inline_generation: 0,
+            inline_display_key: None,
             draft_repository: repository.clone(),
             draft_reader: reader.clone(),
             draft_node: node.clone(),
@@ -945,6 +987,8 @@ impl Browser {
         self.yield_to_catalog_read();
     }
     fn clear_preview(&mut self) {
+        self.inline_generation = self.inline_generation.wrapping_add(1);
+        self.inline_display_key = None;
         self.specimen_canvas = None;
         self.specimen = None;
         self.source_text.clear();
