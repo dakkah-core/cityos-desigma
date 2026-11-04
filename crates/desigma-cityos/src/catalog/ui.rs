@@ -727,7 +727,7 @@ impl Browser {
             for (label, status, reason) in actions.capability_rows() {
                 if label == "Actual preview" && authored_preview_request.is_some() {
                     let state = if self.inline_status.starts_with("Current") { "Verified in preview" }
-                        else if self.inline_status.starts_with("Preview unavailable:") { "Verification or rendering failed" }
+                        else if self.inline_status.starts_with("Preview unavailable:") { "Unavailable" }
                         else { "Awaiting verification" };
                     ui.small(format!("{label} · {state}")).on_hover_text("The workspace bridge independently verifies the selected source and installed package before preview.");
                 } else {

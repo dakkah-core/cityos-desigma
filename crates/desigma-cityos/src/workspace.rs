@@ -8,6 +8,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+const INLINE_SELECTION_DEBOUNCE: Duration = Duration::from_millis(300);
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InlineTransition { Wait, Start, Continue }
+
 pub struct DraftTab<S> {
     pub session: Option<S>,
     pub resource: Option<Value>,
@@ -276,6 +281,7 @@ pub struct Workspace<H: EditorHost> {
     $visibility changes_mode:bool,
     $visibility incoming:Option<Value>,
     $visibility inline_identity:Option<(crate::catalog::WorkspaceIdentity, Value)>,
+    $visibility inline_candidate:Option<((crate::catalog::WorkspaceIdentity, Value), Instant)>,
     $visibility requested_pin:Option<Value>,
     $visibility layout: layout::Layout,
     $visibility layout_loaded: bool,
@@ -352,6 +358,7 @@ impl<H: EditorHost> Default for Workspace<H> {
             changes_mode: false,
             incoming: None,
             inline_identity: None,
+            inline_candidate: None,
             requested_pin: None,
             layout: Default::default(),
             layout_loaded: false,
@@ -444,6 +451,7 @@ impl<H: EditorHost> Workspace<H> {
         self.leave_to_library = true;
         self.load_layout(&config);
         self.inline_identity = None;
+        self.inline_candidate = None;
         self.requested_pin = None;
         self.requested_identity = None;
         self.requested_authored_preview_identity = None;
@@ -557,6 +565,45 @@ impl<H: EditorHost> Workspace<H> {
         self.themes.clear();
         self.themes_loaded = false;
     }
+    pub(crate) fn inline_block_reason(&self, app: &H) -> Option<&'static str> {
+        let status = app.status();
+        if self.recovery_pending || status.frozen || self.submissions.error.is_some()
+            || self.submissions.records.iter().any(desigma_library::SubmissionRecord::frozen) {
+            return Some("Resolve the frozen draft or its pending recovery before using inline preview.");
+        }
+        if draft(app.document()).is_some() {
+            return Some("Close or switch away from the active CityOS draft before using inline preview; its workspace session is preserved.");
+        }
+        if status.dirty || status.save_failures || status.history_pending || (!status.home && !status.library_file && status.external_path.is_none()) {
+            return Some("Save or resolve the active document and pending history before using inline preview.");
+        }
+        if self.inline_identity.is_none() && self.busy.is_some() {
+            return Some("Wait for the active workspace operation to finish before using inline preview.");
+        }
+        None
+    }
+    fn inline_selection_ready(&mut self, key: &(crate::catalog::WorkspaceIdentity, Value), now: Instant) -> bool {
+        if self.inline_candidate.as_ref().is_none_or(|(candidate, _)| candidate != key) {
+            self.inline_candidate = Some((key.clone(), now));
+            return false;
+        }
+        now.saturating_duration_since(self.inline_candidate.as_ref().unwrap().1) >= INLINE_SELECTION_DEBOUNCE
+    }
+    pub(crate) fn inline_transition(&mut self, key: &(crate::catalog::WorkspaceIdentity, Value), now: Instant) -> InlineTransition {
+        if self.inline_identity.as_ref() == Some(key) {
+            self.inline_candidate = None;
+            return InlineTransition::Continue;
+        }
+        self.host.hide();
+        if self.inline_selection_ready(key, now) { InlineTransition::Start } else { InlineTransition::Wait }
+    }
+    pub(crate) fn poll_inline_if_current(&mut self, app: &mut H, key: &(crate::catalog::WorkspaceIdentity, Value)) -> bool {
+        if self.inline_identity.as_ref() != Some(key) || self.error.is_some() {
+            return false;
+        }
+        self.poll(app);
+        true
+    }
     pub fn show_inline(&mut self, app: &mut H, frame: &eframe::Frame, request: crate::catalog::WorkspaceRequest, rect: egui::Rect, scale: f32, ctx: &egui::Context) -> String {
         let config = request.config();
         let authored = request.authored_preview_identity.is_some();
@@ -564,11 +611,16 @@ impl<H: EditorHost> Workspace<H> {
             self.host.hide();
             return "Preview source unavailable".into();
         };
-        if self.inline_identity.as_ref() != Some(&key) {
+        if let Some(reason) = self.inline_block_reason(app) {
             self.host.hide();
-            if self.recovery_pending {
-                return "Recover the pending document generation before opening another workspace.".into();
-            }
+            self.inline_candidate = None;
+            return format!("Preview unavailable: {reason}");
+        }
+        let transition = self.inline_transition(&key, Instant::now());
+        if transition == InlineTransition::Wait {
+            return "Waiting for selection to settle…".into();
+        }
+        if transition == InlineTransition::Start {
             if let (Some(source), Some(selection)) = (request.source_identity, request.authored_preview_identity) {
                 self.begin_selected_authored_preview(config, source, selection);
             } else if let Some(pin) = request.resource_pin {
@@ -581,12 +633,12 @@ impl<H: EditorHost> Workspace<H> {
                 return "Preview source unavailable".into();
             }
             self.open = false;
-            self.inline_identity = Some(key);
+            self.inline_identity = Some(key.clone());
         }
         if authored {
             self.observe_preview_viewport((rect.width().round().clamp(240., 4096.) as u32, rect.height().round().clamp(240., 4096.) as u32));
         }
-        self.poll(app);
+        self.poll_inline_if_current(app, &key);
         if let Some(error) = &self.error {
             self.host.hide();
             return if authored {
@@ -612,7 +664,7 @@ impl<H: EditorHost> Workspace<H> {
         }
     }
     pub fn inline_pending(&self) -> bool {
-        self.error.is_none() && (self.busy.is_some() || self.pending.is_some() || self.render_started.is_some())
+        self.inline_candidate.is_some() || self.error.is_none() && (self.busy.is_some() || self.pending.is_some() || self.render_started.is_some())
     }
     pub fn actual_preview(&self) -> bool {
         self.harness || self.resource.as_ref().is_some_and(|r| r["actualWebPreview"] == true)
@@ -646,6 +698,7 @@ impl<H: EditorHost> Workspace<H> {
         self.render_started = None;
         self.current = false;
         self.inline_identity = None;
+        self.inline_candidate = None;
         self.error = None;
         Ok(())
     }
@@ -847,6 +900,7 @@ impl<H: EditorHost> Workspace<H> {
         }
         self.host.configure_storage(&config.cache);
         self.coverage = Default::default();
+        self.inline_candidate = None;
         self.requested_source = None;
         self.requested_identity = None;
         self.requested_authored_preview_identity = None;
@@ -893,6 +947,7 @@ impl<H: EditorHost> Workspace<H> {
         self.leave_to_library = true;
         self.load_layout(&config);
         self.inline_identity = None;
+        self.inline_candidate = None;
         self.requested_pin = None;
         self.requested_identity = None;
         self.requested_authored_preview_identity = None;

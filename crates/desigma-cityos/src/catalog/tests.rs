@@ -927,10 +927,14 @@ fn authored_inline_generation_fences_selection_retry_and_changed_package_identit
     let changed = browser.inline_preview.as_ref().unwrap().0.inline_key().unwrap();
     assert_ne!(first, changed);
     assert!(browser.inline_status.is_empty(), "An old current status must not describe a new package");
+    browser.specimen.as_mut().unwrap()["entry"]["previewAvailability"]["selection"]["packageIdentity"] = selection["packageIdentity"].clone();
+    catalog_frame(&mut browser, &ctx, size, vec![]);
+    let returned = browser.inline_preview.as_ref().unwrap().0.inline_key().unwrap();
+    assert_ne!(first, returned, "Returning to the original identity cannot revive its prior asynchronous session");
     browser.inline_status = "Preview unavailable: verification failed. Refresh and retry.".into();
     click_catalog(&mut browser, &ctx, size, "catalog-inline-retry");
     let retry = browser.inline_preview.as_ref().unwrap().0.inline_key().unwrap();
-    assert_ne!(changed, retry);
+    assert_ne!(returned, retry);
     assert!(browser.inline_status.is_empty());
     let stale = browser.inline_preview.take().unwrap();
     browser.select(browser.selected.clone().unwrap());

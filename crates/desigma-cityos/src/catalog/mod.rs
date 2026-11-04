@@ -385,8 +385,14 @@ impl Browser {
     }
     fn prepare_inline_preview(&mut self, request: &mut WorkspaceRequest) -> bool {
         request.inline_generation = self.inline_generation;
-        let Some(key) = request.inline_key() else { return false };
+        let Some(mut key) = request.inline_key() else { return false };
         if self.inline_display_key.as_ref() != Some(&key) {
+            if self.inline_display_key.is_some() {
+                self.inline_generation = self.inline_generation.wrapping_add(1);
+                request.inline_generation = self.inline_generation;
+                let Some(rekeyed) = request.inline_key() else { return false };
+                key = rekeyed;
+            }
             self.inline_status.clear();
             self.inline_display_key = Some(key);
         }

@@ -5,7 +5,7 @@ use crate::bridge::Bridge;
 use crate::draft::{binding, draft, revision};
 use crate::editor::{BaselineInstall, BaselineRecovery, EditorHost, EditorSession, EditorStatus};
 use crate::history::{CityosHistory, CityosHistoryStep};
-use crate::workspace::{DraftTab, Workspace};
+use crate::workspace::{DraftTab, InlineTransition, Workspace};
 use desigma_doc::{Command, Document, DocumentCheckpoint, History};
 use desigma_library::{SubmissionCommand, SubmissionRecord, SubmissionState};
 use serde_json::{json, Value};
@@ -498,6 +498,86 @@ fn inline_poll_preserves_pending_editor_history_and_ignores_renderer_selection()
     assert!(workspace.matches_preview_event(&host, &event));
     workspace.handle_preview_event(&mut host, &event);
     assert_eq!(host.active.snapshot(), original, "Inline renderer events cannot change the editor selection");
+}
+
+#[test]
+fn inline_admission_preserves_bound_dirty_frozen_and_busy_sessions() {
+    for case in ["bound", "dirty", "frozen", "busy"] {
+        let session = if case == "bound" { FakeSession::seeded("active", "draft") }
+            else { FakeSession::from_document("active", Document::new("Local")) };
+        let mut host = FakeHost::new(session);
+        host.active.dirty = case == "dirty";
+        if case == "frozen" { host.submission_frozen = Some("draft".into()); }
+        let original = host.active.snapshot();
+        let mut workspace = ready_workspace();
+        let (requests, responses) = transport(&mut workspace);
+        if case == "busy" {
+            workspace.send(json!({"op":"Open","resource":{}}));
+            assert_eq!(requests.try_recv().unwrap()["op"], "Open");
+        }
+        let expected = match case { "bound" => "active CityOS draft", "dirty" => "Save or resolve", "frozen" => "frozen draft", _ => "active workspace operation" };
+        assert!(workspace.inline_block_reason(&host).is_some_and(|reason| reason.contains(expected)), "{case} must block inline replacement");
+        assert_eq!(host.active.snapshot(), original);
+        assert!(host.calls.is_empty());
+        assert_eq!(workspace.busy.as_deref(), (case == "busy").then_some("Open"));
+        assert!(responses.send(Err("original session reply".into())).is_ok(), "the original bridge must remain connected");
+    }
+}
+
+#[test]
+fn inline_debounce_coalesces_repaints_and_never_restarts_a_failed_identity() {
+    let mut workspace = Workspace::<FakeHost>::default();
+    let identity = crate::catalog::WorkspaceIdentity::inline_test_identity();
+    let a = (identity.clone(), json!({"selection":"a"}));
+    let b = (identity, json!({"selection":"b"}));
+    let start = std::time::Instant::now();
+    assert_eq!(workspace.inline_transition(&a, start), InlineTransition::Wait);
+    assert_eq!(workspace.inline_transition(&b, start + std::time::Duration::from_millis(100)), InlineTransition::Wait);
+    for millis in [110, 150, 200, 300, 399] {
+        assert_eq!(workspace.inline_transition(&b, start + std::time::Duration::from_millis(millis)), InlineTransition::Wait);
+    }
+    assert_eq!(workspace.inline_transition(&b, start + std::time::Duration::from_millis(400)), InlineTransition::Start);
+    workspace.inline_candidate = None;
+    workspace.inline_identity = Some(b.clone());
+    workspace.error = Some("verification failed".into());
+    let (requests, responses) = transport(&mut workspace);
+    responses.send(Ok(json!({"stale":true}))).unwrap();
+    let mut host = FakeHost::new(FakeSession::from_document("local", Document::new("Local")));
+    for millis in [401, 500, 1000] {
+        assert_eq!(workspace.inline_transition(&b, start + std::time::Duration::from_millis(millis)), InlineTransition::Continue);
+        assert!(!workspace.poll_inline_if_current(&mut host, &b));
+        assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    }
+    assert_eq!(workspace.error.as_deref(), Some("verification failed"));
+}
+
+#[test]
+fn delayed_inline_reply_cannot_settle_a_new_selection_while_old_bridge_is_busy() {
+    let mut workspace = Workspace::<FakeHost>::default();
+    let mut host = FakeHost::new(FakeSession::from_document("local", Document::new("Local")));
+    let identity = crate::catalog::WorkspaceIdentity::inline_test_identity();
+    let old_key = (identity.clone(), json!({"selection":"old"}));
+    let new_key = (identity, json!({"selection":"new"}));
+    workspace.inline_identity = Some(old_key);
+    workspace.busy = Some("Open".into());
+    workspace.authored_open_pending = true;
+    let (_old_requests, old_responses) = transport(&mut workspace);
+    old_responses.send(Ok(fixture_bundle("old", 0, "flat"))).unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(workspace.inline_transition(&new_key, start), InlineTransition::Wait);
+    assert!(!workspace.poll_inline_if_current(&mut host, &new_key));
+    assert_eq!(workspace.busy.as_deref(), Some("Open"));
+    assert!(workspace.staged.is_none());
+    assert_eq!(workspace.inline_transition(&new_key, start + std::time::Duration::from_millis(300)), InlineTransition::Start);
+    let (new_requests, new_responses) = transport(&mut workspace);
+    workspace.inline_identity = Some(new_key.clone());
+    workspace.inline_candidate = None;
+    assert!(old_responses.send(Ok(fixture_bundle("late", 0, "flat"))).is_err(), "Retiring the old bridge drops its reply receiver");
+    new_responses.send(Err("new selection verification failed".into())).unwrap();
+    assert!(workspace.poll_inline_if_current(&mut host, &new_key));
+    assert_eq!(workspace.error.as_deref(), Some("new selection verification failed"));
+    assert!(workspace.staged.is_none() && !workspace.actual_preview());
+    assert!(matches!(new_requests.try_recv(), Err(TryRecvError::Empty)));
 }
 
 fn property_field() -> Value {
