@@ -12,3 +12,7 @@
 # Private design files used for local import checks: never committed
 /reference/*.fig
 /.build/
+
+# Local desktop candidate state, including draft libraries.
+/candidate-cache-*/
+/candidate-library-*/
