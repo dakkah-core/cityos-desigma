@@ -16,3 +16,6 @@
 # Local desktop candidate state, including draft libraries.
 /candidate-cache-*/
 /candidate-library-*/
+
+# Local CityOS tooling state
+/.cityos/
