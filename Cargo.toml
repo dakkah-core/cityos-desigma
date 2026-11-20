@@ -12,10 +12,14 @@ members = [
     "crates/desigma-diff",
     "crates/desigma-export",
     "crates/desigma-svg",
+    "crates/desigma-pen",
     "crates/desigma-gpu",
     "crates/desigma-mcp",
     "crates/desigma-cityos-catalog",
     "crates/desigma-cityos",
+    "crates/desigma-net",
+    "crates/desigma-collab",
+    "crates/desigma-server",
 ]
 
 [workspace.package]
@@ -28,15 +32,19 @@ repository = "https://github.com/deepfounder-ai/desigma"
 desigma-cityos-contract = { path = "crates/desigma-cityos-contract" }
 desigma-doc = { path = "crates/desigma-doc" }
 desigma-engine = { path = "crates/desigma-engine" }
+desigma-collab = { path = "crates/desigma-collab" }
 desigma-render = { path = "crates/desigma-render" }
 desigma-fig = { path = "crates/desigma-fig" }
 desigma-library = { path = "crates/desigma-library" }
 desigma-fonts = { path = "crates/desigma-fonts" }
 desigma-export = { path = "crates/desigma-export" }
 desigma-svg = { path = "crates/desigma-svg" }
+desigma-pen = { path = "crates/desigma-pen" }
 desigma-gpu = { path = "crates/desigma-gpu" }
 desigma-cityos-catalog = { path = "crates/desigma-cityos-catalog" }
 desigma-cityos = { path = "crates/desigma-cityos" }
+desigma-mcp = { path = "crates/desigma-mcp", default-features = false }
+desigma-net = { path = "crates/desigma-net" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

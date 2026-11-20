@@ -93,6 +93,10 @@ pub enum Action {
     /// Home screen (file browser).
     BackToFiles,
     SaveToLibrary,
+    /// File -> Share…: start or manage a live session.
+    Share,
+    /// File -> Join session….
+    JoinSession,
     /// File -> Show version history.
     ToggleVersionHistory,
     /// Ctrl+Alt+S: save a named version.
@@ -103,6 +107,18 @@ pub enum Action {
     ToggleGpu,
     /// Preferences -> Check for updates automatically.
     ToggleUpdateCheck,
+    /// Preferences -> Allow MCP agents to control this editor.
+    ToggleAgentBridge,
+    /// Preferences -> Claude…: register the installed MCP server with Claude.
+    Mcp,
+    /// Preferences -> AI images…: the OpenRouter key and the image model.
+    AiSettings,
+    /// Object -> Generate image…
+    AiGenerate,
+    /// Object -> Edit image with AI…
+    AiEdit,
+    /// Preferences -> Language -> ...
+    SetLanguage(crate::i18n::Lang),
     /// Help -> Check for updates.
     CheckForUpdates,
     Shortcuts,
@@ -127,8 +143,12 @@ pub fn run(app: &mut App, ctx: &Context, a: Action) {
         Action::Export => app.export_selection(),
         Action::ExportSlidePdf => app.export_deck_pdf(false),
         Action::ExportDeckPdf => app.export_deck_pdf(true),
-        Action::Undo => app.undo(),
-        Action::Redo => app.redo(),
+        Action::Undo => {
+            app.undo();
+        }
+        Action::Redo => {
+            app.redo();
+        }
         Action::SelectAll => app.select_all_layers(),
         Action::SelectInverse => app.select_inverse(),
         Action::SelectChildren => app.select_children(),
@@ -212,11 +232,22 @@ pub fn run(app: &mut App, ctx: &Context, a: Action) {
         Action::Plugins => app.open_plugins(),
         Action::BackToFiles => app.go_home(),
         Action::SaveToLibrary => app.begin_save_to_library(),
+        Action::Share => app.open_share(),
+        Action::JoinSession => app.open_join(None),
         Action::ToggleVersionHistory => app.toggle_version_history(),
         Action::SaveVersion => app.begin_save_version(),
         Action::YourName => app.ask_author_name(),
+        Action::AiSettings => app.open_ai_settings(ctx, None),
+        Action::AiGenerate => app.open_ai_generate(ctx),
+        Action::AiEdit => app.open_ai_edit(ctx),
         Action::ToggleGpu => app.toggle_gpu(),
         Action::ToggleUpdateCheck => app.toggle_update_check(),
+        Action::ToggleAgentBridge => app.toggle_agent_bridge(ctx),
+        Action::Mcp => {
+            app.mcp_error = None;
+            app.mcp_dialog = true;
+        }
+        Action::SetLanguage(lang) => app.set_language(lang),
         Action::CheckForUpdates => app.check_for_updates(ctx, true),
         Action::Shortcuts => app.show_shortcuts(),
         Action::AboutDesigma => app.show_about(),
@@ -355,6 +386,8 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("Save", "Ctrl+S", Action::Save),
         leaf("Save as…", "Ctrl+Shift+S", Action::SaveAs),
         leaf("Save to library…", "", Action::SaveToLibrary).off(app.lib.is_none() || app.lib_file.is_some()).sep(),
+        leaf("Share…", "", Action::Share).off(app.collab.is_guest()),
+        leaf("Join session…", "", Action::JoinSession).sep(),
         leaf("Show version history", "", Action::ToggleVersionHistory).on(app.history.open),
         leaf("Save to version history…", "Ctrl+Alt+S", Action::SaveVersion).off(!app.has_history()).sep(),
         leaf("Export selection as PNG…", "", Action::Export).off(!has_sel),
@@ -400,7 +433,9 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("Bring to front", "Ctrl+Shift+]", Action::BringToFront).off(!has_sel),
         leaf("Bring forward", "Ctrl+]", Action::BringForward).off(!has_sel),
         leaf("Send backward", "Ctrl+[", Action::SendBackward).off(!has_sel),
-        leaf("Send to back", "Ctrl+Shift+[", Action::SendToBack).off(!has_sel),
+        leaf("Send to back", "Ctrl+Shift+[", Action::SendToBack).off(!has_sel).sep(),
+        leaf("Generate image…", "", Action::AiGenerate),
+        leaf("Edit image with AI…", "", Action::AiEdit).off(app.ai_editable().is_none()),
     ];
     let text = vec![
         leaf("Bold", "Ctrl+B", Action::TextBold).off(!has_text),
@@ -447,6 +482,7 @@ fn main_nodes(app: &App) -> Vec<Node> {
         leaf("Command palette", "Ctrl+K", Action::OpenPalette),
         leaf("Keyboard shortcuts", "", Action::Shortcuts).sep(),
         leaf("About desigma", "", Action::AboutDesigma),
+        leaf(&format!("Version {}", crate::VERSION), "", Action::About).off(true),
         leaf("Check for updates…", "", Action::CheckForUpdates),
         leaf("desigma on GitHub", "", Action::OpenGithub),
     ];
@@ -471,6 +507,13 @@ fn main_nodes(app: &App) -> Vec<Node> {
                 leaf("Check for updates automatically", "", Action::ToggleUpdateCheck)
                     .on(crate::RELEASE_BUILD && !app.updater.no_auto_check)
                     .off(!crate::RELEASE_BUILD),
+                leaf("Claude…", "", Action::Mcp),
+                leaf("AI images…", "", Action::AiSettings),
+                leaf("Allow MCP agents to control this editor", "", Action::ToggleAgentBridge).on(app.bridge.bridge.is_some()),
+                submenu(
+                    "Language",
+                    crate::i18n::Lang::ALL.iter().map(|l| leaf(l.native_name(), "", Action::SetLanguage(*l)).on(crate::i18n::current() == *l)).collect(),
+                ),
             ],
         ),
         leaf("Libraries", "", Action::About).off(true).sep(),
@@ -535,6 +578,8 @@ fn file_items(app: &App) -> Vec<(MenuItem, Option<Action>)> {
         (MenuItem::new("Save").shortcut("Ctrl+S"), Some(Action::Save)),
         (MenuItem::new("Save as…").shortcut("Ctrl+Shift+S"), Some(Action::SaveAs)),
         (MenuItem::new("Save to library…").disabled(app.lib.is_none() || app.lib_file.is_some()).sep(), Some(Action::SaveToLibrary)),
+        (MenuItem::new("Share…").disabled(app.collab.is_guest()), Some(Action::Share)),
+        (MenuItem::new("Join session…").sep(), Some(Action::JoinSession)),
         (MenuItem::new("Show version history").checked(app.history.open), Some(Action::ToggleVersionHistory)),
         (MenuItem::new("Save to version history…").shortcut("Ctrl+Alt+S").disabled(!app.has_history()).sep(), Some(Action::SaveVersion)),
         (MenuItem::new("Undo").shortcut("Ctrl+Z").disabled(!app.hist.can_undo()), Some(Action::Undo)),
@@ -652,7 +697,7 @@ fn collect(nodes: &[Node], out: &mut Vec<Command>) {
 fn commands(app: &App) -> Vec<Command> {
     let mut out = Vec::new();
     collect(&main_nodes(app), &mut out);
-    out.retain(|c| c.label != "Libraries" && c.label != "Not available");
+    out.retain(|c| c.label != "Libraries" && c.label != "Not available" && !c.label.starts_with("Version "));
     for g in GROUPS {
         for t in *g {
             out.push(Command {
@@ -822,5 +867,19 @@ mod tests {
         assert!(matches_query("Zoom to fit", "zoom fit"));
         assert!(matches_query("Zoom to fit", ""));
         assert!(!matches_query("Zoom to fit", "pen"));
+    }
+
+    #[test]
+    fn help_shows_the_running_version_but_it_is_not_a_command() {
+        fn find<'a>(nodes: &'a [Node], label: &str) -> Option<&'a Node> {
+            nodes.iter().find_map(|n| if n.item.label == label { Some(n) } else { find(&n.kids, label) })
+        }
+        let app = App::new(desigma_doc::Document::new("t"));
+        let nodes = main_nodes(&app);
+        let help = find(&nodes, "Help").expect("a Help menu");
+        let row = find(&help.kids, &format!("Version {}", crate::VERSION)).expect("a version row in Help");
+        assert!(row.item.disabled, "the version is shown, not clickable");
+        assert!(find(&help.kids, "Check for updates…").is_some_and(|n| !n.item.disabled));
+        assert!(!commands(&app).iter().any(|c| c.label.starts_with("Version ")));
     }
 }

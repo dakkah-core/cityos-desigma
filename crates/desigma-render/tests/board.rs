@@ -359,8 +359,8 @@ fn voted_items_get_a_dot_with_the_count() {
     let a = sticky(&mut t, Rect::new(10.0, 10.0, 240.0, 240.0), "", Color::WHITE);
     let before = t.render(270, 270);
     let mut v = VoteSession::new(5);
-    v.add(a);
-    v.add(a);
+    v.add(a, "me");
+    v.add(a, "me");
     t.doc.board_session.vote = Some(v);
     let after = t.render(270, 270);
     // the dot sits in the top right corner of the note

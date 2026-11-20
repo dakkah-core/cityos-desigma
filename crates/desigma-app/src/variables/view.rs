@@ -326,12 +326,17 @@ fn keys(app: &mut App, ctx: &Context, view: &VariableStore) {
                 });
                 app.vars.selected = copies;
             }
-            Key::Z if modifiers.command && !modifiers.shift => app.undo(),
-            Key::Z if modifiers.command => app.redo(),
-            Key::Y if modifiers.command => app.redo(),
+            Key::Z if modifiers.command && !modifiers.shift => {
+                app.undo();
+            }
+            Key::Z | Key::Y if modifiers.command => {
+                app.redo();
+            }
             // This panel owns keyboard routing; keep document saving available
             // after a variable edit has committed rather than swallowing Ctrl+S.
-            Key::S if modifiers.command && !modifiers.alt => app.save(modifiers.shift),
+            Key::S if modifiers.command && !modifiers.alt => {
+                app.save(modifiers.shift);
+            }
             _ => {}
         }
     }

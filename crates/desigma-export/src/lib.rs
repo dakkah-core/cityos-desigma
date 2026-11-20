@@ -9,10 +9,12 @@
 //! [`export_pdf`] exports ordered slide frames as losslessly compressed raster PDF pages.
 //! PDF pages preserve slide dimensions and artwork; text is not selectable.
 
+pub mod anim;
 mod bounds;
 mod codegen;
 mod compose;
 mod css;
+mod css_anim;
 mod geo;
 mod pdf;
 mod raster;
@@ -28,8 +30,9 @@ pub use codegen::css_var as css_variable_reference;
 pub use codegen::{is_vector_asset, vector_assets};
 pub use compose::compose_for;
 pub use css::{css_for, font_family_css, paint_css, text_style_css};
+pub use css_anim::{compose_animation_for, css_animation_for, swiftui_animation_for};
 pub use pdf::export_pdf;
-pub use raster::{export_jpg, export_png, render_export, rgba_bytes, ExportScale};
+pub use raster::{export_jpg, export_png, render_export, render_size, rgba_bytes, ExportScale};
 pub use react::{react_for, react_with, ReactOptions};
 pub use svg::{export_svg, SvgOptions};
 pub use swiftui::swiftui_for;

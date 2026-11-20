@@ -80,6 +80,17 @@ pub enum Command {
     SetBoardSession {
         session: BoardSession,
     },
+    /// Replace one node's animation data (keyframe tracks and clips). All motion edits in
+    /// [`crate::motion::edit`] compile to this so undo is a snapshot swap.
+    SetNodeMotion {
+        node: NodeId,
+        motion: Box<NodeMotion>,
+    },
+    /// Replace the Motion timeline settings of a page.
+    SetTimeline {
+        page: NodeId,
+        settings: TimelineSettings,
+    },
     Batch(Vec<Command>),
 }
 
@@ -193,6 +204,20 @@ impl Command {
                 variables: std::mem::replace(&mut doc.variables, variables),
                 collections: std::mem::replace(&mut doc.variable_collections, collections),
             },
+            Command::SetNodeMotion { node, motion } => {
+                let n = doc.get_mut(node).ok_or(DocError::NotFound(node))?;
+                let mut motion = *motion;
+                motion.normalize();
+                Command::SetNodeMotion { node, motion: Box::new(std::mem::replace(&mut n.motion, motion)) }
+            }
+            Command::SetTimeline { page, settings } => {
+                if doc.get(page).is_none() {
+                    return Err(DocError::NotFound(page));
+                }
+                let settings = settings.sanitized();
+                let old = if settings.is_default() { doc.timelines.remove(&page) } else { doc.timelines.insert(page, settings) };
+                Command::SetTimeline { page, settings: old.unwrap_or_default() }
+            }
             Command::Batch(cmds) => {
                 let mut staged = doc.clone();
                 let mut inv = Vec::with_capacity(cmds.len());
@@ -360,6 +385,26 @@ impl History {
         self.undo.push(inverse);
         self.transition_fence = Arc::new(());
         Ok(true)
+    }
+    /// Calls `f` on every stored command (undo and redo stacks, Batch contents included).
+    /// For rewriting stored inverses when the document changes underneath them.
+    pub fn for_each_command_mut(&mut self, mut f: impl FnMut(&mut Command)) {
+        fn rec(c: &mut Command, f: &mut dyn FnMut(&mut Command)) {
+            if let Command::Batch(cmds) = c {
+                for c in cmds {
+                    rec(c, f);
+                }
+            } else {
+                f(c);
+            }
+        }
+        for c in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            rec(c, &mut f);
+        }
+    }
+    /// Number of undo steps available.
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
     }
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()

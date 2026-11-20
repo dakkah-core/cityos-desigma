@@ -16,80 +16,8 @@ pub fn control_points(e: &Easing) -> Option<[f32; 4]> {
     })
 }
 
-/// y(t) of the unit cubic bezier through (0,0), (x1,y1), (x2,y2), (1,1).
-pub fn cubic_bezier(c: [f32; 4], t: f32) -> f32 {
-    let [x1, y1, x2, y2] = c;
-    let t = t.clamp(0.0, 1.0);
-    if t == 0.0 || t == 1.0 {
-        return t;
-    }
-    let sample = |p1: f32, p2: f32, s: f32| {
-        let u = 1.0 - s;
-        3.0 * u * u * s * p1 + 3.0 * u * s * s * p2 + s * s * s
-    };
-    let dx = |s: f32| {
-        let u = 1.0 - s;
-        3.0 * u * u * x1 + 6.0 * u * s * (x2 - x1) + 3.0 * s * s * (1.0 - x2)
-    };
-    // Newton first, bisection when the slope is flat or Newton leaves [0,1].
-    let mut s = t;
-    for _ in 0..8 {
-        let err = sample(x1, x2, s) - t;
-        if err.abs() < 1e-6 {
-            return sample(y1, y2, s);
-        }
-        let d = dx(s);
-        if d.abs() < 1e-6 {
-            break;
-        }
-        s -= err / d;
-    }
-    let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    s = t;
-    for _ in 0..40 {
-        let x = sample(x1, x2, s);
-        if (x - t).abs() < 1e-6 {
-            break;
-        }
-        if x < t {
-            lo = s;
-        } else {
-            hi = s;
-        }
-        s = (lo + hi) / 2.0;
-    }
-    sample(y1, y2, s)
-}
-
-/// Seconds a spring needs to settle (envelope below 0.1%), capped at 4s.
-pub fn spring_settle_secs(mass: f32, stiffness: f32, damping: f32) -> f32 {
-    let (m, k, c) = (mass.max(0.01), stiffness.max(0.01), damping.max(0.0));
-    let w0 = (k / m).sqrt();
-    let zeta = c / (2.0 * (k * m).sqrt());
-    let rate = if zeta < 1.0 { zeta * w0 } else { w0 * (zeta - (zeta * zeta - 1.0).sqrt()) };
-    if rate <= 1e-3 {
-        return 4.0;
-    }
-    (6.9 / rate).clamp(0.1, 4.0)
-}
-
-/// Spring step response at time `tau` seconds (starts at 0, settles at 1).
-pub fn spring_at(mass: f32, stiffness: f32, damping: f32, tau: f32) -> f32 {
-    let (m, k, c) = (mass.max(0.01), stiffness.max(0.01), damping.max(0.0));
-    let w0 = (k / m).sqrt();
-    let zeta = c / (2.0 * (k * m).sqrt());
-    if zeta < 1.0 - 1e-4 {
-        let wd = w0 * (1.0 - zeta * zeta).sqrt();
-        let a = zeta * w0;
-        1.0 - (-a * tau).exp() * ((wd * tau).cos() + a / wd * (wd * tau).sin())
-    } else if zeta <= 1.0 + 1e-4 {
-        1.0 - (-w0 * tau).exp() * (1.0 + w0 * tau)
-    } else {
-        let s = (zeta * zeta - 1.0).sqrt();
-        let (r1, r2) = (-w0 * (zeta - s), -w0 * (zeta + s));
-        1.0 - (r2 * (r1 * tau).exp() - r1 * (r2 * tau).exp()) / (r2 - r1)
-    }
-}
+// The curve and spring math is shared with the Motion keyframe easing in desigma-doc.
+pub use desigma_doc::motion::{cubic_bezier, spring_at, spring_settle_secs};
 
 /// Eased progress for linear progress `t` in 0..1 (may overshoot for back and spring curves).
 pub fn ease(e: &Easing, t: f32) -> f32 {

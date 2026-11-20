@@ -29,6 +29,7 @@ This is the original phased roadmap, updated to reflect the product direction. M
 3. Layers tree, properties panel, text editing
 4. Pen/vector edit, boolean ops, auto-layout, components/variants
 5. Native `.desigma` save/load
+6. Motion (beta): per-page timeline, keyframes with curve and spring easing, 41 presets and clips, Present playback, prototype "Control animation" actions, GIF/WebM/PNG export, CSS/SwiftUI/Compose animation code, MCP motion tools (done)
 
 ## Figma file support (`desigma-fig`)
 Two import paths, so we are not blocked by the proprietary format:

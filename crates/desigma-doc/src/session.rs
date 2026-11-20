@@ -95,15 +95,47 @@ pub fn clock_text(secs: f64) -> String {
     }
 }
 
-/// A voting session: each person has `votes_per_person` votes to spend on nodes. The board is
-/// single-user, so `votes` are the votes of the one voter.
+/// Who cast a vote: a random id kept per install, so it is stable across restarts, reconnects and
+/// sessions (a collaboration peer index is not).
+pub type VoterId = String;
+
+/// The voter that votes of files saved before votes were kept per person belong to.
+pub const LEGACY_VOTER: &str = "legacy";
+
+/// A voting session: each person has `votes_per_person` votes to spend on nodes. Every person's
+/// votes are their own entries, so two people voting on one node at once both count.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VoteSession {
     pub votes_per_person: u32,
     /// The session has ended: voting is closed and the results are shown.
     pub ended: bool,
-    /// Votes by node.
-    pub votes: BTreeMap<NodeId, u32>,
+    /// Votes by node, then by voter. A node's tally is the sum over its voters. Files from before
+    /// votes were kept per voter (a plain count per node) load as the votes of [`LEGACY_VOTER`].
+    #[serde(deserialize_with = "votes_compat")]
+    pub votes: BTreeMap<NodeId, BTreeMap<VoterId, u32>>,
+}
+
+/// Either the current shape or the old `node -> count` one.
+fn votes_compat<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<NodeId, BTreeMap<VoterId, u32>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Tally {
+        Old(u32),
+        New(BTreeMap<VoterId, u32>),
+    }
+    let raw = BTreeMap::<NodeId, Tally>::deserialize(d)?;
+    let mut out = BTreeMap::new();
+    for (node, t) in raw {
+        let mut by = match t {
+            Tally::Old(n) => BTreeMap::from([(LEGACY_VOTER.to_string(), n)]),
+            Tally::New(m) => m,
+        };
+        by.retain(|_, n| *n > 0);
+        if !by.is_empty() {
+            out.insert(node, by);
+        }
+    }
+    Ok(out)
 }
 
 impl VoteSession {
@@ -111,45 +143,63 @@ impl VoteSession {
         Self { votes_per_person: votes_per_person.clamp(1, VOTES_MAX), ended: false, votes: BTreeMap::new() }
     }
 
-    pub fn used(&self) -> u32 {
-        self.votes.values().sum()
+    /// Votes `voter` has spent.
+    pub fn used(&self, voter: &str) -> u32 {
+        self.votes.values().filter_map(|by| by.get(voter)).sum()
     }
 
-    pub fn left(&self) -> u32 {
-        self.votes_per_person.saturating_sub(self.used())
+    /// Votes `voter` has left.
+    pub fn left(&self, voter: &str) -> u32 {
+        self.votes_per_person.saturating_sub(self.used(voter))
     }
 
+    /// Everyone's votes on `id`.
     pub fn count(&self, id: NodeId) -> u32 {
-        self.votes.get(&id).copied().unwrap_or(0)
+        self.votes.get(&id).map_or(0, |by| by.values().sum())
     }
 
-    /// Spends one vote on `id`; false when voting is closed or no votes are left.
-    pub fn add(&mut self, id: NodeId) -> bool {
-        if self.ended || self.left() == 0 {
+    /// The votes `voter` put on `id`.
+    pub fn count_by(&self, id: NodeId, voter: &str) -> u32 {
+        self.votes.get(&id).and_then(|by| by.get(voter)).copied().unwrap_or(0)
+    }
+
+    /// Every vote cast.
+    pub fn total(&self) -> u32 {
+        self.votes.values().flat_map(|by| by.values()).sum()
+    }
+
+    /// Spends one of `voter`'s votes on `id`; false when voting is closed or they have none left.
+    pub fn add(&mut self, id: NodeId, voter: &str) -> bool {
+        if self.ended || self.left(voter) == 0 {
             return false;
         }
-        *self.votes.entry(id).or_insert(0) += 1;
+        *self.votes.entry(id).or_default().entry(voter.to_string()).or_insert(0) += 1;
         true
     }
 
-    /// Takes one vote back from `id`; false when it has none or voting is closed.
-    pub fn remove(&mut self, id: NodeId) -> bool {
+    /// Takes one of `voter`'s votes back from `id`; false when they have none there or voting is
+    /// closed.
+    pub fn remove(&mut self, id: NodeId, voter: &str) -> bool {
         if self.ended {
             return false;
         }
-        match self.votes.get_mut(&id) {
+        let Some(by) = self.votes.get_mut(&id) else { return false };
+        match by.get_mut(voter) {
             Some(n) if *n > 1 => *n -= 1,
             Some(_) => {
-                self.votes.remove(&id);
+                by.remove(voter);
             }
             None => return false,
+        }
+        if by.is_empty() {
+            self.votes.remove(&id);
         }
         true
     }
 
-    /// Nodes of `doc` that got votes, most votes first (ties in document id order).
+    /// Nodes of `doc` that got votes, most votes (all voters summed) first (ties in document id order).
     pub fn results(&self, doc: &Document) -> Vec<(NodeId, u32)> {
-        let mut r: Vec<(NodeId, u32)> = self.votes.iter().filter(|(id, n)| **n > 0 && doc.get(**id).is_some()).map(|(id, n)| (*id, *n)).collect();
+        let mut r: Vec<(NodeId, u32)> = self.votes.keys().map(|id| (*id, self.count(*id))).filter(|(id, n)| *n > 0 && doc.get(*id).is_some()).collect();
         r.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         r
     }
@@ -212,14 +262,14 @@ mod tests {
             })
             .collect();
         let mut v = VoteSession::new(3);
-        assert!(v.add(ids[1]) && v.add(ids[0]) && v.add(ids[1]));
-        assert!(!v.add(ids[2]), "out of votes");
-        assert_eq!((v.used(), v.left(), v.count(ids[1])), (3, 0, 2));
+        assert!(v.add(ids[1], "me") && v.add(ids[0], "me") && v.add(ids[1], "me"));
+        assert!(!v.add(ids[2], "me"), "out of votes");
+        assert_eq!((v.used("me"), v.left("me"), v.count(ids[1])), (3, 0, 2));
         assert_eq!(v.results(&d), vec![(ids[1], 2), (ids[0], 1)]);
-        assert!(v.remove(ids[0]) && !v.remove(ids[0]));
-        assert!(v.add(ids[2]));
+        assert!(v.remove(ids[0], "me") && !v.remove(ids[0], "me"));
+        assert!(v.add(ids[2], "me"));
         v.ended = true;
-        assert!(!v.add(ids[0]) && !v.remove(ids[1]));
+        assert!(!v.add(ids[0], "me") && !v.remove(ids[1], "me"));
         d.remove(ids[1]).unwrap();
         assert_eq!(v.results(&d), vec![(ids[2], 1)]);
     }
@@ -254,9 +304,57 @@ mod tests {
         let s: BoardSession = serde_json::from_str("{}").unwrap();
         assert_eq!(s, BoardSession::default());
         let mut s = BoardSession { timer: Some(TimerState::new(3)), vote: Some(VoteSession::new(5)) };
-        s.vote.as_mut().unwrap().add(NodeId(7));
+        s.vote.as_mut().unwrap().add(NodeId(7), "me");
         let back: BoardSession = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
         assert!(back.voting());
+    }
+
+    #[test]
+    fn votes_are_counted_per_voter() {
+        let mut d = Document::new("t");
+        let page = d.add_page("p");
+        let id = d.alloc_id();
+        let n = d.insert(page, crate::Node::sticky(id, crate::Rect::new(0.0, 0.0, 10.0, 10.0), "")).unwrap();
+        let mut v = VoteSession::new(2);
+        assert!(v.add(n, "a") && v.add(n, "b") && v.add(n, "b"));
+        assert!(!v.add(n, "b"), "b used both votes");
+        assert!(v.add(n, "a"), "a still had one");
+        assert_eq!((v.count(n), v.count_by(n, "a"), v.count_by(n, "b"), v.total()), (4, 2, 2, 4));
+        assert_eq!((v.used("a"), v.left("a"), v.left("c")), (2, 0, 2));
+        assert_eq!(v.results(&d), vec![(n, 4)]);
+        assert!(!v.remove(n, "c"), "c has no vote there");
+        assert!(v.remove(n, "a") && v.remove(n, "a") && !v.remove(n, "a"));
+        assert_eq!((v.count(n), v.left("a")), (2, 2));
+    }
+
+    #[test]
+    fn old_files_with_one_count_per_node_load_as_the_legacy_voter() {
+        let old = r#"{"votes_per_person":5,"ended":true,"votes":{"7":2,"9":1,"11":0}}"#;
+        let v: VoteSession = serde_json::from_str(old).unwrap();
+        assert_eq!(v.count(NodeId(7)), 2);
+        assert_eq!(v.count_by(NodeId(7), LEGACY_VOTER), 2);
+        assert_eq!((v.count(NodeId(9)), v.total(), v.used(LEGACY_VOTER)), (1, 3, 3));
+        assert!(!v.votes.contains_key(&NodeId(11)), "zero counts are dropped");
+        assert!(v.ended && v.votes_per_person == 5);
+        // a whole old session keeps its tally, and saves in the new shape
+        let s: BoardSession = serde_json::from_str(&format!(r#"{{"vote":{old}}}"#)).unwrap();
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(text.contains(r#""7":{"legacy":2}"#), "{text}");
+        let back: BoardSession = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn new_vote_shape_round_trips() {
+        let mut v = VoteSession::new(4);
+        v.add(NodeId(3), "alice");
+        v.add(NodeId(3), "bob");
+        v.add(NodeId(5), "bob");
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(text.contains(r#""3":{"alice":1,"bob":1}"#), "{text}");
+        let back: VoteSession = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, v);
+        assert_eq!((back.count(NodeId(3)), back.left("bob")), (2, 2));
     }
 }

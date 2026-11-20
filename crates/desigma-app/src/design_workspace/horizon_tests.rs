@@ -218,8 +218,12 @@ fn horizon_undo_redo_and_native_save_reopen_preserve_intent_material_and_immutab
             let before = unchanged_state(&app);
             match revision {
                 1 => workspace.send_property_command(&app, &horizon_field(), json!(layout)),
-                2 => app.undo(),
-                _ => app.redo(),
+                2 => {
+                    app.undo();
+                }
+                _ => {
+                    app.redo();
+                }
             }
             assert_eq!(unchanged_state(&app), before);
             workspace.poll(&mut app);

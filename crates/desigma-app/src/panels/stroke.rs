@@ -10,6 +10,7 @@ use crate::theme;
 use crate::widgets::field::{self, Prefix};
 use crate::widgets::menu::dropdown;
 use crate::widgets::{self, popover};
+use desigma_doc::motion::{AnimProperty, AnimValue};
 use desigma_doc::*;
 use egui::{Id, Rect, Ui};
 
@@ -36,7 +37,7 @@ fn sub_label(ui: &Ui, pane: &Pane, x: f32, text: &str) {
     widgets::text_on_baseline(ui.painter(), r.left(), widgets::centered_baseline(r, &font), text, font, theme::TEXT_SECONDARY);
 }
 
-pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], n0: &Node) {
+pub(crate) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], n0: &Node) {
     if paint_title(app, ui, pane, sel, "Stroke", true, n0.stroke.paints.is_empty()) {
         let paint = Paint::solid(Color::from_hex(&format!("{:06X}", theme::DEFAULT_STROKE)).unwrap_or(Color::BLACK));
         app.edit_nodes(sel, |n| n.stroke.paints.push(paint.clone()));
@@ -45,9 +46,12 @@ pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId
     if n0.stroke.paints.is_empty() {
         return;
     }
-    // Labels, then the controls row.
+    // Labels, then the controls row. In Motion mode the cells are narrower to make room for the
+    // stroke weight's keyframe diamond.
+    let motion = app.motion.enabled;
+    let (pos_w, weight_x, weight_w) = if motion { (60.0, 81.0, 60.0) } else { (POSITION_W, WEIGHT_X, WEIGHT_W) };
     sub_label(ui, pane, POSITION_X, "Position");
-    sub_label(ui, pane, WEIGHT_X, "Weight");
+    sub_label(ui, pane, weight_x, "Weight");
     pane.y += 16.0 + 3.0;
     let aligns = ["Inside", "Center", "Outside"].map(String::from);
     let cur = match n0.stroke.align {
@@ -55,25 +59,41 @@ pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId
         StrokeAlign::Center => 1,
         StrokeAlign::Outside => 2,
     };
-    if let Some(i) = dropdown(ui, pane.rect(POSITION_X, 0.0, POSITION_W, theme::FIELD_HEIGHT), "stroke-align", &aligns[cur], &aligns) {
+    if let Some(i) = dropdown(ui, pane.rect(POSITION_X, 0.0, pos_w, theme::FIELD_HEIGHT), "stroke-align", &aligns[cur], &aligns) {
         let a = [StrokeAlign::Inside, StrokeAlign::Center, StrokeAlign::Outside][i];
         app.edit_nodes(sel, |n| n.stroke.align = a);
     }
     let sides_on = common(app, sel, |n| n.stroke.side_weights.is_some()).unwrap_or(false);
-    let w_r = pane.rect(WEIGHT_X, 0.0, WEIGHT_W, theme::FIELD_HEIGHT);
-    let sw_val = if sides_on { None } else { common(app, sel, |n| n.stroke.weight) };
+    let w_r = pane.rect(weight_x, 0.0, weight_w, theme::FIELD_HEIGHT);
+    let animated_weight = motion && sel.iter().any(|id| app.doc.get(*id).is_some_and(|n| n.motion.track(AnimProperty::StrokeWeight).is_some()));
+    let sw_val = if sides_on {
+        None
+    } else if motion {
+        crate::motion::inspector::shown(app, sel, AnimProperty::StrokeWeight).first().and_then(|v| v.scalar())
+    } else {
+        common(app, sel, |n| n.stroke.weight)
+    };
     if let Some(w) =
         var_bind::numeric(app, ui, w_r, sel, &["strokeWeight"], |ui| field::num_field(ui, w_r, "stroke-w", Prefix::Icon(Icon::StrokeWeight), sw_val, ""))
     {
         let w = w.max(0.0);
-        app.edit_nodes(sel, |n| {
-            n.stroke.weight = w;
-            if n.stroke.side_weights.is_some() {
-                n.stroke.side_weights = Some([w; 4]);
-            }
-        });
+        if animated_weight {
+            crate::motion::inspector::edit_prop(app, sel, AnimProperty::StrokeWeight, |_| AnimValue::Scalar(w));
+        } else {
+            app.edit_nodes(sel, |n| {
+                n.stroke.weight = w;
+                if n.stroke.side_weights.is_some() {
+                    n.stroke.side_weights = Some([w; 4]);
+                }
+            });
+        }
     }
-    let set_r = pane.rect(SETTINGS_X, 0.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
+    if motion {
+        let d_r = pane.rect(weight_x + weight_w + 4.0, 0.0, 24.0, 24.0);
+        crate::motion::inspector::diamond_for(app, ui, sel, AnimProperty::StrokeWeight, d_r);
+    }
+    let settings_x = if motion { theme::RIGHT_NAME_ACTION_X[1] - 1.0 + 4.0 } else { SETTINGS_X };
+    let set_r = pane.rect(settings_x, 0.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
     let open = app.props.pop.as_ref().is_some_and(|p| p.kind == PopKind::Stroke);
     if widgets::icon_button(ui, set_r, "stroke-settings", Icon::StrokeSettings, open, "Stroke settings").clicked() {
         app.props.pop = (!open).then(|| PopState { kind: PopKind::Stroke, anchor: set_r, ids: sel.to_vec() });
@@ -109,7 +129,7 @@ pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId
 const CAPS: [(&str, StrokeCap); 3] = [("None", StrokeCap::None), ("Round", StrokeCap::Round), ("Square", StrokeCap::Square)];
 const JOINS: [(&str, StrokeJoin); 3] = [("Miter", StrokeJoin::Miter), ("Bevel", StrokeJoin::Bevel), ("Round", StrokeJoin::Round)];
 
-pub(super) fn popover_ui(app: &mut App, ui: &mut Ui, region: Rect, st: &PopState) {
+pub(crate) fn popover_ui(app: &mut App, ui: &mut Ui, region: Rect, st: &PopState) {
     let ctx = ui.ctx().clone();
     let Some(first) = st.ids.first().and_then(|id| app.doc.get(*id)) else {
         app.props.pop = None;

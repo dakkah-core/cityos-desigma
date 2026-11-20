@@ -50,6 +50,8 @@ pub struct BoardState {
     pub lang: desigma_doc::CodeLang,
     /// Votes per person the next voting session offers.
     pub votes_each: u32,
+    /// This install's voter id (loaded lazily from the settings, see `session::voter_id`).
+    pub voter: Option<String>,
     /// Facilitation widgets: the vote setup popover and the results list are open.
     pub vote_menu: bool,
     /// The last code copied with the contextual bar's copy button.
@@ -92,6 +94,7 @@ impl Default for BoardState {
             wide: false,
             lang: desigma_doc::CodeLang::Plain,
             votes_each: desigma_doc::VOTES_DEFAULT,
+            voter: None,
             vote_menu: false,
             copied: None,
             results_open: true,

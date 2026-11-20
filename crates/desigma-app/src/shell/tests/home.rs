@@ -814,7 +814,7 @@ fn unchanged_documents_are_never_rewritten_by_autosave() {
     open(&mut s, "Welcome");
     let id = s.app().lib_file.as_ref().unwrap().id.clone();
     let m0 = lib(&s).file(&id).unwrap().modified;
-    // zooming bumps the canvas revision but changes nothing in the document
+    // zooming changes nothing in the document
     s.shell.app.zoom_to(2.0);
     wait(&mut s, 3.0);
     assert_eq!(lib(&s).file(&id).unwrap().modified, m0);

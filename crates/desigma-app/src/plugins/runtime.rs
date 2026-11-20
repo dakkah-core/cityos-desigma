@@ -1,9 +1,8 @@
 //! Loopback browser panels. Document mutations are dispatched to the UI thread.
 use super::store::Bundle;
+use crate::loopback;
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
-    io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -13,9 +12,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-const MAX_BODY: usize = 2 * 1024 * 1024;
-const MAX_HEADER: usize = 8192;
 
 pub struct InsertRequest {
     pub svg: String,
@@ -114,68 +110,21 @@ impl Server {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
         let response = self.request(stream);
-        let (status, mime, body) = response
-            .unwrap_or_else(|(status, message)| (status, "application/json", serde_json::to_vec(&serde_json::json!({"error":message})).unwrap_or_default()));
-        let headers = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: {}\r\n\r\n",
-            body.len(),
-            self.policy
-        );
-        let _ = stream.write_all(headers.as_bytes()).and_then(|()| stream.write_all(&body));
+        let (status, mime, body) = response.unwrap_or_else(|(status, message)| (status, "application/json", loopback::json_error(message)));
+        loopback::write_response(stream, status, mime, &body, &format!("Content-Security-Policy: {}\r\n", self.policy));
     }
 
-    fn request(&self, stream: &mut TcpStream) -> Result<(&'static str, &'static str, Vec<u8>), (&'static str, &'static str)> {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut header = Vec::new();
-        while !header.ends_with(b"\r\n\r\n") {
-            if header.len() >= MAX_HEADER {
-                return Err(("431 Request Header Fields Too Large", "Headers too large"));
-            }
-            let mut byte = [0];
-            self.read(stream, &mut byte, deadline)?;
-            header.push(byte[0]);
-        }
-        let header = std::str::from_utf8(&header).map_err(|_| ("400 Bad Request", "Invalid headers"))?;
-        let mut lines = header.split("\r\n");
-        let parts: Vec<_> = lines.next().unwrap_or_default().split(' ').collect();
-        if parts.len() != 3 || parts[2] != "HTTP/1.1" {
-            return Err(("400 Bad Request", "Invalid request"));
-        }
-        let mut headers = BTreeMap::new();
-        for line in lines.filter(|line| !line.is_empty()) {
-            let (name, value) = line.split_once(':').ok_or(("400 Bad Request", "Invalid header"))?;
-            if name.is_empty()
-                || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                || headers.insert(name.to_ascii_lowercase(), value.trim()).is_some()
-            {
-                return Err(("400 Bad Request", "Invalid or duplicate header"));
-            }
-        }
-        if headers.contains_key("transfer-encoding") {
-            return Err(("400 Bad Request", "Transfer encoding is unsupported"));
-        }
-        // Consume a bounded, framed body before rejecting a request. Closing a
-        // Windows socket with unread bytes can discard the error response with RST.
-        // The same absolute deadline covers headers and body, including bad origins.
-        let length = match headers.get("content-length") {
-            Some(value) => value.parse::<usize>().map_err(|_| ("400 Bad Request", "Invalid content length"))?,
-            None if parts[0] == "POST" => return Err(("411 Length Required", "Content length required")),
-            None => 0,
-        };
-        if length > MAX_BODY {
-            return Err(("413 Payload Too Large", "SVG request too large"));
-        }
-        let mut body = vec![0; length];
-        self.read(stream, &mut body, deadline)?;
-        if headers.get("host") != Some(&self.host.as_str()) {
+    fn request(&self, stream: &mut TcpStream) -> Result<(&'static str, &'static str, Vec<u8>), loopback::Failure> {
+        let req = loopback::read_request(stream, &self.stopped, Instant::now() + Duration::from_secs(2))?;
+        if req.headers.get("host").map(String::as_str) != Some(self.host.as_str()) {
             return Err(("403 Forbidden", "Invalid host"));
         }
         let prefix = format!("/{}/", self.token);
-        let path = parts[1].strip_prefix(&prefix).ok_or(("404 Not Found", "Not found"))?;
+        let path = req.path.strip_prefix(&prefix).ok_or(("404 Not Found", "Not found"))?;
         if path.contains(['%', '\\', '?', '#']) || path.split('/').any(|s| s == "." || s == "..") {
             return Err(("404 Not Found", "Not found"));
         }
-        if parts[0] == "GET" {
+        if req.method == "GET" {
             if path == "host.json" {
                 return Ok((
                     "200 OK",
@@ -188,19 +137,21 @@ impl Server {
             let body = self.bundle.files.get(file).ok_or(("404 Not Found", "Not found"))?;
             return Ok(("200 OK", mime(file).ok_or(("404 Not Found", "Unsupported asset"))?, body.clone()));
         }
-        if parts[0] != "POST" || path != "insert-svg" {
+        if req.method != "POST" || path != "insert-svg" {
             return Err(("405 Method Not Allowed", "Unsupported operation"));
         }
-        if headers.get("origin") != Some(&self.origin.as_str()) || headers.get("x-desigma-token") != Some(&self.token.as_str()) {
+        if req.headers.get("origin").map(String::as_str) != Some(self.origin.as_str())
+            || req.headers.get("x-desigma-token").map(String::as_str) != Some(self.token.as_str())
+        {
             return Err(("403 Forbidden", "Invalid panel session"));
         }
         if !self.bundle.plugin.permissions.iter().any(|p| p == "document:insert-svg") {
             return Err(("403 Forbidden", "SVG insertion permission is required"));
         }
-        if headers.get("content-type").map(|s| s.split(';').next().unwrap_or_default().trim()) != Some("application/json") {
+        if req.headers.get("content-type").map(|s| s.split(';').next().unwrap_or_default().trim()) != Some("application/json") {
             return Err(("415 Unsupported Media Type", "JSON required"));
         }
-        let body: InsertBody = serde_json::from_slice(&body).map_err(|_| ("400 Bad Request", "Invalid insertion request"))?;
+        let body: InsertBody = serde_json::from_slice(&req.body).map_err(|_| ("400 Bad Request", "Invalid insertion request"))?;
         if body.svg.trim().is_empty() || body.name.trim().is_empty() || body.name.len() > 200 {
             return Err(("400 Bad Request", "SVG and a short layer name are required"));
         }
@@ -229,21 +180,6 @@ impl Server {
             }
         }
     }
-
-    fn read(&self, stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -> Result<(), (&'static str, &'static str)> {
-        while !bytes.is_empty() {
-            if self.stopped.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(("408 Request Timeout", "Request timed out"));
-            }
-            match stream.read(bytes) {
-                Ok(0) => return Err(("400 Bad Request", "Incomplete request")),
-                Ok(n) => bytes = &mut bytes[n..],
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
-                Err(_) => return Err(("400 Bad Request", "Cannot read request")),
-            }
-        }
-        Ok(())
-    }
 }
 
 fn mime(path: &str) -> Option<&'static str> {
@@ -260,6 +196,10 @@ fn mime(path: &str) -> Option<&'static str> {
 mod tests {
     use super::super::store::InstalledPlugin;
     use super::*;
+    use std::{
+        collections::BTreeMap,
+        io::{Read, Write},
+    };
 
     fn runtime(permission: bool) -> Runtime {
         let plugin: InstalledPlugin = serde_json::from_value(serde_json::json!({

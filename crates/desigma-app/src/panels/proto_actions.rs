@@ -85,6 +85,7 @@ pub(super) fn actions_editor(app: &mut App, ui: &mut Ui, pane: &mut Pane, cx: Ed
             Action::SetVariable { variable, value } => set_variable_params(app, ui, pane, &k, variable, value),
             Action::SetVariableMode { collection, mode } => set_mode_params(app, ui, pane, &k, collection, mode),
             Action::MediaControl { dest, op } => media_params(app, ui, pane, &k, dest, op),
+            Action::Animation { dest, op } => animation_params(app, ui, pane, cx, &k, dest, op),
             Action::Conditional { branches, otherwise } => conditional_params(app, ui, pane, cx, &k, branches, otherwise),
             a => action_params(app, ui, pane, cx.node, cx.frames, cx.own_top, &k, a),
         }
@@ -319,6 +320,45 @@ fn media_params(app: &mut App, ui: &mut Ui, pane: &mut Pane, k: &str, dest: &mut
             *s = v;
         }
         next_row(pane);
+    }
+}
+
+/// "Control animation": which frame's Motion timeline, and what to do with it.
+fn animation_params(app: &mut App, ui: &mut Ui, pane: &mut Pane, cx: EditCtx<'_>, k: &str, dest: &mut Option<NodeId>, op: &mut AnimationOp) {
+    // "This frame" first, then every frame that has keyframes or presets.
+    let animated = proto::animated_frames(&app.doc, cx.frames);
+    let mut names = vec!["This frame".to_string()];
+    names.extend(animated.iter().map(|f| app.doc.get(*f).map(|n| n.name.clone()).unwrap_or_default()));
+    let cur = match dest {
+        None => "This frame".to_string(),
+        Some(d) => app.doc.get(*d).map(|n| n.name.clone()).unwrap_or_else(|| "(missing)".into()),
+    };
+    let c = label_ctl(ui, pane, "Animation");
+    record(ui, &format!("proto-pop-anim-dest-{k}"), c);
+    if let Some(i) = dropdown(ui, c, ("pop-anim-dest", k), &cur, &names) {
+        *dest = if i == 0 { None } else { Some(animated[i - 1]) };
+    }
+    next_row(pane);
+    let c = label_ctl(ui, pane, "Control");
+    record(ui, &format!("proto-pop-anim-op-{k}"), c);
+    let ops: Vec<String> = proto::ANIMATION_OPS.iter().map(|s| s.to_string()).collect();
+    let cur = proto::animation_op_index(op);
+    if let Some(i) = dropdown(ui, c, ("pop-anim-op", k), proto::ANIMATION_OPS[cur], &ops) {
+        if i != cur {
+            *op = proto::animation_op_of_index(i);
+        }
+    }
+    next_row(pane);
+    if animated.is_empty() {
+        let r = pane.rect(theme::SECTION_CONTENT_X, -4.0, theme::SECTION_CONTENT_W, 28.0);
+        ui.painter().text(
+            Pos2::new(r.left(), r.top() + 6.0),
+            Align2::LEFT_CENTER,
+            "Add keyframes or presets in Motion mode",
+            theme::font_small(),
+            theme::TEXT_TERTIARY,
+        );
+        pane.y += 20.0;
     }
 }
 

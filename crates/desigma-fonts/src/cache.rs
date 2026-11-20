@@ -40,6 +40,12 @@ impl Fetch for UreqFetch {
     }
 }
 
+/// `dirs::cache_dir()/desigma` (falls back to the temp dir): where desigma keeps what it can
+/// download or receive again.
+pub fn app_cache_dir() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("desigma")
+}
+
 /// License record stored next to each cached font (`<name>.json`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sidecar {
@@ -76,7 +82,7 @@ impl FontCache {
     }
 
     pub fn default_dir() -> PathBuf {
-        dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("desigma").join("fonts")
+        app_cache_dir().join("fonts")
     }
 
     /// Cache rooted at `dir` (used by tests).

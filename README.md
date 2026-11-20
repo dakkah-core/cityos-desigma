@@ -4,13 +4,13 @@
 
 <p align="center">
   <b>Interface design; an independent, local-first, open-source design tool built in Rust.</b><br>
-  Frames, auto layout, components and variants, prototyping, vector editing and real Figma file import,<br>
-  in a native desktop app written entirely in Rust. Free, offline, and yours to change.
+  Frames, auto layout, components and variants, prototyping, <b>live collaboration</b>, <b>keyframe motion</b>, whiteboards, decks, vector editing<br>
+  and real Figma file import, in a native desktop app written entirely in Rust. Free, offline, and yours to change.
 </p>
 
 <p align="center">
   <img alt="100% Rust" src="https://img.shields.io/badge/100%25-Rust-b7410e?style=flat-square&logo=rust">
-  <img alt="Windows · Linux" src="https://img.shields.io/badge/Windows%20%C2%B7%20Linux-native-2f7bf5?style=flat-square">
+  <img alt="macOS · Windows · Linux" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-native-2f7bf5?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
   <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-d69e2e?style=flat-square">
   <a href="https://github.com/deepfounder-ai/desigma/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/deepfounder-ai/desigma/ci.yml?branch=main&style=flat-square&label=CI"></a>
@@ -46,6 +46,12 @@
     </td>
   </tr>
 </table>
+
+<p align="center">
+  <a href="#live-collaboration-beta"><b>👥 New: Live collaboration</b></a> share a link, edit together, no account &nbsp;·&nbsp;
+  <a href="#motion-beta"><b>🎬 Motion</b></a> keyframes, springs, 41 presets and GIF/WebM export &nbsp;·&nbsp;
+  <a href="#download">Download</a> &nbsp;·&nbsp; <a href="#build-from-source">Build from source</a>
+</p>
 
 <br>
 
@@ -137,7 +143,7 @@ Every screenshot here is the real app on its built-in showcase file, captured of
       <br>
       <sub>A board: stickies, connectors, shapes with text, stamps and a section.</sub>
       <h3>Boards for thinking out loud</h3>
-      New board in the File menu or on the home screen opens a whiteboard with its own toolbar: stickies whose text shrinks to fit, shapes with text, markers, stamps, coloured sections (<kbd>Shift</kbd>+<kbd>S</kbd>) that carry the notes inside them, and tables (<kbd>Shift</kbd>+<kbd>T</kbd>) with + handles and <kbd>Tab</kbd> between cells. <kbd>Tab</kbd> starts the next sticky, <kbd>Alt</kbd>-drag duplicates.
+      New board in the File menu or on the home screen opens a whiteboard with its own toolbar: stickies whose text shrinks to fit (wide stickies and author labels too), shapes with text, a drawing tray with marker (<kbd>M</kbd>), highlighter, washi tape and eraser, code blocks with syntax highlighting, stamps, coloured sections (<kbd>Shift</kbd>+<kbd>S</kbd>) that carry the notes inside them, and tables (<kbd>Shift</kbd>+<kbd>T</kbd>) with + handles and <kbd>Tab</kbd> between cells. <kbd>Tab</kbd> starts the next sticky, <kbd>Alt</kbd>-drag duplicates. A timer and voting sessions run from the top bar.
       <br><br>
       <b>Connectors</b> come out of the magnet dots on any shape, route around the boxes they join and follow them when they move. FigJam files open as boards.
     </td>
@@ -166,6 +172,90 @@ Every screenshot here is the real app on its built-in showcase file, captured of
 
 <br>
 
+## Motion (beta)
+
+Motion mode (the waveform button in the toolbar) turns a page into a timeline. It is free like the rest of the app and works offline.
+
+<p align="center">
+  <img src="docs/images/desigma-motion.gif" alt="An animated onboarding card made in desigma: a logo tile springs in, a payment card rises and tilts, two chips drop and glide in, the title and copy rise, and the call to action bursts in" width="320">
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/desigma-motion.png" alt="Motion mode: the Marlow onboarding flow on the canvas with the timeline below showing keyframe diamonds and preset bars, and the Animations section of the inspector" width="440">
+      <br>
+      <sub>The timeline under the canvas, the Motion inspector on the right. This file is built in: <code>cargo run -p desigma-app -- --motion</code>.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/desigma-motion-easing.png" alt="The easing editor with a spring curve, bounce slider and a preview" width="440">
+      <br>
+      <sub>Easing editor: curves, holds and springs for every segment.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/desigma-motion-library.png" alt="The animation library popover listing Basic, Enter, Cycle and Exit presets" width="440">
+      <br>
+      <sub>The library: 41 presets in Basic, Enter, Cycle and Exit.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/desigma-motion-clip.png" alt="The clip popover with direction, amount, delay, duration, easing and repeat controls" width="440">
+      <br>
+      <sub>Every preset is editable clips: direction, amount, delay, duration, easing, repeat and yoyo.</sub>
+    </td>
+  </tr>
+</table>
+
+What is in it:
+
+- **Timeline** per page: duration, fps and loop, a playhead you scrub, layer rows with property tracks, keyframe diamonds you drag, stretch and copy, auto-key, and snapping to frames and keys.
+- **Keyframes** on position, scale, rotation, width, height, opacity, corner radius, fill and stroke colour, stroke weight, drop shadow (offset, blur, colour) and layer blur, with a ◇ next to every field in the Motion inspector, a motion path and gizmo on the canvas, per-track visibility and a draggable summary bar per layer.
+- **Easing**: hold, linear, ease in/out, back curves, custom cubic-bezier, and duration-based springs (Gentle, Quick, Bouncy, Slow or your own bounce). Each segment has its own.
+- **41 presets** (Basic, Enter, Cycle, Exit) that become **clips** you can retime and tweak; cycles repeat or yoyo until the timeline ends.
+- **Present playback**: frames play their timeline on arrival while the prototype keeps working. Smart Animate between frames still works and the destination plays when it lands.
+- **Prototype actions**: *Control animation* (Play, Play from start, Pause, Restart, Toggle) with any trigger: On click, While hovering (revert on leave), While pressing, After delay, keys. A frame that has such an action waits to be played; other animated frames autoplay. The target is a frame or any layer in it (it resolves to the frame).
+- **Export** the page or a frame as an animated **GIF**, **WebM** (AV1, encoded in pure Rust) or a **PNG** sequence (folder or zip), at any fps and scale, from the timeline, the Animation section of the inspector or the command line.
+- **Figma Motion import**: keyframe tracks, curve and spring easing and preset clips from `.fig` files made in Figma's Motion mode come in as editable desigma motion. Curved motion paths and colour/effect tracks are not imported yet.
+- **Code**: Dev mode turns the selected layer's animation into CSS keyframes, SwiftUI or Jetpack Compose.
+- **MCP tools** (`desigma_add_keyframe`, `desigma_apply_animation_preset`, `desigma_set_timeline`, `desigma_export_animation`) so an agent can animate and render.
+
+```sh
+cargo run -p desigma-app -- --motion                         # the built-in animated onboarding, in Motion mode
+cargo run -p desigma-app -- --motion --screenshot docs/images/desigma-motion.png --scale 2
+cargo run -p desigma-app -- --motion --panel motion-easing --screenshot easing.png --scale 2
+cargo run -p desigma-app -- --export-animation onboarding.desigma --out onboarding.gif --scale 0.75 --fps 20          # add --dither to smooth gradients (bigger file)
+```
+
+Motion follows the workflow of Figma's Motion (Beta) mode but is desigma's own implementation, and it is not affiliated with Figma, Inc. Animation data lives in `.desigma` files and in desigma's REST JSON export; it cannot be written back into `.fig` files.
+
+## AI images (beta)
+
+Generate images, or regenerate part of one, without leaving the canvas. desigma has no AI service of its own: it uses **your own [OpenRouter](https://openrouter.ai) key** and the image model you pick, at your cost.
+
+![Edit image with AI: the sky of a photo selected, with a prompt](docs/images/desigma-ai-edit.png)
+
+- **Preferences → AI images…**: paste your OpenRouter API key and choose a model from OpenRouter's list. The key is stored in the system keychain (Windows Credential Manager, macOS Keychain, Secret Service on Linux), never in a file or a document.
+- **Generate image…** (Object menu or right-click): describe the image and pick a ratio. Selected layers are sent as reference images; a selected empty rectangle, ellipse or frame is filled with the result.
+- **Edit image with AI…**: select a layer with an image fill, paint over the part to change with a brush and say what should change. Only what you painted is taken from the model's answer, so the rest of the picture stays pixel for pixel the same. With nothing painted the whole picture is regenerated.
+- **Versions**: every generation is remembered on its layer with its prompt, and saved in the file. Click an earlier picture in the dialog to bring it back.
+- While a request runs, the place the image will appear glows on the canvas. One generation is one Undo step.
+
+Your prompt and the reference images go to OpenRouter and the model's provider; nothing is sent until you press **Generate**. Details: [docs/ai-images.md](docs/ai-images.md).
+
+## Live collaboration (beta)
+
+Click **Share** in the editor, copy the `desigma://join/…` link and send it. Anyone with the link opens it (or pastes it into **Join session** on the home screen) and edits the same file with you, live, on Windows, macOS or Linux. There is no account and no server: your copy of desigma hosts the session while the file stays open.
+
+- **Peer to peer and encrypted**, over [iroh](https://github.com/n0-computer/iroh) QUIC with NAT traversal; when a direct connection is impossible, traffic goes through a public relay, still end-to-end encrypted.
+- **Edits merge per property**: two people changing the same layer's colour and position both keep their change, inserts into the same frame both survive, a delete wins over an edit. Drags show up live.
+- **Your undo only undoes your own edits.**
+- **Cursors, selections and avatars** in each person's colour; click an avatar to **Follow** their view.
+- **Optional password, approval of each joiner, edit or view-only access, kick, stop sharing.**
+- The session ends when the host closes the file; guests can save a copy. Fonts are not sent yet,. Clicking a link while desigma is already running opens it in that window (on macOS through Apple events, elsewhere a second launch hands it over); pasting it into Join session always works too.
+
+Design and protocol: [docs/collaboration.md](docs/collaboration.md).
+
 ## Everything in the box
 
 <table>
@@ -186,7 +276,7 @@ Every screenshot here is the real app on its built-in showcase file, captured of
   <tr>
     <td width="33%" valign="top">
       <h4>🗂️ Formats</h4>
-      In: <code>.fig</code>, Figma REST JSON and native <code>.desigma</code>. Out: <code>.desigma</code>, Figma REST JSON, PNG, JPG and SVG. Images in PNG, JPEG and WebP.
+      In: <code>.fig</code> (including FigJam boards and Motion data), Figma REST JSON, Pencil <code>.pen</code>, SVG and native <code>.desigma</code>. Out: <code>.desigma</code>, Figma REST JSON, PNG, JPG, SVG, PDF, and animated GIF, WebM and PNG sequences. Images in PNG, JPEG and WebP.
     </td>
     <td width="33%" valign="top">
       <h4>🔤 Type</h4>
@@ -210,21 +300,32 @@ desigma reads two kinds of Figma input, and both land in the same document model
 
 The `.fig` format is undocumented. Our decoder follows community reverse engineering and is tested against synthetic files, so expect gaps on real-world files and please report them.
 
+### Pencil files
+
+`.pen` files (the plain-JSON format of the [Pencil](https://docs.pencil.dev/for-developers/the-pen-format) design tool) open too, through *File → Open*, drag and drop, the projects home screen or `desigma file.pen`. Frames and auto layout, shapes, paths, text, fills, strokes, effects, components with instance overrides, and variables with themes come across; scripts, shaders and icon-library icons do not, and the toast on opening lists what was left out ([field mapping](crates/desigma-pen/FIELDS.md)). Like `.fig`, an imported `.pen` is not written back: Save goes to `.desigma`. This is file compatibility only; desigma is not affiliated with or endorsed by Pencil.
+
 ## Under the hood
 
 - **One document model:** `desigma-doc` is plain data plus an undo stack. Every edit is a `Command` with an exact inverse.
 - **Deterministic rendering:** `desigma-render` draws on the CPU with tiny-skia, so output is reproducible byte for byte. Tiles stitched together match a whole-page render.
 - **Visual regression tooling:** `desigma-diff` compares screenshots with anti-aliasing detection and SSIM, and writes an HTML report. The development target is faithful document rendering and an independently designed editor, with its own approved UI baselines.
 - **Independent product direction:** file compatibility and familiar workflows guide development; reproducing Figma's editor appearance is not a goal. Third-party code, fonts and assets retain their own licenses and attribution requirements.
-- **Tested:** more than 500 tests across the workspace, from undo and import round trips to UI tests that drive the editor with synthetic input.
+- **Tested:** more than 1,600 tests across the workspace, from undo and import round trips to UI tests that drive the editor with synthetic input.
 
 | Crate | What it does |
 |---|---|
-| `desigma-doc` | Scene graph, paints, text, auto layout, components, prototype model, undo/redo |
+| `desigma-doc` | Scene graph, paints, text, auto layout, components, prototype and motion model (keyframes, easing, springs, presets), undo/redo |
+| `desigma-engine` | Editing logic shared by the app and the MCP server: transactions, auto layout, text measuring, component sync |
 | `desigma-render` | tiny-skia renderer, spatial index, parallel tile cache |
+| `desigma-gpu` | wgpu renderer with a CPU fallback |
+| `desigma-svg` | SVG import |
+| `desigma-pen` | Pencil `.pen` import |
+| `desigma-library` | Projects, team libraries, publishing and version history |
 | `desigma-fig` | Figma REST JSON and `.fig` import, REST JSON export |
 | `desigma-fonts` | Bundled Inter, Fontsource fetch and cache, font substitution |
-| `desigma-export` | PNG, JPG and SVG export, Dev mode CSS |
+| `desigma-export` | PNG, JPG, SVG and PDF export, animated GIF / WebM / PNG sequences, Dev mode CSS, SwiftUI and Compose code |
+| `desigma-collab` | Live collaboration sync: document diffs, host ordering, conflict rules, per-person undo |
+| `desigma-net` | Peer-to-peer session transport over iroh: links, password, approval, presence |
 | `desigma-app` | The egui desktop editor |
 | `desigma-diff` | Pixel-diff library and CLI |
 | `desigma-mcp` | Local MCP server for design-file inspection, editing, and code generation |
@@ -233,10 +334,10 @@ The `.fig` format is undocumented. Our decoder follows community reverse enginee
 
 ### Download
 
-Grab the build for your platform from the [latest release](https://github.com/deepfounder-ai/desigma/releases): a `.dmg` for macOS (one file for Apple Silicon and Intel), a `.zip` for Windows and a `.tar.gz` with an installer script for Linux.
+Grab the build for your platform from the [latest release](https://github.com/deepfounder-ai/desigma/releases): a `.dmg` for macOS (one file for Apple Silicon and Intel), a `-setup.exe` installer (or a portable `.zip`) for Windows and a `.tar.gz` with an installer script for Linux.
 
 > [!NOTE]
-> Release builds are **not code-signed yet**, so the first launch shows a warning. On **Windows**, click **More info → Run anyway** in the SmartScreen dialog. On **macOS**, open the `.dmg`, drag desigma to Applications, open it once, then click **Open Anyway** in **System Settings → Privacy & Security**, or run `xattr -dr com.apple.quarantine /Applications/desigma.app`. Step-by-step instructions: [docs/install.md](docs/install.md).
+> Release builds are **not code-signed yet**, so the first launch shows a warning. On **Windows**, run the installer and click **More info → Run anyway** in the SmartScreen dialog. On **macOS**, open the `.dmg`, drag desigma to Applications, open it once, then click **Open Anyway** in **System Settings → Privacy & Security**, or run `xattr -dr com.apple.quarantine /Applications/desigma.app`. Step-by-step instructions: [docs/install.md](docs/install.md).
 
 ### Build from source
 
@@ -273,7 +374,7 @@ desigma-diff compare reference.png actual.png --out diff.png   # pixel-compare t
 
 ## MCP integration
 
-Build the local server with `cargo build --locked -p desigma-mcp`, then configure your MCP client to launch `desigma-mcp --workspace /path/to/designs`. It provides 13 tools for importing files, inspecting layers and tokens, generating code, editing with undo/redo, and saving a new `.desigma` file. The server runs an isolated file session; live desktop-editor control is not yet connected. See the [setup and tool reference](crates/desigma-mcp/README.md).
+Build the local server with `cargo build --locked -p desigma-mcp`, then configure your MCP client to launch `desigma-mcp --workspace /path/to/designs`. It provides 32 tools for importing files, inspecting layers and tokens, generating code, editing with undo/redo (layers, pages, components and instances, motion), and saving `.desigma` files. With the editor's agent bridge on (Preferences → **Allow MCP agents to control this editor**, or launch with `desigma --bridge`), the same tools edit the document that is open on screen and share its Undo; a status pill shows while the bridge is on. Without a running editor the server works on an isolated file session as before. See the [setup and tool reference](crates/desigma-mcp/README.md), and [how an agent drives it](docs/agent-workflows.md) for workspace conventions, when to generate code instead of reading the node tree, and an example document.
 
 ## Native plugin installation
 
@@ -303,8 +404,10 @@ Logos, social images, banners and copy are in [`marketing/`](marketing/).
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you submit for inclusion is dual-licensed the same way, without additional terms.
 
+The licenses cover the code, not the desigma name, logo or icon. Forks are welcome but must use their own name and branding; see [TRADEMARKS.md](TRADEMARKS.md).
+
 Bundled Inter is © The Inter Project Authors, licensed under the SIL Open Font License 1.1 (see `crates/desigma-fonts/assets/inter/OFL.txt`).
 
 Editor icons use Lucide under its ISC license (see `crates/desigma-app/assets/icons/lucide/LICENSE`). Release packages include both asset notices in `licenses/` (inside `desigma.app/Contents/Resources/` on macOS).
 
-desigma is an independent project. It is not affiliated with, endorsed by or sponsored by Figma, Inc. Figma is a trademark of Figma, Inc., used here only to describe file compatibility.
+desigma is an independent project. It is not affiliated with, endorsed by or sponsored by Figma, Inc. or Pencil. Figma and Pencil are trademarks of their owners, used here only to describe file compatibility.

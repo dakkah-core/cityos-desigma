@@ -18,6 +18,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Set once an `--screenshot` run has written its PNG.
 pub static SHOT_OK: AtomicBool = AtomicBool::new(false);
+/// Why a `--screenshot` run produced no file, for the exit message.
+pub static SHOT_ERR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Frames to wait for a requested screenshot before asking again; a request made while the
+/// window is still being resized or not yet presented can be dropped (#35).
+const SHOT_RETRY_FRAMES: u32 = 30;
+/// Frames after which a screenshot run gives up.
+const SHOT_GIVE_UP_FRAMES: u32 = 600;
+
+fn shot_error(msg: String) {
+    if let Ok(mut e) = SHOT_ERR.lock() {
+        *e = msg;
+    }
+}
 
 struct Shot {
     path: PathBuf,
@@ -25,7 +39,9 @@ struct Shot {
     /// Device pixel ratio: the PNG is `size * scale` pixels, laid out as `size` points.
     scale: f32,
     frames: u32,
-    requested: bool,
+    /// Frame of the latest screenshot request, and how many were sent.
+    requested_at: Option<u32>,
+    requests: u32,
 }
 
 pub struct Shell {
@@ -36,6 +52,15 @@ pub struct Shell {
     workspace: crate::design_workspace::Workspace,
     performance: Option<performance::Reporter>,
     repair_startup_geometry: bool,
+    /// Listens for links and files handed over by a second launch; `None` when another editor owns it.
+    _instance: Option<crate::instance::Instance>,
+}
+
+/// A `projects` folder next to the library folder instead of inside it: a hand-made project
+/// put one level too high, which the home screen would otherwise ignore without a word (#35).
+pub(crate) fn stray_projects_dir(library: &std::path::Path) -> Option<PathBuf> {
+    let stray = library.parent()?.join("projects");
+    (stray.is_dir() && stray != library.join("projects")).then_some(stray)
 }
 
 impl Shell {
@@ -48,7 +73,10 @@ impl Shell {
         let screenshot = opts.screenshot.is_some();
         // "Open in new window" children leave update checks to the first window
         let launch = !screenshot && opts.open_id.is_none();
-        let (gpu_flag, library) = (opts.gpu, opts.library.clone());
+        let (gpu_flag, bridge_flag, library) = (opts.gpu, opts.bridge, opts.library.clone());
+        // Saved UI language, else the system one on an interactive launch (screenshots stay English
+        // unless a language was saved).
+        crate::i18n::set(crate::i18n::startup(library.as_deref(), !screenshot));
         let mut shell = Self::build(&cc.egui_ctx, opts);
         if let Some(rs) = &cc.wgpu_render_state {
             if let Some(max) = canvas::gpu::init(rs) {
@@ -60,6 +88,34 @@ impl Shell {
         let saved = library.as_deref().and_then(|l| crate::comments::settings::load_flag(l, "use_gpu"));
         shell.app.canvas.gpu.pref = if screenshot { gpu_flag } else { gpu_flag || saved.unwrap_or(true) };
         shell.app.updater.start(library.as_deref(), launch);
+        if let Some(stray) = library.as_deref().and_then(stray_projects_dir) {
+            let msg = format!(
+                "Projects in {} are outside the library and are not shown; move them into {}",
+                stray.display(),
+                library.as_deref().map(|l| l.join("projects")).unwrap_or_default().display()
+            );
+            eprintln!("desigma: {msg}");
+            if !screenshot {
+                shell.app.show_toast(msg, true);
+            }
+        }
+        // Links and files from a second launch (and, on macOS, from Finder and the browser)
+        crate::instance::set_context(&cc.egui_ctx);
+        #[cfg(target_os = "macos")]
+        crate::macos::register();
+        if launch {
+            match crate::instance::Instance::start(&crate::instance::default_dir(), crate::instance::push) {
+                Ok(i) => shell._instance = i,
+                Err(e) => eprintln!("desigma: cannot listen for links: {e}"),
+            }
+        }
+        // --bridge turns the agent bridge on for this launch only; the Preferences toggle saves it
+        let saved_bridge = library.as_deref().and_then(|l| crate::comments::settings::load_flag(l, crate::bridge::FLAG)) == Some(true);
+        if launch && (bridge_flag || saved_bridge) {
+            if let Err(e) = shell.app.start_bridge(&cc.egui_ctx) {
+                shell.app.show_toast(e, true);
+            }
+        }
         shell
     }
 
@@ -89,10 +145,14 @@ impl Shell {
         }
         theme::install_fonts(ctx);
         theme::apply(ctx);
+        // `--motion` on the plain demo opens the animated onboarding instead
+        let motion_demo = opts.motion && opts.fixture.is_none() && opts.file.is_none() && opts.open_id.is_none() && !opts.home;
         let mut app = App::new(match opts.fixture.as_deref() {
             Some("no-selection") => demo::reference_document(),
             Some("variables") => demo::variables_document(),
             Some(crate::showcase::FIXTURE) => crate::showcase::document(),
+            Some(crate::showcase::MOTION_FIXTURE) => crate::showcase::motion_document(),
+            None if motion_demo => crate::showcase::motion_document(),
             Some(crate::protovars::FIXTURE) => crate::protovars::document(),
             Some("deck") => crate::decks::demo::document(),
             Some("board") => crate::board::demo::document(),
@@ -100,7 +160,7 @@ impl Shell {
             Some(f) if crate::vecfixture::FIXTURES.contains(&f) => crate::vecfixture::document(),
             _ => demo::demo_document(),
         });
-        if !matches!(opts.fixture.as_deref(), Some("variables" | "deck" | crate::showcase::FIXTURE)) {
+        if !matches!(opts.fixture.as_deref(), Some("variables" | "deck" | crate::showcase::FIXTURE | crate::showcase::MOTION_FIXTURE)) && !motion_demo {
             app.doc.name = "Untitled".into();
         }
         if opts.fixture.as_deref() == Some("deck") {
@@ -119,6 +179,9 @@ impl Shell {
         }
         if let Some(f) = &opts.file {
             app.open_path(f.clone());
+        }
+        if let Some(link) = opts.join.clone() {
+            app.open_join(Some(link));
         }
         if let Some(id) = &opts.open_id {
             app.open_library_file(id);
@@ -156,6 +219,9 @@ impl Shell {
             if opts.dev_demo {
                 crate::dev::preset::apply(&mut app);
             }
+        }
+        if opts.motion {
+            crate::motion::timeline::open_demo(&mut app);
         }
         app.ui.rulers = opts.rulers;
         if opts.grid {
@@ -231,7 +297,11 @@ impl Shell {
                 app.plugins.fresh = app.plugins.install_form;
             }
             Some("version-history") => crate::history::preset::apply(&mut app, opts.library.clone()),
+            Some(p @ ("motion-inspector" | "motion-easing" | "motion-library" | "motion-clip")) => crate::motion::inspector::preset(&mut app, p),
             Some(p @ ("dev-annotate" | "dev-compare")) => crate::dev::preset::panel(&mut app, p),
+            Some(p @ ("ai-settings" | "ai-generate" | "ai-edit" | "ai-running")) => crate::aiimg::preset(&mut app, ctx, p),
+            Some("share") => app.open_share(),
+            Some("collab") => crate::collab::preview(&mut app),
             Some(p @ ("updater" | "updater-banner")) => crate::updater::preset(&mut app, p),
             Some(panel @ ("variables" | "variables-floating")) => {
                 app.vars.full = panel == "variables";
@@ -248,9 +318,10 @@ impl Shell {
             size: opts.size.unwrap_or((theme::DEFAULT_WINDOW.0 as u32, theme::DEFAULT_WINDOW.1 as u32)),
             scale: opts.scale.unwrap_or(1.0),
             frames: 0,
-            requested: false,
+            requested_at: None,
+            requests: 0,
         });
-        Self { app, shot, title: String::new(), cityos, workspace, performance, repair_startup_geometry }
+        Self { app, shot, title: String::new(), cityos, workspace, performance, repair_startup_geometry, _instance: None }
     }
 
     fn drive_screenshot(&mut self, ctx: &Context) {
@@ -277,8 +348,10 @@ impl Shell {
                     }
                     match buf.save(&shot.path) {
                         Ok(()) => SHOT_OK.store(true, Ordering::SeqCst),
-                        Err(e) => eprintln!("desigma: cannot write {}: {e}", shot.path.display()),
+                        Err(e) => shot_error(format!("cannot write {}: {e}", shot.path.display())),
                     }
+                } else {
+                    shot_error(format!("the captured frame ({w}x{h}) had no pixel data"));
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
@@ -288,11 +361,29 @@ impl Shell {
             let r = ctx.content_rect();
             (r.width() - shot.size.0 as f32).abs() < 1.5 && (r.height() - shot.size.1 as f32).abs() < 1.5
         };
-        if !shot.requested && ((shot.frames >= 12 && sized) || shot.frames >= 60) {
-            shot.requested = true;
+        let ready = (shot.frames >= 12 && sized) || shot.frames >= 60;
+        // A request can be dropped (a resize in flight, a frame never presented): ask again
+        // until a frame arrives instead of waiting on a single request.
+        let due = match shot.requested_at {
+            None => ready,
+            Some(at) => shot.frames >= at + SHOT_RETRY_FRAMES,
+        };
+        if due {
+            shot.requested_at = Some(shot.frames);
+            shot.requests += 1;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
-        if shot.frames > 240 {
+        if shot.frames > SHOT_GIVE_UP_FRAMES {
+            let r = ctx.content_rect();
+            shot_error(format!(
+                "no frame arrived after {} request(s) in {} frames (window {:.0}x{:.0}, wanted {}x{})",
+                shot.requests,
+                shot.frames,
+                r.width(),
+                r.height(),
+                shot.size.0,
+                shot.size.1
+            ));
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -322,6 +413,8 @@ impl Shell {
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
             match ev {
+                Event::Copy if !editing_text && crate::motion::timeline::copy_keys(&mut self.app, ctx) => {}
+                Event::Paste(_) if !editing_text && crate::motion::timeline::paste_keys(&mut self.app, ctx) => {}
                 Event::Copy if !editing_text => {
                     if let Some(s) = self.app.copy_selection() {
                         ctx.copy_text(s);
@@ -347,6 +440,9 @@ impl Shell {
     fn key(&mut self, ctx: &Context, key: Key, m: egui::Modifiers) {
         let app = &mut self.app;
         let cmd = m.command;
+        if app.motion.enabled && crate::motion::timeline::key(app, key, m) {
+            return;
+        }
         if cmd {
             let act = match (key, m.shift, m.alt) {
                 (Key::E, false, _) => Some(Action::Flatten),
@@ -531,7 +627,8 @@ impl Shell {
         }
         let p = ui.painter();
         let font = theme::font_body();
-        let w = widgets::text_width(p, &t.text, &font) + 48.0;
+        let text = crate::i18n::tr_text(&t.text);
+        let w = widgets::text_width(p, &text, &font) + 48.0;
         let r = Rect::from_center_size(
             Pos2::new(screen.center().x, screen.bottom() - theme::TOAST_BOTTOM - theme::TOAST_HEIGHT / 2.0),
             Vec2::new(w, theme::TOAST_HEIGHT),
@@ -539,7 +636,7 @@ impl Shell {
         widgets::elevation_shadow(p, r, theme::TOAST_RADIUS);
         p.rect_filled(r, theme::cr(theme::TOAST_RADIUS), theme::BG_MENU);
         p.circle_filled(Pos2::new(r.left() + 16.0, r.center().y), 4.0, if t.error { theme::DANGER } else { theme::BG_BRAND });
-        p.text(Pos2::new(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, &t.text, font, theme::TEXT);
+        p.text(Pos2::new(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, text, font, theme::TEXT);
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
 }
@@ -571,6 +668,21 @@ impl eframe::App for Shell {
             }
             _ => true,
         });
+    }
+
+    /// Runs even while the window is minimized or occluded (eframe then skips `ui`), so agent
+    /// calls keep being answered; the bridge server requests a repaint for each one.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.app.now = ctx.input(|i| i.time);
+        self.app.poll_external_change(ctx);
+        if self.app.ext_watch.is_some() {
+            // Keep polling even while nothing else asks for frames.
+            ctx.request_repaint_after(std::time::Duration::from_millis(1000));
+        }
+        self.app.poll_bridge();
+        self.handle_opens(ctx);
+        crate::collab::pump(&mut self.app, ctx);
+        crate::aiimg::pump(&mut self.app);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -702,6 +814,32 @@ impl eframe::App for Shell {
 }
 
 impl Shell {
+    /// Links and files handed over by a second launch or the OS (see `instance.rs`): a link
+    /// opens Join session prefilled, a file opens like the CLI path argument, and the window
+    /// comes to the front.
+    fn handle_opens(&mut self, ctx: &Context) {
+        let opens = crate::instance::take();
+        if opens.is_empty() {
+            return;
+        }
+        for open in opens {
+            match open {
+                // `desigma://open` (optionally with a fragment): embedding hosts use it to
+                // hand the running app the foreground; nothing is opened or interpreted.
+                crate::instance::Open::Link(link) if crate::instance::is_open_link(&link) => {}
+                // Not a join or open link: say so instead of dropping it silently (#67).
+                crate::instance::Open::Link(link) if crate::instance::valid_link(&link) => self.app.request_open(crate::instance::Open::Link(link)),
+                crate::instance::Open::Link(link) => self.app.show_toast(crate::instance::unsupported_link_message(&link), true),
+                crate::instance::Open::File(path) => self.app.request_open(crate::instance::Open::File(path)),
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // when the OS refuses to steal focus this flashes the taskbar / bounces the Dock instead
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+        ctx.request_repaint();
+    }
+
     /// Files dropped on the window: `.svg` files are placed at the drop point,
     /// anything else (the first file) is opened as a document.
     fn handle_drops(&mut self, ctx: &Context) {
@@ -711,7 +849,7 @@ impl Shell {
             name.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("svg"))
         };
         if let Some(path) = files.iter().filter(|f| !is_svg(f)).find_map(|f| f.path.clone()) {
-            self.app.open_path(path);
+            self.app.request_open(crate::instance::Open::File(path));
             return;
         }
         for (nth, f) in files.iter().filter(|f| is_svg(f)).enumerate() {
@@ -737,7 +875,7 @@ impl Shell {
     }
 
     fn sync_title(&mut self, ctx: &Context) {
-        let title = if self.app.home.is_some() { theme::APP_TITLE.to_string() } else { self.app.title() };
+        let title = if self.app.home.is_some() { theme::display_title().to_string() } else { self.app.title() };
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
@@ -755,6 +893,12 @@ impl Shell {
         }
         crate::home::show(&mut self.app, ui);
         crate::home::dialog::show(&mut self.app, ctx);
+        crate::mcp_link::show(&mut self.app, ctx);
+        crate::collab::ui::join_dialog(&mut self.app, ctx);
+        crate::unsaved::dialog(&mut self.app, ctx);
+        crate::extwatch::dialog(&mut self.app, ctx);
+        crate::aiimg::ui::settings_dialog(&mut self.app, ctx);
+        crate::aiimg::ui::prompt_dialog(&mut self.app, ctx);
         let full = ui.max_rect();
         self.toast(ui, full);
         self.sync_title(ctx);
@@ -766,6 +910,7 @@ impl Shell {
         crate::cityos_jobs::set_background_paused(ctx.input(|i| i.viewport().minimized.unwrap_or(false) || i.pointer.any_down()));
         self.app.now = ctx.input(|i| i.time);
         self.app.poll_updater(&ctx);
+        self.app.poll_install(&ctx);
         self.drive_screenshot(&ctx);
         if std::mem::take(&mut self.app.ui.cityos_requested) {
             self.cityos.open = true;
@@ -781,6 +926,9 @@ impl Shell {
             close_failed = !self.app.flush_autosave();
             if close_failed {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else {
+                // "Restart to update": everything is saved, so the new version can start now.
+                crate::updater::install::run_stashed();
             }
         }
         if self.cityos.open {
@@ -801,6 +949,7 @@ impl Shell {
         self.app.autosave_tick(&ctx);
         self.app.history_tick();
         self.app.dev_tick(&ctx);
+        self.app.motion_tick(&ctx);
         if self.app.proto.present.is_some() {
             crate::present::show(&mut self.app, ui);
             return;
@@ -825,6 +974,14 @@ impl Shell {
         let notes_h = if deck { 132.0_f32.min(full.height() * 0.28) } else { 0.0 };
         let canvas_rect = Rect::from_min_max(Pos2::new(canvas_left, full.top()), Pos2::new(right_rect.left(), full.bottom() - notes_h));
         let notes_rect = Rect::from_min_max(Pos2::new(canvas_left, canvas_rect.bottom()), Pos2::new(right_rect.left(), full.bottom()));
+        // Motion mode: the timeline docks under the canvas and the toolbar floats above it.
+        let motion_on = self.app.motion.enabled && !board && !deck;
+        let (canvas_rect, timeline_rect) = if motion_on {
+            let (c, t) = crate::motion::timeline::split(&ctx, canvas_rect);
+            (c, Some(t))
+        } else {
+            (canvas_rect, None)
+        };
 
         let full_vars = self.app.vars.open && self.app.vars.full;
         if full_vars {
@@ -834,6 +991,9 @@ impl Shell {
             crate::variables::view::show(&mut self.app, ui, content);
         } else {
             canvas::show(&mut self.app, ui, canvas_rect);
+            if let Some(tr) = timeline_rect {
+                crate::motion::timeline::show(&mut self.app, ui, tr);
+            }
             if deck {
                 crate::decks::ui::notes(&mut self.app, ui, notes_rect);
             }
@@ -862,11 +1022,20 @@ impl Shell {
                 crate::board::section::rename_ui(&mut self.app, ui, canvas_rect);
                 crate::board::canvas::zoom_pill(&mut self.app, ui, canvas_rect);
                 crate::board::session::show(&mut self.app, ui, canvas_rect);
+                crate::collab::ui::board_strip(&mut self.app, ui, canvas_rect);
             } else {
                 right::show(&mut self.app, ui, right_rect);
-                toolbar::show(&mut self.app, ui, if deck { canvas_rect } else { canvas_rect_for_toolbar(full) });
+                let tb = if deck {
+                    canvas_rect
+                } else if timeline_rect.is_some() {
+                    Rect::from_min_max(full.min, Pos2::new(full.right(), canvas_rect.bottom()))
+                } else {
+                    canvas_rect_for_toolbar(full)
+                };
+                toolbar::show(&mut self.app, ui, tb);
             }
             crate::history::banner::show(&mut self.app, ui, canvas_rect);
+            crate::collab::ui::banner(&mut self.app, ui, canvas_rect);
             self.context_menu(ui, canvas_rect);
             menus::show(&mut self.app, &ctx);
             panels::context::show(&mut self.app, &ctx);
@@ -879,6 +1048,15 @@ impl Shell {
         crate::libraries::show(&mut self.app, &ctx);
         crate::plugins::ui::show(&mut self.app, &ctx);
         crate::updater::ui::show(&mut self.app, &ctx);
+        crate::bridge::ui::show(&mut self.app, &ctx);
+        crate::mcp_link::show(&mut self.app, &ctx);
+        crate::collab::ui::share_popover(&mut self.app, &ctx);
+        crate::collab::ui::requests(&mut self.app, &ctx);
+        crate::collab::ui::join_dialog(&mut self.app, &ctx);
+        crate::unsaved::dialog(&mut self.app, &ctx);
+        crate::extwatch::dialog(&mut self.app, &ctx);
+        crate::aiimg::ui::settings_dialog(&mut self.app, &ctx);
+        crate::aiimg::ui::prompt_dialog(&mut self.app, &ctx);
         self.toast(ui, full);
 
         self.sync_title(&ctx);

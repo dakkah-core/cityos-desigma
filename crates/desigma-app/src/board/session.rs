@@ -4,6 +4,7 @@
 //! ending the vote lists the items by votes.
 
 use crate::app::App;
+use crate::comments::settings;
 use crate::icons::Icon;
 use crate::theme;
 use crate::widgets;
@@ -41,18 +42,42 @@ pub fn set_session(app: &mut App, f: impl FnOnce(&mut BoardSession)) {
     app.changed();
 }
 
-/// Adds (or, with `add == false`, takes back) one vote on `id` while a vote is open.
+/// Name of the setting that keeps this install's voter id.
+const VOTER_KEY: &str = "voter_id";
+
+/// The id this install votes under: random, kept in the settings, so it is the same after a
+/// restart or a reconnect and works offline. Without a settings folder it lasts for the run.
+pub fn voter_id(app: &mut App) -> String {
+    if let Some(v) = &app.board.voter {
+        return v.clone();
+    }
+    let saved = app.lib.as_ref().and_then(|l| settings::load_string(l.root(), VOTER_KEY));
+    let id = saved.unwrap_or_else(|| {
+        let id = desigma_library::new_id();
+        if let Some(l) = &app.lib {
+            // not being able to save only means a new id next run
+            let _ = settings::save_string(l.root(), VOTER_KEY, &id);
+        }
+        id
+    });
+    app.board.voter = Some(id.clone());
+    id
+}
+
+/// Adds (or, with `add == false`, takes back) one of this person's votes on `id` while a vote
+/// is open. The limit counts only this person's votes.
 pub fn vote(app: &mut App, id: NodeId, add: bool) {
-    if add && app.doc.board_session.vote.as_ref().is_some_and(|v| !v.ended && v.left() == 0) {
+    let voter = voter_id(app);
+    if add && app.doc.board_session.vote.as_ref().is_some_and(|v| !v.ended && v.left(&voter) == 0) {
         app.show_toast("No votes left", false);
         return;
     }
     set_session(app, |s| {
         if let Some(v) = s.vote.as_mut() {
             if add {
-                v.add(id);
+                v.add(id, &voter);
             } else {
-                v.remove(id);
+                v.remove(id, &voter);
             }
         }
     });
@@ -174,6 +199,7 @@ pub fn show(app: &mut App, ui: &mut Ui, canvas: ERect) {
         return;
     }
     let t = now();
+    let voter = voter_id(app);
     let sess = app.doc.board_session.clone();
     if sess.timer.as_ref().is_some_and(|t| t.running()) {
         ui.ctx().request_repaint_after(Duration::from_millis(250));
@@ -259,7 +285,7 @@ pub fn show(app: &mut App, ui: &mut Ui, canvas: ERect) {
             let r = cell(x, BTN);
             widgets::paint_icon_in(&p, r, Icon::Vote, 16.0, VOTE_PURPLE);
             let label = cell(x + BTN, 70.0);
-            p.text(label.center(), Align2::CENTER_CENTER, format!("{} of {} left", v.left(), v.votes_per_person), theme::font_body(), theme::TEXT);
+            p.text(label.center(), Align2::CENTER_CENTER, format!("{} of {} left", v.left(&voter), v.votes_per_person), theme::font_body(), theme::TEXT);
             widgets::record(ui, "board-vote-left", label);
             let end = cell(x + BTN + 70.0, 48.0);
             if text_button(ui, end, "board-vote-end", "End", true, "End voting and show the results") {

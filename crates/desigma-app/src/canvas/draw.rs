@@ -57,7 +57,7 @@ pub fn label_rects(app: &App, rect: ERect) -> Vec<(NodeId, ERect)> {
     out
 }
 
-fn outline(app: &App, p: &Painter, rect: ERect, id: NodeId, col: Color32, width: f32) {
+pub(crate) fn outline(app: &App, p: &Painter, rect: ERect, id: NodeId, col: Color32, width: f32) {
     // a connector is outlined along its line, not around its box
     if let Some(route) = desigma_doc::connector_route(&app.doc, id) {
         let pw = parent_world(&app.doc, id);
@@ -65,7 +65,7 @@ fn outline(app: &App, p: &Painter, rect: ERect, id: NodeId, col: Color32, width:
         p.add(egui::Shape::line(pts, Stroke::new(width + 2.0, col.gamma_multiply(0.45))));
         return;
     }
-    let corners = world_corners(&app.doc, id).map(|c| app.view.to_screen(rect.min, c));
+    let corners = world_corners(app.shown_doc(), id).map(|c| app.view.to_screen(rect.min, c));
     let is_line = matches!(app.doc.get(id).map(|n| &n.kind), Some(NodeKind::Line));
     if is_line {
         p.line_segment([corners[0], corners[1]], Stroke::new(width.max(1.0), col));

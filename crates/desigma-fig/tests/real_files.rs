@@ -90,3 +90,56 @@ fn shadcn_ui_imports_with_local_components() {
         assert_eq!(t.style.font_weight, weight);
     }
 }
+
+#[test]
+#[ignore = "needs the private reference/motion-untitled.fig"]
+fn motion_untitled_imports_figma_motion_data() {
+    use desigma_doc::motion::*;
+    let Some(bytes) = reference("motion-untitled.fig") else {
+        eprintln!("motion-untitled.fig not found: skipped");
+        return;
+    };
+    let doc = import_fig(&bytes).expect("import");
+    // The tracks, keyframes and preset instances are folded into the node: no stray nodes.
+    assert!(!doc.nodes.values().any(|n| matches!(n.kind, NodeKind::Unknown { .. })));
+    assert!(doc.library_page.is_none());
+    let rect = doc.nodes.values().find(|n| n.name == "Rectangle 1").expect("rectangle");
+    let m = &rect.motion;
+    let base = base_position(rect);
+
+    // Position: x -7 -> 200 in the UI = an offset of 207 from the static position, spring segment.
+    let pos = m.track(AnimProperty::Position).expect("position track");
+    assert_eq!(pos.keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![0, 997]);
+    assert_eq!(pos.keys[0].value, AnimValue::Vec2(base));
+    assert_eq!(pos.keys[1].value, AnimValue::Vec2(Vec2::new(base.x + 207.0, base.y)));
+    assert_eq!(pos.keys[0].easing, Ease::spring(0.25), "damping 15, stiffness 100, mass 1");
+
+    // Rotation 0 -> 90 degrees, opacity 100 -> 30 %.
+    let rot = m.track(AnimProperty::Rotation).expect("rotation track");
+    assert_eq!(rot.keys.iter().map(|k| k.time_ms).collect::<Vec<_>>(), vec![0, 997]);
+    assert_eq!(rot.keys[0].value, AnimValue::Scalar(0.0));
+    assert!((rot.keys[1].value.scalar().unwrap() - 90.0).abs() < 1e-4);
+    assert_eq!(rot.keys[0].easing, Ease::bezier(0.5, 0.0, 0.5, 1.0));
+    let op = m.track(AnimProperty::Opacity).expect("opacity track");
+    assert!((op.keys[0].value.scalar().unwrap() - 1.0).abs() < 1e-6);
+    assert!((op.keys[1].value.scalar().unwrap() - 0.3).abs() < 1e-5);
+    assert_eq!(m.tracks.len(), 3);
+
+    // The preset (Burst = four basic presets) applied at 997 ms.
+    assert_eq!(m.clips.len(), 4);
+    let by_kind = |k: ClipKind| m.clips.iter().find(|c| c.kind == k).unwrap_or_else(|| panic!("no {k:?} clip"));
+    let burst = Ease::bezier(0.07, 0.97, 0.58, 1.0);
+    let slide = by_kind(ClipKind::Position);
+    assert_eq!((slide.mode, slide.direction, slide.amount), (ClipMode::In, ClipDirection::Bottom, 116.0));
+    assert_eq!((slide.delay_ms, slide.duration_ms, slide.easing), (997, 300, burst));
+    let scale = by_kind(ClipKind::Scale);
+    assert_eq!((scale.mode, scale.amount, scale.delay_ms, scale.duration_ms, scale.easing), (ClipMode::In, 0.8, 997, 300, burst));
+    let spin = by_kind(ClipKind::Rotation);
+    assert_eq!((spin.mode, spin.direction, spin.amount, spin.delay_ms, spin.duration_ms), (ClipMode::In, ClipDirection::Clockwise, 90.0, 997, 300));
+    let fade = by_kind(ClipKind::Opacity);
+    assert_eq!((fade.mode, fade.amount, fade.delay_ms, fade.duration_ms), (ClipMode::In, 0.0, 997, 30));
+
+    // Timeline: Figma stores nothing for the defaults (2000 ms, no loop).
+    assert_eq!(doc.timeline(doc.pages[0]).duration_ms, 2000);
+    assert!(!doc.timeline(doc.pages[0]).looping);
+}

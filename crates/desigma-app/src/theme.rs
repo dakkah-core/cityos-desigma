@@ -320,7 +320,7 @@ pub const TOOL_CHEVRON_CENTER_DX: f32 = 11.0;
 pub const TOOL_GROUP_GAP: f32 = 8.0;
 pub const TOOL_ICON_SIZE: f32 = 20.0;
 /// Mode switcher: 4 segments (draw, design, prototype, dev) in a padded rounded group.
-pub const MODE_SEGMENTS: usize = 4;
+pub const MODE_SEGMENTS: usize = 5;
 pub const MODE_SWITCH_PAD: f32 = 2.0;
 pub const MODE_SWITCH_W: f32 = 29.5;
 pub const MODE_TILE_RADIUS: u8 = 3;
@@ -513,6 +513,26 @@ pub const PRESENT_MAX_SCALE: f32 = 4.0;
 pub const DEFAULT_WINDOW: (f32, f32) = (1600.0, 1088.0);
 pub const MIN_WINDOW: (f32, f32) = (900.0, 600.0);
 pub const APP_TITLE: &str = "desigma";
+
+/// Display title for the window, tab strip and About: `DESIGMA_APP_TITLE` when it is
+/// set to a sane value, [`APP_TITLE`] otherwise. The persistence identity (the
+/// `eframe::run_native` app name) deliberately stays [`APP_TITLE`], so an overridden
+/// title can never fork a user's stored state.
+pub fn display_title() -> &'static str {
+    use std::sync::OnceLock;
+    static TITLE: OnceLock<String> = OnceLock::new();
+    TITLE.get_or_init(|| sanitize_title(&std::env::var("DESIGMA_APP_TITLE").unwrap_or_default()).unwrap_or_else(|| APP_TITLE.to_string()))
+}
+
+/// Accepts a trimmed, printable, 1-64 char title; rejects everything else.
+fn sanitize_title(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() || t.len() > 64 || t.chars().any(char::is_control) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
 pub const DEFAULT_SHAPE_SIZE: f32 = 100.0;
 pub const DEFAULT_TEXT_SIZE: f32 = 16.0;
 pub const DEFAULT_PAGE_BG: u32 = 0xF5F5F5;
@@ -599,6 +619,64 @@ pub fn install_fonts(ctx: &egui::Context) {
     semibold_family.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
     fonts.families.insert(FontFamily::Name(FAMILY_SEMIBOLD.into()), semibold_family);
     ctx.set_fonts(fonts);
+    install_cjk_fallback(ctx);
+}
+
+/// System fonts with Chinese/Japanese (first found wins), then Korean, for UI labels such as
+/// file and project names. Inter has none of these glyphs. Read from disk on a worker thread
+/// (the files are tens of MB) and appended as the last fallback of every UI family.
+const CJK_FONTS: &[&str] = &[
+    // Linux (fonts-noto-cjk, fonts-wqy)
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    // macOS
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    // Windows
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\simsun.ttc",
+    "C:\\Windows\\Fonts\\YuGothR.ttc",
+];
+const KOREAN_FONTS: &[&str] =
+    &["/System/Library/Fonts/AppleSDGothicNeo.ttc", "C:\\Windows\\Fonts\\malgun.ttf", "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"];
+
+fn install_cjk_fallback(ctx: &egui::Context) {
+    // Tests lay out text deterministically, whatever fonts the machine has.
+    if cfg!(test) {
+        return;
+    }
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let cjk = first_readable(CJK_FONTS);
+        // Noto Sans CJK already covers Hangul.
+        let korean = if cjk.as_ref().is_some_and(|(p, _)| p.contains("NotoSansCJK")) { None } else { first_readable(KOREAN_FONTS) };
+        let mut added = false;
+        for (name, found) in [("ui-cjk", cjk), ("ui-korean", korean)] {
+            let Some((_, bytes)) = found else { continue };
+            let families = [
+                FontFamily::Proportional,
+                FontFamily::Monospace,
+                FontFamily::Name(FAMILY_STRONG.into()),
+                FontFamily::Name(FAMILY_MEDIUM.into()),
+                FontFamily::Name(FAMILY_SEMIBOLD.into()),
+            ]
+            .into_iter()
+            .map(|family| egui::epaint::text::InsertFontFamily { family, priority: egui::epaint::text::FontPriority::Lowest })
+            .collect();
+            ctx.add_font(egui::epaint::text::FontInsert::new(name, egui::FontData::from_owned(bytes), families));
+            added = true;
+        }
+        if added {
+            ctx.request_repaint();
+        }
+    });
+}
+
+fn first_readable(paths: &[&str]) -> Option<(String, Vec<u8>)> {
+    paths.iter().find_map(|p| std::fs::read(p).ok().map(|b| (p.to_string(), b)))
 }
 
 /// Perceived luminance test used to choose label colors on the canvas.
@@ -691,3 +769,19 @@ pub const BOARD_BAR_GAP: f32 = 12.0;
 pub const BOARD_BAR_BTN: f32 = 28.0;
 pub const BOARD_SWATCH: f32 = 18.0;
 pub const BOARD_BAR_SEP: f32 = 8.0;
+
+#[cfg(test)]
+mod title_tests {
+    use super::sanitize_title;
+
+    #[test]
+    fn titles_must_be_printable_bounded_text() {
+        assert_eq!(sanitize_title(" fusion-desigma "), Some("fusion-desigma".to_string()));
+        assert_eq!(sanitize_title(""), None);
+        assert_eq!(sanitize_title("   "), None);
+        assert_eq!(sanitize_title("desigma\u{7}"), None);
+        assert_eq!(sanitize_title(&"x".repeat(65)), None);
+        let long = "x".repeat(64);
+        assert_eq!(sanitize_title(&long).as_deref(), Some(long.as_str()));
+    }
+}

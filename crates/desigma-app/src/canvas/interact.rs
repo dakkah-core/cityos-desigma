@@ -54,10 +54,10 @@ pub fn selection_box(app: &App) -> Option<([DV; 4], bool)> {
         [] => None,
         [one] => {
             let n = app.doc.get(*one)?;
-            Some((world_corners(&app.doc, *one), matches!(n.kind, NodeKind::Line)))
+            Some((world_corners(app.shown_doc(), *one), matches!(n.kind, NodeKind::Line)))
         }
         many => {
-            let bb = union_all(many.iter().map(|i| world_aabb(&app.doc, *i)))?;
+            let bb = union_all(many.iter().map(|i| world_aabb(app.shown_doc(), *i)))?;
             Some((rect_corners(&bb), false))
         }
     }
@@ -146,7 +146,6 @@ pub fn process(app: &mut App, ui: &mut Ui, rect: ERect, resp: &Response) {
             if let Some(p) = inp.pos {
                 let z = app.view.zoom * zoom_delta;
                 app.view.zoom_at(rect.min, p, z);
-                app.changed();
             }
         } else if scroll != egui::Vec2::ZERO {
             let mut s = scroll;
@@ -154,7 +153,6 @@ pub fn process(app: &mut App, ui: &mut Ui, rect: ERect, resp: &Response) {
                 s = egui::vec2(s.y, 0.0);
             }
             app.view.offset = v2(app.view.offset.x - s.x / app.view.zoom, app.view.offset.y - s.y / app.view.zoom);
-            app.changed();
         }
     }
 
@@ -445,7 +443,6 @@ fn on_drag(app: &mut App, ui: &Ui, rect: ERect, inp: &Inp) {
         Interaction::Pan => {
             let d = ui.input(|i| i.pointer.delta());
             app.view.offset = v2(app.view.offset.x - d.x / zoom, app.view.offset.y - d.y / zoom);
-            app.changed();
         }
         Interaction::Pending(p) => {
             if (pos - p.start_screen).length() > theme::DRAG_THRESHOLD_PX {
@@ -736,10 +733,17 @@ fn on_release(app: &mut App, rect: ERect, inp: &Inp) {
         Interaction::Connect(c) => crate::board::connect::release(app, c),
         Interaction::Table(d) => crate::board::table::release(app, d),
         Interaction::Move(mut m) => {
+            let parents: Vec<Option<NodeId>> = m.ids.iter().map(|i| app.doc.get(*i).and_then(|n| n.parent)).collect();
             if m.moved && !m.ids.is_empty() {
                 reparent_after_move(app, &mut m, cur);
             }
-            app.run_tx(m.tx);
+            let same_parents = m.ids.iter().zip(&parents).all(|(i, p)| app.doc.get(*i).map(|n| n.parent) == Some(*p));
+            if app.motion.enabled && m.moved && same_parents {
+                // Motion mode: the drag keys Position at the playhead.
+                crate::motion::inspector::commit_move(app, m);
+            } else {
+                app.run_tx(m.tx);
+            }
         }
         Interaction::Resize(r) => {
             app.run_tx(r.tx);

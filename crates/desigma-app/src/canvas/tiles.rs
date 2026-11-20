@@ -57,7 +57,7 @@ impl TileView {
     }
 }
 
-fn page_background(app: &App) -> Color32 {
+pub(super) fn page_background(app: &App) -> Color32 {
     match app.doc.get(app.page).map(|n| &n.kind) {
         Some(NodeKind::Page { background }) => {
             let f = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -89,7 +89,9 @@ fn upload(ctx: &Context, tv: &mut TileView, tile: &Tile, linear: bool) -> egui::
     id
 }
 
-/// Document revision for this frame: bumped once when the document changed.
+/// Revision for the render caches this frame. It changes when the document did, and in Motion
+/// mode also when the playhead moved (the page is then drawn evaluated at the playhead: see
+/// [`crate::motion::playback`]), so the caches re-diff the page and re-render only what moved.
 pub fn take_rev(app: &mut App) -> u64 {
     let c = &mut app.canvas;
     if c.dirty {
@@ -98,8 +100,9 @@ pub fn take_rev(app: &mut App) -> u64 {
     }
     if std::mem::take(&mut c.tiles.gpu_reset) {
         c.gpu.reset();
+        c.motion.reset();
     }
-    c.tiles.rev
+    c.motion.prepare(&app.motion, &app.doc, app.page, c.tiles.rev)
 }
 
 /// Renders (as far as the budget allows) and paints the page into `rect`.
@@ -119,8 +122,9 @@ pub fn paint(app: &mut App, ui: &Ui, rect: ERect) {
 
     let (page, offset, zoom) = (app.page, app.view.offset, app.view.zoom);
     let now = ctx.input(|i| i.time);
-    take_rev(app);
+    let rev = take_rev(app);
     let c = &mut app.canvas;
+    let shown = c.motion.document(app.motion.enabled, &app.doc);
     let tv = &mut c.tiles;
     tv.frame_no += 1;
 
@@ -146,7 +150,7 @@ pub fn paint(app: &mut App, ui: &Ui, rect: ERect) {
     let ratio = rz / zoom;
     let vp = Viewport { offset, zoom: rz, dpr: ppp };
     let size = ((w * ratio).ceil().max(1.0) as u32, (h * ratio).ceil().max(1.0) as u32);
-    let frame = tv.cache.render_tiles(&app.doc, page, &vp, size, tv.rev, TileBudget::time(RENDER_BUDGET));
+    let frame = tv.cache.render_tiles(shown, page, &vp, size, rev, TileBudget::time(RENDER_BUDGET));
     let pending = frame.pending() > 0 || frame.prefetch_pending > 0;
 
     // Tiles are laid out in device pixels of the actual zoom, snapped so
@@ -179,4 +183,76 @@ pub fn paint(app: &mut App, ui: &Ui, rect: ERect) {
         tv.textures.retain(|k, _| cache.contains(k));
     }
     c.last_render_ms = start.elapsed().as_secs_f32() * 1000.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desigma_doc::motion::{AnimProperty, AnimValue, Ease};
+    use desigma_doc::{Color, Node, Paint, Rect, Vec2};
+
+    /// A page of two tiles: a static square at x = 300 and a square sliding inside the first tile.
+    fn app() -> App {
+        let mut d = desigma_doc::Document::new("t");
+        let page = d.add_page("p");
+        d.get_mut(page).unwrap().kind = NodeKind::Page { background: Color::WHITE };
+        let st = d.alloc_id();
+        let mut n = Node::rectangle(st, Rect::new(300.0, 10.0, 40.0, 40.0));
+        n.fills = vec![Paint::solid(Color::rgb(0, 0, 255))];
+        d.insert(page, n).unwrap();
+        let mv = d.alloc_id();
+        let mut n = Node::rectangle(mv, Rect::new(0.0, 100.0, 40.0, 40.0));
+        n.fills = vec![Paint::solid(Color::rgb(255, 0, 0))];
+        let p = n.motion.ensure_track(AnimProperty::Position);
+        p.set_key(0, AnimValue::Vec2(Vec2::new(0.0, 100.0)), Some(Ease::Linear));
+        p.set_key(1000, AnimValue::Vec2(Vec2::new(200.0, 100.0)), None);
+        d.insert(page, n).unwrap();
+        App::new(d)
+    }
+
+    fn render(app: &mut App, cache: &mut TileCache) -> Vec<(i32, i32, u64, [u8; 4])> {
+        let rev = take_rev(app);
+        let shown = app.canvas.motion.document(app.motion.enabled, &app.doc);
+        let vp = Viewport { offset: Vec2::ZERO, zoom: 1.0, dpr: 1.0 };
+        let f = cache.render_tiles(shown, app.page, &vp, (512, 256), rev, TileBudget::unlimited());
+        let mut out: Vec<_> = f
+            .tiles
+            .iter()
+            .map(|t| {
+                let (ox, oy) = t.key.device_origin();
+                let c = t.pixmap.pixel(20, 120 - oy as u32 % 256).unwrap();
+                (ox, oy, t.version, [c.red(), c.green(), c.blue(), c.alpha()])
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn canvas_shows_the_page_at_the_playhead_and_only_redraws_what_moved() {
+        let mut app = app();
+        let mut cache = TileCache::new();
+        // Motion mode off: the stored document (the square sits at its stored place, x = 0)
+        let before = render(&mut app, &mut cache);
+        let at_x20 = |v: &Vec<(i32, i32, u64, [u8; 4])>| v.iter().find(|t| t.0 == 0 && t.1 == 0).unwrap().3;
+        assert_eq!(at_x20(&before), [255, 0, 0, 255]);
+        // Motion mode at 500 ms: the square is at x = 100..140, so x = 20 is background
+        app.motion.enabled = true;
+        app.motion.playhead_ms = 500;
+        let mid = render(&mut app, &mut cache);
+        assert_eq!(at_x20(&mid), [255, 255, 255, 255]);
+        // Scrub to 600 ms: the moving tile is repainted, the static tile keeps its version
+        app.motion.playhead_ms = 600;
+        let later = render(&mut app, &mut cache);
+        let ver = |v: &Vec<(i32, i32, u64, [u8; 4])>, x: i32| v.iter().find(|t| t.0 == x && t.1 == 0).unwrap().2;
+        assert_ne!(ver(&later, 0), ver(&mid, 0), "the tile with the animated square is redrawn");
+        assert_eq!(ver(&later, 256), ver(&mid, 256), "the tile that did not change is not");
+        // The stored document never changed
+        let st = app.doc.get(app.doc.get(app.page).unwrap().children[1]).unwrap();
+        assert_eq!(st.transform.tx, 0.0);
+        // Leaving Motion mode shows the stored document again
+        app.motion.enabled = false;
+        let back = render(&mut app, &mut cache);
+        assert_eq!(at_x20(&back), [255, 0, 0, 255]);
+    }
 }

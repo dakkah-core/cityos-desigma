@@ -133,6 +133,18 @@ pub enum Icon {
     StrokeSettings,
     StrokeSides,
     StrokeWeight,
+    // motion
+    Motion,
+    Repeat,
+    ChevronLeft,
+    ChevronsDownUp,
+    MoveArrows,
+    Maximize,
+    /// Transform gizmo toggle of the Motion inspector.
+    Crosshair,
+    /// Proportional scale on / off.
+    Link,
+    Unlink,
 }
 
 impl Icon {
@@ -253,6 +265,15 @@ impl Icon {
         Icon::StrokeSettings,
         Icon::StrokeSides,
         Icon::StrokeWeight,
+        Icon::Motion,
+        Icon::Repeat,
+        Icon::ChevronLeft,
+        Icon::ChevronsDownUp,
+        Icon::MoveArrows,
+        Icon::Maximize,
+        Icon::Crosshair,
+        Icon::Link,
+        Icon::Unlink,
     ];
 
     /// Name of the vendored Lucide icon that stands in for this one (None for the logo).
@@ -372,6 +393,15 @@ impl Icon {
             Icon::StrokeSettings => "sliders-horizontal",
             Icon::StrokeSides => "square-dashed",
             Icon::StrokeWeight => "align-justify",
+            Icon::Motion => "audio-waveform",
+            Icon::Repeat => "repeat",
+            Icon::ChevronLeft => "chevron-left",
+            Icon::ChevronsDownUp => "chevrons-down-up",
+            Icon::MoveArrows => "move",
+            Icon::Maximize => "maximize-2",
+            Icon::Crosshair => "crosshair",
+            Icon::Link => "link",
+            Icon::Unlink => "unlink",
         })
     }
 }
@@ -386,6 +416,10 @@ macro_rules! lucide {
 }
 
 lucide!(
+    "audio-waveform",
+    "repeat",
+    "chevron-left",
+    "chevrons-down-up",
     "file",
     "library",
     "wrench",
@@ -491,6 +525,12 @@ lucide!(
     "copy",
     "list-ordered",
     "rectangle-horizontal",
+    "chevron-left",
+    "move",
+    "maximize-2",
+    "crosshair",
+    "link",
+    "unlink",
 );
 
 /// SVG source of the Lucide icon behind `icon`.
@@ -598,7 +638,7 @@ mod tests {
         for i in Icon::ALL {
             assert!(seen.insert(*i), "{i:?} listed twice");
         }
-        assert_eq!(seen.len(), 114);
+        assert_eq!(seen.len(), 123);
     }
 
     #[test]

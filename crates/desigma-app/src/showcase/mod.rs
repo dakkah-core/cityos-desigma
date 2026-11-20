@@ -7,6 +7,8 @@
 //! * **Web**: one 1440 px dashboard (sidebar, KPI cards, charts, table).
 //! * **Components**: Button, Tag, Avatar, Toggle, List row and Tab bar as component sets with
 //!   variants, text, boolean and instance-swap properties, plus the icon components.
+//! * **Motion**: an animated onboarding flow (two screens, keyframes with springs, Enter and Cycle
+//!   presets, prototype actions that play and restart the animation).
 //! * A "Theme" variable collection (Light and Dark) bound to the main surfaces, shared color, text
 //!   and effect styles.
 //!
@@ -16,6 +18,7 @@
 mod icons;
 mod kit;
 mod mobile;
+pub mod motion;
 mod proto;
 mod web;
 
@@ -31,6 +34,8 @@ use std::collections::BTreeMap;
 
 /// Name of the fixture and of the document.
 pub const FIXTURE: &str = "showcase";
+/// Fixture of the animated onboarding flow (`--fixture motion`, also what a bare `--motion` opens).
+pub const MOTION_FIXTURE: &str = "motion";
 pub const NAME: &str = "Marlow - Mobile banking";
 
 /// Theme tokens: a name in the "Theme" variable collection with a Light and a Dark value.
@@ -132,8 +137,12 @@ const TEXT_STYLES: [(&str, f32, u16, f32, f32); 11] = [
 
 impl S {
     fn new() -> Self {
-        let mut d = Document::new(NAME);
-        for (name, bg) in [("Mobile", 0xE4E6F0), ("Web", 0xE4E6F0), ("Components", 0xF1F2F8)] {
+        Self::with_pages(NAME, &[("Mobile", 0xE4E6F0), ("Web", 0xE4E6F0), ("Components", 0xF1F2F8), ("Motion", 0xE4E6F0)])
+    }
+
+    fn with_pages(name: &str, pages: &[(&str, u32)]) -> Self {
+        let mut d = Document::new(name);
+        for (name, bg) in pages.iter().copied() {
             let p = d.add_page(name);
             if let Some(n) = d.get_mut(p) {
                 n.kind = NodeKind::Page { background: hex(bg) };
@@ -712,7 +721,8 @@ pub fn document() -> Document {
     let screens = mobile::build(&mut s);
     let dash = web::build(&mut s);
     proto::wire(&mut s, &screens);
-    for id in screens.all().into_iter().chain([dash]) {
+    let motion = motion::build(&mut s);
+    for id in screens.all().into_iter().chain([dash]).chain(motion.all()) {
         s.relayout(id);
         s.flag_instance_sizes(id);
     }
@@ -722,7 +732,18 @@ pub fn document() -> Document {
     s.d
 }
 
-/// Files for a populated home screen: the full showcase, two smaller ones cut from it and a board.
+/// Just the Motion page: an animated onboarding flow (`--motion` and `--fixture motion`).
+pub fn motion_document() -> Document {
+    let mut s = S::with_pages("Marlow - Motion", &[("Motion", 0xE4E6F0)]);
+    let m = motion::build(&mut s);
+    for id in m.all() {
+        s.relayout(id);
+    }
+    s.d
+}
+
+/// Files for a populated home screen: the full showcase, two smaller ones cut from it, a board and
+/// the motion demo.
 pub fn library_samples() -> Vec<Document> {
     let full = document();
     let mut web = document();
@@ -735,14 +756,14 @@ pub fn library_samples() -> Vec<Document> {
     full.name = "Marlow - Mobile banking".into();
     let mut board = crate::board::demo::document();
     board.name = "Marlow - Launch brainstorm".into();
-    vec![full, web, kit, board]
+    vec![full, web, kit, board, motion_document()]
 }
 
 /// Writes the sample files into a projects library at `root` (screenshot aid: `--seed-library DIR`).
 pub fn seed_library(root: &std::path::Path) -> Result<(), String> {
     let lib = desigma_library::Library::open(root).map_err(|e| e.to_string())?;
     let project = lib.create_project("Marlow").map_err(|e| e.to_string())?;
-    let names = ["Mobile banking app", "Web dashboard", "Design system", "Launch brainstorm"];
+    let names = ["Mobile banking app", "Web dashboard", "Design system", "Launch brainstorm", "Motion onboarding"];
     for (doc, name) in library_samples().into_iter().zip(names) {
         let entry = lib.create_file(&project.id, None, name, &doc).map_err(|e| e.to_string())?;
         crate::home::thumb::refresh(&lib, &entry.id, &doc);

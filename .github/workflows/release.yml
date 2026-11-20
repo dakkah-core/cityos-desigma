@@ -66,11 +66,11 @@ jobs:
       # On Windows, crates/desigma-app/build.rs embeds the icon and version info
       # (rc.exe ships with the runner's Windows SDK); it fails the build under CI
       # if that step breaks, so an icon-less exe is never released.
-      - name: Build desigma and desigma-diff
+      - name: Build desigma, desigma-diff and desigma-mcp
         shell: bash
         run: |
           mkdir -p ".build/upstream/ci-native/${{ matrix.target }}"
-          cargo build --release --locked --message-format=json-render-diagnostics --target "${{ matrix.target }}" -p desigma-app -p desigma-diff > ".build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl"
+          cargo build --release --locked --message-format=json-render-diagnostics --target "${{ matrix.target }}" -p desigma-app -p desigma-diff -p desigma-mcp > ".build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl"
 
       - name: Check the stamped version
         if: github.ref_type == 'tag'
@@ -93,12 +93,29 @@ jobs:
         shell: bash
         run: python scripts/upstream/native-build-receipt.py --target "${{ matrix.target }}" --log ".build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl" --archive "dist/desigma-${{ steps.version.outputs.version }}-${{ matrix.target }}.zip" --output ".build/upstream/ci-native/${{ matrix.target }}/package-receipt.json"
 
+      # Windows only: the Inno Setup installer, next to the portable zip. Inno Setup 6 is
+      # preinstalled on some runner images; otherwise it comes from Chocolatey.
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! command -v iscc >/dev/null 2>&1 && [ ! -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ]; then
+            choco install innosetup -y --no-progress
+          fi
+          ls "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: scripts/package-windows-installer.sh "${{ steps.version.outputs.version }}" "target/${{ matrix.target }}/release"
+
       - uses: actions/upload-artifact@v4
         with:
           name: desigma-${{ matrix.target }}
           path: |
             dist/*.zip
             dist/*.tar.gz
+            dist/*-setup.exe
             dist/*.sha256
             .build/upstream/ci-native/${{ matrix.target }}/*.json
             .build/upstream/ci-native/${{ matrix.target }}/cargo.jsonl
@@ -109,7 +126,7 @@ jobs:
   # Intel half is cross-compiled on the arm64 runner.
   macos:
     name: Build macOS universal app
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -135,7 +152,7 @@ jobs:
       - name: Build both architectures
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked --target "$t" -p desigma-app -p desigma-diff
+            cargo build --release --locked --target "$t" -p desigma-app -p desigma-diff -p desigma-mcp
           done
 
       - name: Check the stamped version
@@ -185,7 +202,8 @@ jobs:
             Download the file for your platform below. These builds are **not code-signed yet**, so the first launch shows a warning:
 
             - **macOS (Apple Silicon and Intel):** download `desigma-<version>-macos.dmg`, open it and drag **desigma** to **Applications**. The first time, open it from Applications, then go to **System Settings → Privacy & Security** and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine /Applications/desigma.app`.
-            - **Windows:** unzip `desigma-<version>-x86_64-pc-windows-msvc.zip` and run `desigma.exe`. In the SmartScreen dialog, click **More info → Run anyway**.
+            - **Windows (recommended):** run `desigma-<version>-x86_64-windows-setup.exe`. It installs for your user without an admin prompt, adds a Start Menu entry and can associate `.desigma` files. In the SmartScreen dialog, click **More info → Run anyway**.
+            - **Windows (portable):** unzip `desigma-<version>-x86_64-pc-windows-msvc.zip` and run `desigma.exe`; same SmartScreen steps.
             - **Linux:** unpack `desigma-<version>-x86_64-unknown-linux-gnu.tar.gz`, then run `./install.sh` (no sudo) or just `./desigma`.
 
             Full instructions: [docs/install.md](https://github.com/deepfounder-ai/desigma/blob/main/docs/install.md). Check downloads against `SHA256SUMS`.
@@ -194,4 +212,5 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
             dist/*.dmg
+            dist/*-setup.exe
             dist/SHA256SUMS

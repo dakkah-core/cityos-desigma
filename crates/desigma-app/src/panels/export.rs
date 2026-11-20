@@ -283,7 +283,7 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
     }
     if !any_rows {
         context_menu(app, ui, &title_resp, first);
-        return y + 8.0;
+        return y + 8.0 + anim_block(app, ui, x0, top + y + 8.0, first);
     }
 
     // Preview.
@@ -313,6 +313,83 @@ pub fn section(app: &mut App, ui: &mut Ui, x0: f32, top: f32, sel: &[NodeId]) ->
     context_menu(app, ui, &resp, first);
     context_menu(app, ui, &prev_resp, first);
     context_menu(app, ui, &title_resp, first);
+    let y = y + theme::FIELD_HEIGHT + 12.0;
+    y + anim_block(app, ui, x0, top + y, first)
+}
+
+const ANIM_FORMAT_W: f32 = 62.0;
+const ANIM_FPS_W: f32 = 62.0;
+const ANIM_SCALE_W: f32 = 52.0;
+
+/// "Animation" block under the export rows, shown when the layer's page has Motion keyframes:
+/// format / frame rate / scale pickers and the export button (a progress bar with Cancel while an
+/// export runs). Returns the height used, 0 when the page is not animated.
+fn anim_block(app: &mut App, ui: &mut Ui, x0: f32, top: f32, node: NodeId) -> f32 {
+    use crate::motion::playback::export::{format_label, fps_label, scale_label, FPS_CHOICES, SCALE_CHOICES};
+    use desigma_export::anim::AnimFormat;
+    if !app.has_motion_export(node) {
+        return 0.0;
+    }
+    let at = |x: f32, dy: f32, w: f32, h: f32| Rect::from_min_size(Pos2::new(x0 + x, top + dy), Vec2::new(w, h));
+    let mut y = 0.0;
+    ui.painter().text(
+        Pos2::new(x0 + theme::SECTION_CONTENT_X, top + theme::SECTION_TITLE_HEIGHT / 2.0),
+        Align2::LEFT_CENTER,
+        "Animation",
+        theme::font_body_strong(),
+        theme::TEXT,
+    );
+    y += theme::SECTION_TITLE_HEIGHT;
+    let running = app.canvas.motion.export.running();
+    let cur = app.canvas.motion.export.opts.clone();
+    let x = theme::SECTION_CONTENT_X;
+    let fmt_r = at(x, y, ANIM_FORMAT_W, theme::FIELD_HEIGHT);
+    let fps_r = at(x + ANIM_FORMAT_W + COL_GAP, y, ANIM_FPS_W, theme::FIELD_HEIGHT);
+    let scale_r = at(x + ANIM_FORMAT_W + ANIM_FPS_W + COL_GAP * 2.0, y, ANIM_SCALE_W, theme::FIELD_HEIGHT);
+    let formats: Vec<String> = AnimFormat::ALL.iter().map(|f| format_label(*f).to_string()).collect();
+    let fpses: Vec<String> = FPS_CHOICES.iter().map(|f| fps_label(*f)).collect();
+    let scales: Vec<String> = SCALE_CHOICES.iter().map(|s| scale_label(*s)).collect();
+    let opts = &mut app.canvas.motion.export.opts;
+    if let Some(i) = dropdown(ui, fmt_r, ("anim-format", node), format_label(cur.format), &formats) {
+        opts.format = AnimFormat::ALL[i];
+    }
+    if let Some(i) = dropdown(ui, fps_r, ("anim-fps", node), &fps_label(cur.fps), &fpses) {
+        opts.fps = FPS_CHOICES[i];
+    }
+    if let Some(i) = dropdown(ui, scale_r, ("anim-scale", node), &scale_label(cur.scale), &scales) {
+        opts.scale = SCALE_CHOICES[i];
+    }
+    y += theme::FIELD_HEIGHT + ROW_GAP;
+
+    let btn = at(x, y, theme::SECTION_CONTENT_W, theme::FIELD_HEIGHT);
+    if running {
+        let p = app.canvas.motion.export.progress();
+        ui.painter().rect_filled(btn, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
+        let fill = Rect::from_min_size(btn.min, Vec2::new(btn.width() * p, btn.height()));
+        ui.painter().rect_filled(fill, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TERTIARY);
+        ui.painter().text(
+            Pos2::new(btn.left() + 12.0, btn.center().y),
+            Align2::LEFT_CENTER,
+            format!("Exporting {}%", (p * 100.0).round() as u32),
+            theme::font_body(),
+            theme::TEXT,
+        );
+        let cancel = Rect::from_center_size(Pos2::new(btn.right() - 14.0, btn.center().y), Vec2::splat(theme::PANEL_ACTION_BUTTON));
+        if widgets::icon_button(ui, cancel, "anim-export-cancel", Icon::Close, false, "Cancel export").clicked() {
+            app.canvas.motion.export.cancel();
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    } else {
+        let resp = ui.interact(btn, ui.id().with("anim-export-btn"), Sense::click());
+        ui.painter().rect_filled(btn, theme::cr(theme::RADIUS_MEDIUM), if resp.hovered() { theme::BG_TERTIARY } else { theme::BG_SECONDARY });
+        icons::paint(ui.painter(), Icon::Export, Pos2::new(btn.left() + 16.0, btn.center().y), 14.0, theme::ICON_SECONDARY);
+        let tl = app.doc.page_of(node).map(|p| app.doc.timeline(p)).unwrap_or_default();
+        let label = format!("Export {} - {} fps", format_label(cur.format), cur.effective_fps(&tl));
+        ui.painter().text(Pos2::new(btn.left() + 32.0, btn.center().y), Align2::LEFT_CENTER, label, theme::font_body(), theme::TEXT);
+        if resp.clicked() {
+            app.export_animation_dialog(node);
+        }
+    }
     y + theme::FIELD_HEIGHT + 12.0
 }
 

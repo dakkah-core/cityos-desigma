@@ -39,12 +39,22 @@ impl Language {
 
     /// Code for `node`. `react_tailwind` switches React from inline styles to Tailwind classes.
     pub fn generate(self, doc: &Document, node: NodeId, react_tailwind: bool) -> String {
-        match self {
-            Self::Css => desigma_export::css_for(doc, node),
-            Self::Tailwind => desigma_export::tailwind_for(doc, node),
-            Self::SwiftUi => desigma_export::swiftui_for(doc, node),
-            Self::Compose => desigma_export::compose_for(doc, node),
-            Self::React => desigma_export::react_with(doc, node, &desigma_export::ReactOptions { tailwind: react_tailwind }),
+        let (code, motion, comment) = match self {
+            Self::Css => (desigma_export::css_for(doc, node), desigma_export::css_animation_for(doc, node), "/* Animation (Motion) */"),
+            Self::Tailwind => (desigma_export::tailwind_for(doc, node), String::new(), ""),
+            Self::SwiftUi => (desigma_export::swiftui_for(doc, node), desigma_export::swiftui_animation_for(doc, node), "// Animation (Motion)"),
+            Self::Compose => (desigma_export::compose_for(doc, node), desigma_export::compose_animation_for(doc, node), "// Animation (Motion)"),
+            Self::React => (desigma_export::react_with(doc, node, &desigma_export::ReactOptions { tailwind: react_tailwind }), String::new(), ""),
+        };
+        if motion.is_empty() {
+            code
+        } else {
+            format!(
+                "{code}
+
+{comment}
+{motion}"
+            )
         }
     }
 }

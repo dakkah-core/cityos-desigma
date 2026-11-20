@@ -1,7 +1,26 @@
-//! Update notifications: release builds ask GitHub for a newer desigma a few seconds after launch and then
-//! once a day, and show a banner and a dialog with the release notes. Nothing is downloaded or installed
-//! here; "Download" opens the release page in the browser.
+//! Updates. Release builds ask GitHub for a newer desigma a few seconds after launch and then once a day, and
+//! show a banner and a dialog with the release notes. Nothing is downloaded until the user presses
+//! **Update now**; then, on a background thread (`job`):
+//!
+//! 1. `SHA256SUMS` of the same release is fetched and must list the file ([`assets`]);
+//! 2. the file for this platform and install type is downloaded (`download`: https to GitHub's hosts only,
+//!    redirects checked hop by hop, 300 MB cap, timeouts) with a progress bar and Cancel;
+//! 3. its SHA-256 must match, else it is deleted;
+//! 4. it is unpacked next to what it replaces ([`install::prepare`]); nothing is replaced yet.
+//!
+//! The dialog then offers **Restart to update**. Before anything is replaced it asks what opening another file
+//! would ask (`leave_ok`: "Stop sharing?" / "Leave the session?", then the unsaved-changes dialog in
+//! `unsaved.rs`). After that [`install::commit`] swaps the files (Windows installer: starts the new setup
+//! silently; Windows portable: renames the running exe aside; macOS: starts a helper script; Linux: renames the
+//! new binary over the old), the window closes and the new version is launched. "Open release page" stays as a
+//! link and as the fallback for every failure. [`install`] describes each platform in detail.
+//!
+//! Builds from source never check on their own and never update themselves.
 
+mod assets;
+mod download;
+pub mod install;
+mod job;
 pub mod ui;
 
 use crate::app::App;
@@ -9,7 +28,9 @@ use crate::comments::settings;
 use semver::Version;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Every desigma release so far is a pre-release, so `/releases/latest` answers 404; list them instead.
@@ -22,10 +43,43 @@ const CHECK_EVERY: f64 = 24.0 * 60.0 * 60.0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: Version,
-    /// The GitHub release page ("Download" opens it).
+    /// The GitHub release page ("Open release page" opens it).
     pub page: String,
     /// Plain-text lines of the "What's Changed" notes.
     pub notes: Vec<String>,
+    /// The files attached to the release.
+    pub assets: Vec<assets::Asset>,
+}
+
+/// Where "Update now" stands.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Install {
+    #[default]
+    Idle,
+    Downloading {
+        done: u64,
+        total: Option<u64>,
+    },
+    /// The download is complete and its checksum is being compared.
+    Verifying,
+    Preparing,
+    /// Downloaded, verified and unpacked: only the restart is left.
+    Ready(install::Prepared),
+    /// Why the update did not happen. The release page link is the fallback.
+    Failed(String),
+}
+
+impl Install {
+    /// A background step is running.
+    pub fn busy(&self) -> bool {
+        matches!(self, Install::Downloading { .. } | Install::Verifying | Install::Preparing)
+    }
+}
+
+/// The running download-and-prepare thread.
+struct Job {
+    receiver: Receiver<Install>,
+    cancel: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -44,6 +98,13 @@ pub struct UpdaterState {
     /// The running check reports every outcome (Help → Check for updates…).
     manual: bool,
     receiver: Option<Receiver<Result<Option<Release>, String>>>,
+    /// "Update now" for `available`.
+    pub install: Install,
+    job: Option<Job>,
+    /// The unsaved-changes dialog asks whether to restart (see `unsaved.rs`).
+    pub pending_restart: bool,
+    /// Every question is answered: restart on the next frame.
+    restart: bool,
 }
 
 impl UpdaterState {
@@ -56,6 +117,12 @@ impl UpdaterState {
         }
         if launch && crate::RELEASE_BUILD && !opted_out() {
             self.next_check = Some(FIRST_CHECK);
+        }
+        // what the last update left behind (the renamed old exe, staged files, the download folder)
+        if launch && crate::RELEASE_BUILD {
+            if let Ok(exe) = std::env::current_exe() {
+                install::remove_later(install::leftovers(assets::Os::current(), &exe));
+            }
         }
     }
 }
@@ -104,13 +171,125 @@ impl App {
         self.finish_check(result, manual);
     }
 
+    /// Takes in progress from the update thread and performs a confirmed restart. Call once per frame.
+    pub fn poll_install(&mut self, ctx: &egui::Context) {
+        if let Some(job) = &self.updater.job {
+            let (mut latest, mut gone) = (None, false);
+            loop {
+                match job.receiver.try_recv() {
+                    Ok(state) => latest = Some(state),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        gone = true;
+                        break;
+                    }
+                }
+            }
+            if let Some(state) = latest {
+                self.updater.install = state;
+            }
+            if gone && self.updater.install.busy() {
+                self.updater.install = Install::Failed("the update stopped unexpectedly".into());
+            }
+            if gone || !self.updater.install.busy() {
+                self.updater.job = None;
+            }
+            if self.updater.install.busy() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+        if std::mem::take(&mut self.updater.restart) {
+            self.restart_now(ctx);
+        }
+    }
+
+    /// "Update now": downloads, verifies and unpacks the release for this install in the background.
+    pub fn start_update(&mut self, ctx: &egui::Context) {
+        if self.updater.job.is_some() || matches!(self.updater.install, Install::Ready(_)) {
+            return;
+        }
+        let Some(release) = self.updater.available.clone() else { return };
+        let target = if !crate::RELEASE_BUILD {
+            Err("this is a development build; it is updated by building from source".to_string())
+        } else {
+            newer_than(crate::VERSION, &release.version).and_then(|()| install::detect())
+        };
+        let target = match target {
+            Ok(target) => target,
+            Err(e) => {
+                self.updater.install = Install::Failed(e);
+                return;
+            }
+        };
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.updater.install = Install::Downloading { done: 0, total: None };
+        self.updater.job = Some(Job { receiver, cancel: cancel.clone() });
+        let ctx = ctx.clone();
+        job::spawn(release, target, cancel, sender, move || ctx.request_repaint());
+    }
+
+    /// Cancel while downloading: the thread stops at its next chunk and reports `Idle`.
+    pub fn cancel_update(&mut self) {
+        if let Some(job) = &self.updater.job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// "Restart to update": asks what leaving the document asks (a live session, then unsaved changes) and
+    /// then restarts. Cancelling any of the questions keeps everything as it is.
+    pub fn request_restart(&mut self) {
+        if !matches!(self.updater.install, Install::Ready(_)) {
+            return;
+        }
+        self.updater.dialog = false;
+        if self.leave_ok(|app| app.restart_unless_unsaved()) {
+            self.restart_unless_unsaved();
+        }
+    }
+
+    /// The session question is settled; unsaved edits get their own Save / Discard / Cancel question.
+    fn restart_unless_unsaved(&mut self) {
+        if self.edits_unsaved() {
+            self.updater.pending_restart = true;
+        } else {
+            self.updater.restart = true;
+        }
+    }
+
+    /// Every question is answered (also called by the unsaved-changes dialog).
+    pub fn confirm_restart(&mut self) {
+        self.updater.pending_restart = false;
+        self.updater.restart = true;
+    }
+
+    /// Swaps the files and closes the window; the new version starts once it has closed (`install::run_stashed`).
+    /// If the swap fails the app stays open with the error in the dialog.
+    fn restart_now(&mut self, ctx: &egui::Context) {
+        let Install::Ready(prepared) = self.updater.install.clone() else { return };
+        match install::commit(&prepared) {
+            Ok(launch) => {
+                install::stash(launch);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                self.updater.install = Install::Failed(e);
+                self.updater.dialog = true;
+            }
+        }
+    }
+
     /// Automatic checks stay silent unless they find a release the user has not skipped; manual ones report
     /// every outcome and open the dialog.
-    fn finish_check(&mut self, result: Result<Option<Release>, String>, manual: bool) {
+    pub(crate) fn finish_check(&mut self, result: Result<Option<Release>, String>, manual: bool) {
         match result {
             Ok(Some(release)) if manual || !skipped(&release.version, self.updater.skip.as_deref()) => {
                 if self.updater.available.as_ref().is_none_or(|a| a.version != release.version) {
                     self.updater.dismissed = false;
+                    // a different release: what was downloaded for the old one no longer applies
+                    self.cancel_update();
+                    self.updater.job = None;
+                    self.updater.install = Install::Idle;
                 }
                 self.updater.available = Some(release);
                 self.updater.dialog |= manual;
@@ -206,6 +385,16 @@ struct Listed {
     prerelease: bool,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    assets: Vec<ListedAsset>,
+}
+
+#[derive(serde::Deserialize)]
+struct ListedAsset {
+    name: String,
+    browser_download_url: String,
+    #[serde(default)]
+    size: u64,
 }
 
 /// The highest release in a GitHub release list that is newer than `current`. Drafts and tags that are not
@@ -223,8 +412,19 @@ fn newest(json: &[u8], current: &str) -> Result<Option<Release>, String> {
     Ok(best.map(|(version, r)| Release {
         page: format!("{}/releases/tag/{}", crate::home::GITHUB_URL, r.tag_name),
         notes: whats_changed(r.body.as_deref().unwrap_or_default()),
+        assets: r.assets.into_iter().map(|a| assets::Asset { name: a.name, url: a.browser_download_url, size: a.size }).collect(),
         version,
     }))
+}
+
+/// An update only ever moves forward: `release` must be newer than the running `current` version.
+fn newer_than(current: &str, release: &Version) -> Result<(), String> {
+    let current = Version::parse(current).map_err(|e| format!("this build's version {current} is not semver ({e})"))?;
+    if *release > current {
+        Ok(())
+    } else {
+        Err(format!("{release} is not newer than the {current} you have"))
+    }
 }
 
 /// Whether "Skip this version" covers `version` (the skipped one or older).
@@ -394,6 +594,35 @@ mod tests {
         assert_eq!(s.next_check, None, "screenshots and child windows never check");
         s.start(None, true);
         assert_eq!(s.next_check.is_some(), crate::RELEASE_BUILD && !opted_out());
+    }
+
+    #[test]
+    fn the_real_releases_carry_assets_that_pass_the_download_checks() {
+        use assets::{asset_name, check_asset_url, pick, sums, Kind};
+        let r = newest(FIXTURE, "0.1.0-alpha.5").unwrap().unwrap();
+        assert_eq!(r.assets.len(), 5);
+        for a in &r.assets {
+            check_asset_url(&a.url).unwrap_or_else(|e| panic!("{}: {e}", a.name));
+            assert!(a.size > 0);
+        }
+        // this release predates the installer; the other three install types find their file
+        for kind in [Kind::MacApp, Kind::WindowsPortable, Kind::LinuxTarball] {
+            assert_eq!(pick(&r.assets, kind, &r.version).unwrap().name, asset_name(kind, &r.version));
+        }
+        assert!(pick(&r.assets, Kind::WindowsInstaller, &r.version).is_err());
+        assert_eq!(sums(&r.assets).unwrap().size, 444);
+    }
+
+    #[test]
+    fn updates_only_move_forward() {
+        let v = |s: &str| Version::parse(s).unwrap();
+        assert!(newer_than("0.1.0-alpha.7", &v("0.1.0-alpha.8")).is_ok());
+        assert!(newer_than("0.1.0-alpha.9", &v("0.1.0-alpha.10")).is_ok(), "numeric, not text, order");
+        assert!(newer_than("0.1.0-alpha.7", &v("0.1.0")).is_ok());
+        assert!(newer_than("0.1.0-alpha.7", &v("0.1.0-alpha.7")).is_err(), "the same version is not an update");
+        assert!(newer_than("0.1.0-alpha.7", &v("0.1.0-alpha.6")).unwrap_err().contains("not newer"));
+        assert!(newer_than("0.1.0", &v("0.1.0-rc.1")).is_err());
+        assert!(newer_than("dev", &v("1.0.0")).is_err());
     }
 
     #[test]

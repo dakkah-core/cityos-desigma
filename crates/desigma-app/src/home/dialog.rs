@@ -28,6 +28,8 @@ pub enum Intent {
     OpenDevLink(String),
     Shortcuts,
     About,
+    /// Leaving the open file while sharing it or joined to it.
+    LeaveSession,
 }
 
 /// One row of the project picker: a project or one of its folders.
@@ -170,7 +172,15 @@ impl App {
 
     pub fn show_about(&mut self) {
         let mut lines = vec![
-            ("desigma is a free, open-source design editor written in Rust.".to_string(), String::new()),
+            (
+                // A renamed build still says where it comes from.
+                if crate::theme::display_title() == crate::theme::APP_TITLE {
+                    "desigma is a free, open-source design editor written in Rust.".to_string()
+                } else {
+                    format!("{} is based on desigma, a free, open-source design editor written in Rust.", crate::theme::display_title())
+                },
+                String::new(),
+            ),
             (
                 if crate::RELEASE_BUILD {
                     format!("Version {}", crate::VERSION)
@@ -184,7 +194,7 @@ impl App {
         if let Some(lib) = &self.lib {
             lines.push((format!("Library: {}", lib.root().display()), String::new()));
         }
-        self.dialog = Some(Dialog::info(Intent::About, "About desigma", lines));
+        self.dialog = Some(Dialog::info(Intent::About, &format!("About {}", crate::theme::display_title()), lines));
     }
 
     pub fn confirm_open_github(&mut self) {
@@ -209,7 +219,7 @@ pub fn show(app: &mut App, ctx: &Context) {
     let text_w = W - PAD * 2.0;
     let mut lines_h = 0.0;
     for (a, b) in &d.lines {
-        lines_h += if b.is_empty() { measure.layout(a.clone(), font.clone(), Color32::WHITE, text_w).size().y + 8.0 } else { 22.0 };
+        lines_h += if b.is_empty() { measure.layout(crate::i18n::tr_text(a).into_owned(), font.clone(), Color32::WHITE, text_w).size().y + 8.0 } else { 22.0 };
     }
     let visible_choices = d.choices.len().min(MAX_CHOICES);
     let mut h = PAD + 24.0 + 12.0 + lines_h;
@@ -234,17 +244,17 @@ pub fn show(app: &mut App, ctx: &Context) {
         menu_panel(&p, rect, theme::MENU_RADIUS);
         let x0 = rect.left() + PAD;
         let mut y = rect.top() + PAD;
-        p.text(Pos2::new(x0, y + 12.0), Align2::LEFT_CENTER, &d.title, theme::font_large_strong(), theme::TEXT);
+        p.text(Pos2::new(x0, y + 12.0), Align2::LEFT_CENTER, crate::i18n::tr_text(&d.title), theme::font_large_strong(), theme::TEXT);
         y += 24.0 + 12.0;
         for (a, b) in &d.lines {
             if b.is_empty() {
-                let galley = p.layout(a.clone(), font.clone(), theme::TEXT_SECONDARY, text_w);
+                let galley = p.layout(crate::i18n::tr_text(a).into_owned(), font.clone(), theme::TEXT_SECONDARY, text_w);
                 let hh = galley.size().y;
                 p.galley(Pos2::new(x0, y), galley, theme::TEXT_SECONDARY);
                 y += hh + 8.0;
             } else {
                 p.text(Pos2::new(x0, y + 11.0), Align2::LEFT_CENTER, a, font.clone(), theme::TEXT);
-                p.text(Pos2::new(x0 + 190.0, y + 11.0), Align2::LEFT_CENTER, b, font.clone(), theme::TEXT_SECONDARY);
+                p.text(Pos2::new(x0 + 190.0, y + 11.0), Align2::LEFT_CENTER, crate::i18n::tr(b), font.clone(), theme::TEXT_SECONDARY);
                 y += 22.0;
             }
         }
@@ -256,8 +266,7 @@ pub fn show(app: &mut App, ctx: &Context) {
                 .id(id)
                 .font(font.clone())
                 .text_color(theme::TEXT)
-                .frame(egui::Frame::NONE)
-                .margin(egui::Margin::symmetric(10, 0))
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 0)))
                 .vertical_align(egui::Align::Center)
                 .min_size(r.size())
                 .desired_width(r.width());
@@ -317,7 +326,7 @@ pub fn show(app: &mut App, ctx: &Context) {
             y += list.height() + 12.0;
         }
         // ---- buttons
-        let ok_w = widgets::text_width(&p, &d.ok, &theme::font_body_strong()).max(48.0) + 32.0;
+        let ok_w = widgets::text_width(&p, crate::i18n::tr(&d.ok), &theme::font_body_strong()).max(48.0) + 32.0;
         let ok_r = Rect::from_min_size(Pos2::new(rect.right() - PAD - ok_w, y), Vec2::new(ok_w, BTN_H));
         let enabled = d.can_submit();
         let resp = ui.interact(ok_r, Id::new("dialog-ok"), if enabled { Sense::click() } else { Sense::hover() });
@@ -333,17 +342,23 @@ pub fn show(app: &mut App, ctx: &Context) {
             base
         };
         p.rect_filled(ok_r, theme::cr(theme::RADIUS_MEDIUM), bg);
-        p.text(ok_r.center(), Align2::CENTER_CENTER, &d.ok, theme::font_body_strong(), if enabled { Color32::WHITE } else { theme::TEXT_DISABLED });
+        p.text(
+            ok_r.center(),
+            Align2::CENTER_CENTER,
+            crate::i18n::tr(&d.ok),
+            theme::font_body_strong(),
+            if enabled { Color32::WHITE } else { theme::TEXT_DISABLED },
+        );
         widgets::record(ui, "dialog-ok", ok_r);
         if resp.clicked() {
             submit = true;
         }
         if !d.info {
-            let cw = widgets::text_width(&p, "Cancel", &font) + 32.0;
+            let cw = widgets::text_width(&p, crate::i18n::tr("Cancel"), &font) + 32.0;
             let cr = Rect::from_min_size(Pos2::new(ok_r.left() - 8.0 - cw, y), Vec2::new(cw, BTN_H));
             let cresp = ui.interact(cr, Id::new("dialog-cancel"), Sense::click());
             widgets::button_bg(&p, cr, &cresp, false, theme::cr(theme::RADIUS_MEDIUM));
-            p.text(cr.center(), Align2::CENTER_CENTER, "Cancel", font.clone(), theme::TEXT);
+            p.text(cr.center(), Align2::CENTER_CENTER, crate::i18n::tr("Cancel"), font.clone(), theme::TEXT);
             widgets::record(ui, "dialog-cancel", cr);
             if cresp.clicked() {
                 cancel = true;
@@ -366,7 +381,7 @@ pub fn show(app: &mut App, ctx: &Context) {
 
 /// Runs the confirmed dialog.
 pub fn finish(app: &mut App, d: Dialog) {
-    if crate::history::finish_dialog(app, &d) || crate::dev::finish_dialog(app, &d) {
+    if crate::history::finish_dialog(app, &d) || crate::dev::finish_dialog(app, &d) || crate::collab::finish_dialog(app, &d) {
         return;
     }
     let Some(lib) = app.lib.clone() else { return };
@@ -421,7 +436,7 @@ pub fn finish(app: &mut App, d: Dialog) {
             }
             Ok(())
         }
-        Intent::Shortcuts | Intent::About | Intent::AuthorName | Intent::NameVersion(_) | Intent::OpenDevLink(_) => {
+        Intent::Shortcuts | Intent::About | Intent::LeaveSession | Intent::AuthorName | Intent::NameVersion(_) | Intent::OpenDevLink(_) => {
             dirty = false;
             Ok(())
         }

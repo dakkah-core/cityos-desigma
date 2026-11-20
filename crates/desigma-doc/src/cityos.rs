@@ -29,6 +29,11 @@ mod tests {
         doc
     }
     #[test]
+    fn image_free_shadow_preserves_managed_binding() {
+        let doc = v2_document();
+        assert_eq!(serde_json::to_value(doc.clone_without_images().cityos).unwrap(), serde_json::to_value(doc.cityos).unwrap());
+    }
+    #[test]
     fn expanded_bindings_use_new_container_and_reject_legacy_relabeling() {
         let doc = v2_document();
         let saved = doc.to_json().unwrap();

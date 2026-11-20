@@ -1,16 +1,19 @@
 //! UI tests for update notifications: the banner, the dialog and the menu entries (no network: the found
-//! release is injected).
+//! release is injected). The "Update now" states and the restart are in `updater/install.rs`.
 
 use super::*;
 use crate::comments::settings;
 use crate::panels::menus::{self, Action};
 use crate::updater::Release;
 
+mod install;
+
 fn release() -> Release {
     Release {
         version: semver::Version::parse("99.0.0-alpha.1").unwrap(),
         page: "https://github.com/deepfounder-ai/desigma/releases/tag/v99.0.0-alpha.1".into(),
         notes: (1..=10).map(|i| format!("• change {i}")).collect(),
+        assets: vec![],
     }
 }
 
@@ -65,7 +68,15 @@ fn the_dialog_shows_a_short_excerpt_of_the_notes() {
             _ => None,
         })
         .collect();
-    for want in ["desigma 99.0.0-alpha.1 is available", "What's changed", "• change 8", "and 2 more on the release page", "Skip this version", "Download"] {
+    for want in [
+        "desigma 99.0.0-alpha.1 is available",
+        "What's changed",
+        "• change 8",
+        "and 2 more on the release page",
+        "Skip this version",
+        "Update now",
+        "Open release page",
+    ] {
         assert!(texts.iter().any(|t| t == want), "missing {want:?} in {texts:?}");
     }
     assert!(!texts.iter().any(|t| t == "• change 9"));

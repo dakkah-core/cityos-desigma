@@ -186,6 +186,12 @@ enum Undo {
     CloseOverlay {
         frame: NodeId,
     },
+    /// Put a frame's timeline back to playing or paused, as it was before a "while hovering /
+    /// pressing" animation action, keeping the position it has reached.
+    RestoreMotion {
+        frame: NodeId,
+        playing: bool,
+    },
 }
 
 struct Active {
@@ -221,6 +227,25 @@ impl MediaState {
                 }
             }
             _ => raw.max(0.0),
+        }
+    }
+}
+
+/// Playback clock of one frame's Motion timeline. Elapsed time is `base_ms` plus, while playing,
+/// the player clock since `since`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotionClock {
+    pub playing: bool,
+    pub base_ms: f32,
+    pub since: f64,
+}
+
+impl MotionClock {
+    pub fn elapsed_ms(&self, now: f64) -> f32 {
+        if self.playing {
+            self.base_ms + ((now - self.since).max(0.0) * 1000.0) as f32
+        } else {
+            self.base_ms
         }
     }
 }
@@ -263,6 +288,11 @@ pub struct Player {
     pub errors: Vec<String>,
     /// Playback state of video layers that have been shown.
     pub media: BTreeMap<NodeId, MediaState>,
+    /// Motion timelines driven by the player, per top-level frame (see [`Player::motion_state`]).
+    pub motion: BTreeMap<NodeId, MotionClock>,
+    /// Frames that are the target of an "animation" action: they wait to be played instead of
+    /// autoplaying when they appear.
+    gated: BTreeSet<NodeId>,
     scroll_anim: Option<ScrollAnim>,
     timers: Vec<Timer>,
     hover: Vec<NodeId>,
@@ -287,6 +317,8 @@ impl Player {
             changed_vars: BTreeSet::new(),
             errors: Vec::new(),
             media: BTreeMap::new(),
+            motion: BTreeMap::new(),
+            gated: BTreeSet::new(),
             scroll_anim: None,
             timers: Vec::new(),
             hover: Vec::new(),
@@ -297,6 +329,7 @@ impl Player {
         };
         inherit_variant_reactions(&mut p.doc);
         p.current = p.top_frame_of(start).unwrap_or(start);
+        p.gated = p.animation_targets();
         p.on_shown(p.current);
         p
     }
@@ -490,6 +523,10 @@ impl Player {
             self.timers.push(Timer { at: self.now + ms as f64 / 1000.0, node, reaction, frame });
         }
         self.init_media(frame);
+        // A frame's animation starts when the frame arrives (after its transition), unless an
+        // action has to play it.
+        let playing = !self.gated.contains(&frame);
+        self.motion.insert(frame, MotionClock { playing, base_ms: 0.0, since: self.now });
     }
 
     /// Creates the playback state of video layers in `frame` the first time it is shown.
@@ -507,6 +544,58 @@ impl Player {
             let now = self.now;
             self.media.entry(id).or_insert(MediaState { playing: autoplay, muted, looping, base: 0.0, since: now, duration: None });
         }
+    }
+
+    /// Every top-level frame some "animation" action points at (explicitly, or implicitly as
+    /// the frame holding the layer that runs it).
+    fn animation_targets(&self) -> BTreeSet<NodeId> {
+        let mut out = BTreeSet::new();
+        for n in self.doc.nodes.values() {
+            let mut hit = |a: &Action| {
+                if let Action::Animation { dest, .. } = a {
+                    if let Some(f) = self.top_frame_of(dest.unwrap_or(n.id)) {
+                        out.insert(f);
+                    }
+                }
+            };
+            for r in &n.prototype.reactions {
+                crate::proto::walk_actions(&r.actions, &mut hit);
+            }
+        }
+        out
+    }
+
+    /// The timeline position of `frame`'s Motion animation at clock `now`, with whether it is
+    /// running: `(elapsed ms, playing)`. A frame that is neither playing nor started (it is
+    /// waiting for a transition to finish, or for an action) shows its first frame.
+    pub fn motion_state(&self, frame: NodeId, now: f64) -> (f32, bool) {
+        match self.motion.get(&frame) {
+            Some(c) => (c.elapsed_ms(now), c.playing),
+            None => (0.0, false),
+        }
+    }
+
+    /// Runs an animation action. `dest` is a frame or a layer in one (`None`: the frame of
+    /// `source`). Returns how to undo it for While hovering / pressing triggers.
+    fn animation_control(&mut self, source: NodeId, dest: Option<NodeId>, op: AnimationOp) -> Option<Undo> {
+        let frame = self.top_frame_of(dest.unwrap_or(source))?;
+        let tl = self.doc.page_of(frame).map(|p| self.doc.timeline(p)).unwrap_or_default();
+        let now = self.now;
+        let before = self.motion.get(&frame).copied();
+        let cur = before.unwrap_or(MotionClock { playing: false, base_ms: 0.0, since: now });
+        let elapsed = cur.elapsed_ms(now);
+        let finished = tl.finished(elapsed);
+        let play_from = |base: f32| MotionClock { playing: true, base_ms: base, since: now };
+        let next = match op {
+            AnimationOp::Play { from_start: false } if cur.playing && !finished => cur,
+            AnimationOp::Play { from_start: false } => play_from(if finished { 0.0 } else { elapsed }),
+            AnimationOp::Play { from_start: true } | AnimationOp::Restart => play_from(0.0),
+            AnimationOp::Pause => MotionClock { playing: false, base_ms: elapsed, since: now },
+            AnimationOp::TogglePlay if cur.playing && !finished => MotionClock { playing: false, base_ms: elapsed, since: now },
+            AnimationOp::TogglePlay => play_from(if finished { 0.0 } else { elapsed }),
+        };
+        self.motion.insert(frame, next);
+        Some(Undo::RestoreMotion { frame, playing: cur.playing })
     }
 
     /// Sets the length of a video once the host has opened it.
@@ -783,6 +872,12 @@ impl Player {
         for u in list {
             match u {
                 Undo::RestoreComponent { inst, comp, transition } => self.change_to(inst, comp, transition, None),
+                Undo::RestoreMotion { frame, playing } => {
+                    if let Some(c) = self.motion.get(&frame).copied() {
+                        let now = self.now;
+                        self.motion.insert(frame, MotionClock { playing, base_ms: c.elapsed_ms(now), since: now });
+                    }
+                }
                 Undo::CloseOverlay { frame } => {
                     if let Some(i) = self.overlays.iter().rposition(|o| o.frame == frame && !o.closing()) {
                         self.close_overlay_at(i);
@@ -833,6 +928,13 @@ impl Player {
                 Action::SetVariable { variable, value } => self.set_variable(source, variable, value),
                 Action::SetVariableMode { collection, mode } => self.set_variable_mode(collection, mode),
                 Action::MediaControl { dest, op } => self.media_control(*dest, *op),
+                Action::Animation { dest, op } => {
+                    if let Some(u) = self.animation_control(source, *dest, *op) {
+                        if let Some(list) = undo.as_deref_mut() {
+                            list.push(u);
+                        }
+                    }
+                }
                 Action::Conditional { branches, otherwise } => {
                     if depth >= MAX_ACTION_DEPTH {
                         self.error("Conditionals are nested too deeply");
@@ -1013,7 +1115,11 @@ impl Player {
         self.hover.clear();
         self.actives.clear();
         match transition.filter(|t| easing::effective_duration_ms(&t.easing, t.duration_ms) > 0) {
-            Some(t) => self.start_anim(from, frame, t, None),
+            Some(t) => {
+                // the destination shows its first animation frame until it has arrived
+                self.motion.remove(&frame);
+                self.start_anim(from, frame, t, None)
+            }
             None => self.on_shown(frame),
         }
     }
@@ -1069,6 +1175,8 @@ impl Player {
         self.overlays.push(Overlay { frame, origin, background, close_outside, position, offset, transition: t, anim, drag: Vec2::ZERO });
         if anim.is_none() {
             self.on_shown(frame);
+        } else {
+            self.motion.remove(&frame);
         }
         Some(frame)
     }
@@ -1100,6 +1208,8 @@ impl Player {
         );
         if anim.is_none() {
             self.on_shown(frame);
+        } else {
+            self.motion.remove(&frame);
         }
     }
 
@@ -2587,5 +2697,88 @@ mod tests {
         assert!(m.playing && m.looping && !m.muted);
         p.restart(&f.doc, f.a);
         assert!(p.media[&clip].playing);
+    }
+
+    fn anim(op: AnimationOp) -> Action {
+        Action::Animation { dest: None, op }
+    }
+
+    fn motion_fixture() -> Fx {
+        use desigma_doc::motion::{AnimProperty, AnimValue, TimelineSettings};
+        let mut f = fixture();
+        let page = f.doc.page_of(f.a).unwrap();
+        f.doc.timelines.insert(page, TimelineSettings { duration_ms: 1000, fps: 10, looping: false });
+        let id = f.doc.alloc_id();
+        let mut n = Node::rectangle(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        n.motion.ensure_track(AnimProperty::Opacity).set_key(0, AnimValue::Scalar(0.0), None);
+        f.doc.insert(f.a, n).unwrap();
+        f
+    }
+
+    #[test]
+    fn animation_actions_play_pause_and_restart_the_frame_timeline() {
+        let mut f = motion_fixture();
+        // A is the target of an animation action, so it waits instead of autoplaying; B autoplays
+        add(&mut f.doc, f.btn, Reaction { trigger: Trigger::OnClick, actions: vec![anim(AnimationOp::Play { from_start: false })], transition: None });
+        add(&mut f.doc, f.btn_b, react(Trigger::OnClick, Action::Back, None));
+        let mut p = Player::new(&f.doc, f.a);
+        p.tick(1.0);
+        assert_eq!(p.motion_state(f.a, 1.0), (0.0, false), "waiting to be played");
+        p.pointer_down(Some(f.btn));
+        p.pointer_up(Some(f.btn), false);
+        p.tick(1.5);
+        let (t, playing) = p.motion_state(f.a, 1.5);
+        assert!(playing && (t - 500.0).abs() < 1.0, "{t}");
+        // pause holds, resume continues, restart rewinds
+        p.animation_control(f.btn, None, AnimationOp::Pause);
+        p.tick(3.0);
+        assert_eq!(p.motion_state(f.a, 3.0), (500.0, false));
+        p.animation_control(f.btn, None, AnimationOp::Play { from_start: false });
+        p.tick(3.2);
+        assert!((p.motion_state(f.a, 3.2).0 - 700.0).abs() < 1.0);
+        p.animation_control(f.btn, None, AnimationOp::Restart);
+        assert!(p.motion_state(f.a, 3.2).0 < 1.0);
+        // a finished one-shot starts over when told to play
+        p.tick(9.0);
+        assert!(p.motion_state(f.a, 9.0).0 > 1000.0);
+        p.animation_control(f.btn, None, AnimationOp::Play { from_start: false });
+        assert!(p.motion_state(f.a, 9.0).0 < 1.0);
+        p.animation_control(f.btn, None, AnimationOp::TogglePlay);
+        assert!(!p.motion_state(f.a, 9.0).1);
+        // an explicit target can be any layer inside another frame
+        p.animation_control(f.btn, Some(f.btn_b), AnimationOp::Restart);
+        assert!(p.motion_state(f.b, 9.0).1);
+    }
+
+    #[test]
+    fn frames_without_animation_actions_autoplay_when_they_arrive() {
+        let mut f = motion_fixture();
+        add(&mut f.doc, f.btn, react(Trigger::OnClick, Action::Navigate { dest: f.b, preserve_scroll: false }, tr(TransitionKind::Dissolve, 500)));
+        let mut p = Player::new(&f.doc, f.a);
+        assert!(p.motion_state(f.a, 0.0).1, "plays from the start");
+        p.tick(1.0);
+        p.pointer_down(Some(f.btn));
+        p.pointer_up(Some(f.btn), false);
+        assert_eq!(p.motion_state(f.b, 1.2), (0.0, false), "held at the first frame during the transition");
+        p.tick(1.6);
+        p.tick(2.0);
+        let (t, playing) = p.motion_state(f.b, 2.0);
+        assert!(playing && (t - 400.0).abs() < 1.0, "{t}");
+    }
+
+    #[test]
+    fn hover_animation_actions_revert_to_the_previous_play_state() {
+        let mut f = motion_fixture();
+        add(&mut f.doc, f.btn, react(Trigger::WhileHovering, anim(AnimationOp::Pause), None));
+        let mut p = Player::new(&f.doc, f.a);
+        p.animation_control(f.btn, None, AnimationOp::RESUME);
+        p.tick(0.2);
+        p.pointer_move(Some(f.btn));
+        assert!(!p.motion_state(f.a, 0.2).1, "paused while hovering");
+        p.tick(0.5);
+        assert_eq!(p.motion_state(f.a, 0.5).0, 200.0);
+        p.pointer_move(None);
+        let (t, playing) = p.motion_state(f.a, 0.5);
+        assert!(playing && t == 200.0, "resumes where it stopped: {t}");
     }
 }

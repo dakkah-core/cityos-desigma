@@ -3,7 +3,7 @@
   "upstream": {
     "repository": "https://github.com/deepfounder-ai/desigma",
     "branch": "main",
-    "commit": "bb09ba87b1b7e7246b5dfbf916d75e3f12abe870"
+    "commit": "8a26899cb464fa543cff07f43b117ca236429cbf"
   },
   "baselineForkCommit": "e100f08545d7081b2f32e062d85e96b224e9f038",
   "ownedDirectories": [
@@ -104,6 +104,7 @@
       ],
       "tests": [
         "crates/desigma-app/src/design_workspace/session.rs",
+        "crates/desigma-app/src/design_workspace/horizon_tests.rs",
         "scripts/cityos-boundary.test.mjs"
       ]
     },
@@ -120,7 +121,8 @@
       ],
       "tests": [
         "crates/desigma-doc/src/persistence.rs",
-        "crates/desigma-doc/src/history.rs"
+        "crates/desigma-doc/src/history.rs",
+        "crates/desigma-doc/src/cityos.rs"
       ]
     },
     {
@@ -195,6 +197,13 @@
       "tests": [
         "crates/desigma-cityos-contract/src/lib.rs"
       ]
+    },
+    {
+      "id": "cityos-toast-localization",
+      "purpose": "Translate CityOS checkpoint, library and frozen-draft safety messages into Simplified Chinese.",
+      "invariant": "Safety guidance remains understandable in zh-CN without changing document or library behavior.",
+      "paths": ["crates/desigma-app/assets/i18n/zh-CN.tsv"],
+      "tests": ["crates/desigma-app/src/i18n.rs"]
     },
     {
       "id": "maintenance",

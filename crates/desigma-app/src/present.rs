@@ -71,6 +71,10 @@ pub struct PresentState {
     pub vars_rect: ERect,
     /// Decoded video layers (see `crate::video`).
     pub videos: crate::video::VideoRuntime,
+    /// Motion: frames with keyframes play their timeline (see `crate::motion::playback::present`).
+    motion: crate::motion::playback::present::PresentMotion,
+    /// The texture key of the animation step last drawn per frame (older steps are dropped).
+    motion_keys: HashMap<NodeId, Key>,
 }
 
 impl PresentState {
@@ -94,6 +98,8 @@ impl PresentState {
             show_vars: false,
             vars_rect: ERect::NOTHING,
             videos: Default::default(),
+            motion: Default::default(),
+            motion_keys: HashMap::new(),
         }
     }
 
@@ -104,6 +110,8 @@ impl PresentState {
         self.smart = None;
         self.pending_url = None;
         self.videos = Default::default();
+        self.motion.reset();
+        self.motion_keys.clear();
     }
 
     fn set_fullscreen(&mut self, ctx: &Context, fullscreen: bool) {
@@ -222,12 +230,32 @@ fn render_layers(
 impl PresentState {
     fn layers(&mut self, ctx: &Context, doc: Option<&Document>, doc_id: u64, frame: NodeId, px_scale: f32) -> Option<Layers> {
         let rev = if doc_id == 0 { self.player.frame_rev(frame) } else { 0 };
+        // An animated frame is a new picture at every timeline step.
+        let motion = if doc_id == 0 && doc.is_none() {
+            let (elapsed, playing) = self.player.motion_state(frame, self.player.now);
+            self.motion.time_of(&self.player.doc, frame, elapsed, playing)
+        } else {
+            None
+        };
+        let key_rev = match motion {
+            Some(m) => (rev << 24) | (m.step & 0xFF_FFFF),
+            None => rev,
+        };
         let bits = px_scale.to_bits();
-        let ck = Key { doc: doc_id, frame, rev, scale_bits: bits, layer: 0 };
+        let ck = Key { doc: doc_id, frame, rev: key_rev, scale_bits: bits, layer: 0 };
         let fk = Key { layer: 1, ..ck };
         let frame_no = self.frame_no;
+        if motion.is_some() {
+            if let Some(old) = self.motion_keys.insert(frame, ck).filter(|o| *o != ck) {
+                self.cache.remove(&old);
+                self.cache.remove(&Key { layer: 1, ..old });
+            }
+        }
         if !self.cache.contains_key(&ck) {
-            let d = doc.unwrap_or(&self.player.doc);
+            let d = match motion {
+                Some(m) => self.motion.evaluated(&self.player.doc, frame, rev, m.t_ms)?,
+                None => doc.unwrap_or(&self.player.doc),
+            };
             let max_side = (ctx.input(|i| i.max_texture_side) as f32).min(MAX_TEX_SIDE);
             let (c, f, units) = render_layers(d, frame, px_scale, max_side)?;
             self.cache.insert(ck, Entry { tex: upload(ctx, &c, format!("present {frame:?} {rev}")), units, used: frame_no });
@@ -416,6 +444,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         st.set_fullscreen(&ctx, fullscreen);
     }
     st.player.tick(now);
+    st.motion.begin_frame();
     let is_deck = app.is_deck();
     let slides = if is_deck { app.deck_slides() } else { Vec::new() };
     // Process deck keys before computing stage geometry so differently sized slides
@@ -631,7 +660,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
         }
     }
+    st.motion.end_frame();
     st.evict();
+    if st.motion.active {
+        ctx.request_repaint();
+    }
     if st.player.anim.is_some() || st.player.overlays.iter().any(|o| o.anim.is_some()) || st.drag.is_some() {
         ctx.request_repaint();
     } else if st.player.is_animating() {
@@ -671,12 +704,12 @@ fn target_at(st: &PresentState, pos: Pos2, now: f64) -> Option<NodeId> {
         let poseoff = o.transition.map(|t| geom::overlay_pose(t.kind, o.shown(now), sz).offset).unwrap_or(Vec2::ZERO);
         let origin = st.stage.min + EV::new((o.origin.x + o.drag.x + poseoff.x) * st.scale, (o.origin.y + o.drag.y + poseoff.y) * st.scale);
         let local = Vec2::new((pos.x - origin.x) / st.scale, (pos.y - origin.y) / st.scale);
-        if let Some(h) = hit_layer(&pl.doc, o.frame, local, pl.scroll_of(o.frame)) {
+        if let Some(h) = hit_layer(st.motion.shown(o.frame).unwrap_or(&pl.doc), o.frame, local, pl.scroll_of(o.frame)) {
             return Some(h);
         }
     }
     let local = Vec2::new((pos.x - st.stage.min.x) / st.scale, (pos.y - st.stage.min.y) / st.scale);
-    hit_layer(&pl.doc, pl.current, local, pl.scroll_of(pl.current))
+    hit_layer(st.motion.shown(pl.current).unwrap_or(&pl.doc), pl.current, local, pl.scroll_of(pl.current))
 }
 
 #[allow(clippy::too_many_arguments)]

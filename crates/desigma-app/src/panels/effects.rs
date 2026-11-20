@@ -8,6 +8,7 @@ use crate::theme;
 use crate::widgets::field::{self, Prefix};
 use crate::widgets::menu::{dropdown, popup_menu, MenuItem, MenuResult};
 use crate::widgets::{self, popover};
+use desigma_doc::motion::{self, first_drop_shadow, first_layer_blur, AnimProperty, AnimValue};
 use desigma_doc::Vec2 as DVec2;
 use desigma_doc::*;
 use egui::{Color32, Id, Pos2, Rect, Ui, Vec2};
@@ -149,7 +150,7 @@ fn header(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], empty: bo
     }
 }
 
-pub(super) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], effects: &[Effect]) {
+pub(crate) fn section(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], effects: &[Effect]) {
     header(app, ui, pane, sel, effects.is_empty());
     let names: Vec<String> = KINDS.iter().map(|(n, _)| n.to_string()).collect();
     if !effects.is_empty() {
@@ -205,6 +206,60 @@ fn edit_effect(app: &mut App, ids: &[NodeId], i: usize, f: impl Fn(&mut Effect))
     });
 }
 
+/// Whether effect `i` of the first selected node is the one `prop` animates (the first drop
+/// shadow for the shadow properties, the first layer blur for the blur radius) and Motion mode is
+/// on: only then does a field get a keyframe diamond.
+fn animatable(app: &App, ids: &[NodeId], i: usize, prop: AnimProperty) -> bool {
+    let Some(n) = ids.first().and_then(|id| app.doc.get(*id)) else { return false };
+    app.motion.enabled
+        && match prop {
+            AnimProperty::BlurRadius => first_layer_blur(&n.effects) == Some(i),
+            _ => first_drop_shadow(&n.effects) == Some(i),
+        }
+}
+
+/// The effect with its animated values at the playhead (Motion mode), so the popover shows what
+/// is on the canvas.
+fn shown_effect(app: &App, ids: &[NodeId], i: usize, mut e: Effect) -> Effect {
+    let Some(n) = ids.first().and_then(|id| app.doc.get(*id)) else { return e };
+    let t = app.motion.playhead_ms as f32;
+    match &mut e {
+        Effect::DropShadow { color, offset, radius, .. } if animatable(app, ids, i, AnimProperty::ShadowX) => {
+            let get = |p| motion::value_at(n, p, t);
+            offset.x = get(AnimProperty::ShadowX).and_then(|v| v.scalar()).unwrap_or(offset.x);
+            offset.y = get(AnimProperty::ShadowY).and_then(|v| v.scalar()).unwrap_or(offset.y);
+            *radius = get(AnimProperty::ShadowBlur).and_then(|v| v.scalar()).unwrap_or(*radius);
+            *color = get(AnimProperty::ShadowColor).and_then(|v| v.color()).unwrap_or(*color);
+        }
+        Effect::LayerBlur { radius, .. } if animatable(app, ids, i, AnimProperty::BlurRadius) => {
+            *radius = motion::value_at(n, AnimProperty::BlurRadius, t).and_then(|v| v.scalar()).unwrap_or(*radius);
+        }
+        _ => {}
+    }
+    e
+}
+
+/// Draws the keyframe diamond at the right end of a popover control when `prop` is animatable and
+/// returns the (narrowed) rect left for the control.
+fn keyed(app: &mut App, ui: &mut Ui, rc: Rect, ids: &[NodeId], i: usize, prop: AnimProperty) -> Rect {
+    if !animatable(app, ids, i, prop) {
+        return rc;
+    }
+    let d = Rect::from_min_size(Pos2::new(rc.right() - 24.0, rc.top()), Vec2::splat(24.0));
+    crate::motion::inspector::diamond_for(app, ui, ids, prop, d);
+    Rect::from_min_max(rc.min, Pos2::new(rc.right() - 28.0, rc.bottom()))
+}
+
+/// Edits one animatable value: through auto-key (a keyframe at the playhead when the property is
+/// keyframed, else the static value) in Motion mode, a plain effect edit otherwise.
+fn set_fx(app: &mut App, ids: &[NodeId], i: usize, prop: AnimProperty, v: AnimValue, f: impl Fn(&mut Effect)) {
+    if animatable(app, ids, i, prop) {
+        crate::motion::inspector::edit_prop(app, ids, prop, |_| v);
+    } else {
+        edit_effect(app, ids, i, f);
+    }
+}
+
 fn num(ui: &mut Ui, r: Rect, key: impl widgets::Key, v: f32, suffix: &str) -> Option<f32> {
     field::num_field(ui, r, key, Prefix::None, Some(v), suffix)
 }
@@ -234,7 +289,7 @@ fn color_row(app: &mut App, ui: &mut Ui, r: Rect, key: (usize, u8), c: Color, ta
     out
 }
 
-pub(super) fn popover_ui(app: &mut App, ui: &mut Ui, region: Rect) {
+pub(crate) fn popover_ui(app: &mut App, ui: &mut Ui, region: Rect) {
     let Some(st) = app.props.pop.clone() else { return };
     let ctx = ui.ctx().clone();
     match st.kind {
@@ -243,6 +298,7 @@ pub(super) fn popover_ui(app: &mut App, ui: &mut Ui, region: Rect) {
                 app.props.pop = None;
                 return;
             };
+            let e = shown_effect(app, &st.ids, i, e);
             let rows = match &e {
                 Effect::DropShadow { .. } => 6,
                 Effect::InnerShadow { .. } => 5,
@@ -281,19 +337,24 @@ fn effect_body(app: &mut App, ui: &mut Ui, body: Rect, e: &Effect, i: usize, ids
         _ => None,
     };
     if let Some((color, offset, radius, spread, behind)) = shadow {
+        // only a drop shadow animates (`behind` is None for inner shadows)
+        let drop = behind.is_some();
         popover::row(ui, body, next(), "X", |ui, rc| {
+            let rc = if drop { keyed(app, ui, rc, ids, i, AnimProperty::ShadowX) } else { rc };
             if let Some(v) = num(ui, rc, ("fxp-x", i), offset.x, "") {
-                edit_effect(app, ids, i, |e| set_shadow(e, |_, o, _, _| o.x = v));
+                set_fx(app, ids, i, AnimProperty::ShadowX, AnimValue::Scalar(v), |e| set_shadow(e, |_, o, _, _| o.x = v));
             }
         });
         popover::row(ui, body, next(), "Y", |ui, rc| {
+            let rc = if drop { keyed(app, ui, rc, ids, i, AnimProperty::ShadowY) } else { rc };
             if let Some(v) = num(ui, rc, ("fxp-y", i), offset.y, "") {
-                edit_effect(app, ids, i, |e| set_shadow(e, |_, o, _, _| o.y = v));
+                set_fx(app, ids, i, AnimProperty::ShadowY, AnimValue::Scalar(v), |e| set_shadow(e, |_, o, _, _| o.y = v));
             }
         });
         popover::row(ui, body, next(), "Blur", |ui, rc| {
+            let rc = if drop { keyed(app, ui, rc, ids, i, AnimProperty::ShadowBlur) } else { rc };
             if let Some(v) = num(ui, rc, ("fxp-b", i), radius, "") {
-                edit_effect(app, ids, i, |e| set_shadow(e, |_, _, rr, _| *rr = v.max(0.0)));
+                set_fx(app, ids, i, AnimProperty::ShadowBlur, AnimValue::Scalar(v.max(0.0)), |e| set_shadow(e, |_, _, rr, _| *rr = v.max(0.0)));
             }
         });
         popover::row(ui, body, next(), "Spread", |ui, rc| {
@@ -302,8 +363,9 @@ fn effect_body(app: &mut App, ui: &mut Ui, body: Rect, e: &Effect, i: usize, ids
             }
         });
         popover::row(ui, body, next(), "Color", |ui, rc| {
+            let rc = if drop { keyed(app, ui, rc, ids, i, AnimProperty::ShadowColor) } else { rc };
             if let Some(nc) = color_row(app, ui, rc, (i, 0), color, PickTarget::Shadow(i), ids) {
-                edit_effect(app, ids, i, |e| set_shadow(e, |c, _, _, _| *c = nc));
+                set_fx(app, ids, i, AnimProperty::ShadowColor, AnimValue::Color(nc), |e| set_shadow(e, |c, _, _, _| *c = nc));
             }
         });
         if let Some(b) = behind {
@@ -321,9 +383,11 @@ fn effect_body(app: &mut App, ui: &mut Ui, body: Rect, e: &Effect, i: usize, ids
     }
     match e {
         Effect::LayerBlur { radius, .. } | Effect::BackgroundBlur { radius, .. } => {
+            let layer = matches!(e, Effect::LayerBlur { .. });
             popover::row(ui, body, next(), "Blur", |ui, rc| {
+                let rc = if layer { keyed(app, ui, rc, ids, i, AnimProperty::BlurRadius) } else { rc };
                 if let Some(v) = num(ui, rc, ("fxp-blur", i), *radius, "") {
-                    edit_effect(app, ids, i, |e| {
+                    set_fx(app, ids, i, AnimProperty::BlurRadius, AnimValue::Scalar(v.max(0.0)), |e| {
                         if let Effect::LayerBlur { radius, .. } | Effect::BackgroundBlur { radius, .. } = e {
                             *radius = v.max(0.0);
                         }

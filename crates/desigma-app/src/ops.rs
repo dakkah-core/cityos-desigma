@@ -120,11 +120,12 @@ impl App {
 
     // ------------------------------------------------------------ plumbing
     pub fn run_tx(&mut self, tx: Tx) -> bool {
-        if self.history.viewing.is_some() {
-            // an old version is shown read-only
+        if self.read_only() {
+            // an old version, or a file shared view-only, is shown read-only
             tx.cancel(&mut self.doc);
             self.changed();
-            self.show_toast("Viewing an old version is read-only", true);
+            let msg = if self.history.viewing.is_some() { "Viewing an old version is read-only" } else { "The host shared this file as view only" };
+            self.show_toast(msg, true);
             return false;
         }
         if self.scrub.is_some() {
@@ -195,47 +196,61 @@ impl App {
         self.sanitize();
     }
 
-    pub fn undo(&mut self) {
+    /// Returns whether the document changed (a history step or a pending version restore).
+    pub fn undo(&mut self) -> bool {
         if self.cityos_submission_frozen() {
             self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true);
-            return;
+            return false;
         }
         if self.doc.cityos.is_some() {
             self.request_cityos_history(false);
-            return;
+            return false;
         }
         if self.try_undo_restore() {
-            return;
+            return true;
         }
         match self.hist.undo(&mut self.doc) {
             Ok(true) => {
                 self.changed();
                 self.sanitize();
+                true
             }
-            Ok(false) => {}
-            Err(e) => self.show_toast(format!("Undo failed: {e}"), true),
+            Ok(false) => false,
+            // a person in the session deleted what this step touches: nothing to undo
+            Err(desigma_doc::DocError::NotFound(_)) if self.collab.active() => false,
+            Err(e) => {
+                self.show_toast(format!("Undo failed: {e}"), true);
+                false
+            }
         }
     }
 
-    pub fn redo(&mut self) {
+    /// Returns whether the document changed (a history step or a pending version restore).
+    pub fn redo(&mut self) -> bool {
         if self.cityos_submission_frozen() {
             self.show_toast("This submitted draft is frozen. Check its original owner outcome before editing.", true);
-            return;
+            return false;
         }
         if self.doc.cityos.is_some() {
             self.request_cityos_history(true);
-            return;
+            return false;
         }
         if self.try_redo_restore() {
-            return;
+            return true;
         }
         match self.hist.redo(&mut self.doc) {
             Ok(true) => {
                 self.changed();
                 self.sanitize();
+                true
             }
-            Ok(false) => {}
-            Err(e) => self.show_toast(format!("Redo failed: {e}"), true),
+            Ok(false) => false,
+            // a person in the session deleted what this step touches: nothing to redo
+            Err(desigma_doc::DocError::NotFound(_)) if self.collab.active() => false,
+            Err(e) => {
+                self.show_toast(format!("Redo failed: {e}"), true);
+                false
+            }
         }
     }
 
@@ -770,15 +785,11 @@ impl App {
     pub fn fit_all(&mut self) {
         let b = self.page_bounds().unwrap_or(Rect::new(0.0, 0.0, 800.0, 600.0));
         self.view = View::fit(b, self.canvas_rect.size());
-        self.changed();
     }
 
     pub fn fit_selection(&mut self) {
         match self.selection_bounds() {
-            Some(b) => {
-                self.view = View::fit(b, self.canvas_rect.size());
-                self.changed();
-            }
+            Some(b) => self.view = View::fit(b, self.canvas_rect.size()),
             None => self.fit_all(),
         }
     }
@@ -789,13 +800,11 @@ impl App {
         let z = zoom.clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
         let size = self.canvas_rect.size();
         self.view = View { zoom: z, offset: Vec2::new(b.x + b.w / 2.0 - size.x / 2.0 / z, b.y + b.h / 2.0 - size.y / 2.0 / z) };
-        self.changed();
     }
 
     pub fn zoom_to(&mut self, zoom: f32) {
         let c = self.canvas_rect.center();
         self.view.zoom_at(self.canvas_rect.min, c, zoom);
-        self.changed();
     }
 
     pub fn zoom_by(&mut self, factor: f32) {
@@ -817,6 +826,7 @@ impl App {
         if !self.flush_autosave() {
             return None;
         }
+        self.end_collab();
         self.stop_plugin();
         let (doc, path, result) = transfer(self);
         self.lib_file = None;
@@ -834,6 +844,15 @@ impl App {
         self.hover = None;
         self.file_path = path;
         self.autosave = crate::home::Autosave { seen_rev: self.canvas.tiles.rev(), saved_hash: crate::home::doc_hash(&self.doc), ..Default::default() };
+        self.file_hash = Some(crate::home::session::doc_hash(&self.doc));
+        if let Some(b) = &self.bridge.bridge {
+            b.update_document(&self.doc.name, self.file_path.as_deref());
+        }
+        // Watch this file for edits made by other programs (generators, sync clients).
+        match self.file_path.clone() {
+            Some(p) => self.watch_external(&p),
+            None => self.stop_watching(),
+        }
         self.canvas.reset_interaction();
         // a design tool means nothing on a board and the other way round
         self.tool = Tool::Move;
@@ -850,7 +869,7 @@ impl App {
 
     pub fn open_dialog(&mut self) {
         if let Some(p) = io::pick_open() {
-            self.open_path(p);
+            self.request_open(crate::instance::Open::File(p));
         }
     }
 
@@ -908,9 +927,14 @@ impl App {
                 }
             }
         }
-        match io::load_path_observed(&p) {
-            Ok((doc, fingerprint)) => {
+        let again = p.clone();
+        if !self.leave_ok(move |app| app.open_path(again)) {
+            return;
+        }
+        match io::load_path_noted_observed(&p) {
+            Ok((doc, notes, fingerprint)) => {
                 let name = doc.name.clone();
+                let source = p.clone();
                 // An SVG becomes a new unsaved document, never overwritten by Save.
                 let svg = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
                 if !self.replace_document(doc, (!svg).then_some(p)) {
@@ -919,7 +943,15 @@ impl App {
                 if !svg {
                     self.autosave.external_fingerprint = Some(fingerprint);
                 }
-                self.show_toast(format!("Opened {name}"), false);
+                match notes.split_first() {
+                    None => self.show_toast(format!("Opened {name}"), false),
+                    // What an import left out, so a missing script or icon is not a surprise.
+                    Some((first, rest)) => {
+                        let more = if rest.is_empty() { String::new() } else { format!(" (and {} more)", rest.len()) };
+                        self.show_toast(format!("Opened {name}. Not carried over: {first}{more}"), false);
+                    }
+                }
+                self.publish_shared_copy(&source);
             }
             Err(e) => self.show_toast(e, true),
         }
@@ -1000,6 +1032,12 @@ impl App {
         match self.save_external_to(&path) {
             Ok(p) => {
                 self.show_toast(format!("Saved {}", p.display()), false);
+                if self.lib_file.is_none() {
+                    self.file_path = Some(p.clone());
+                    self.file_hash = Some(crate::home::session::doc_hash(&self.doc));
+                    self.watch_external(&p);
+                    self.publish_shared_copy(&p);
+                }
             }
             Err(e) => self.show_toast(e, true),
         }
@@ -1053,6 +1091,9 @@ impl App {
     }
 
     pub fn new_document(&mut self) {
+        if !self.leave_ok(|app| app.new_document()) {
+            return;
+        }
         let mut d = Document::new("Untitled");
         d.add_page("Page 1");
         self.replace_document(d, None);
@@ -1060,6 +1101,9 @@ impl App {
 
     /// A new, empty board (whiteboard) document.
     pub fn new_board_document(&mut self) {
+        if !self.leave_ok(|app| app.new_board_document()) {
+            return;
+        }
         self.replace_document(crate::board::create::new_document("Untitled"), None);
     }
 

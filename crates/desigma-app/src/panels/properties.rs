@@ -62,25 +62,25 @@ pub struct PropsState {
     pub styles_menu: Option<bool>,
 }
 
-pub(super) struct Pane {
-    pub(super) x0: f32,
-    pub(super) oy: f32,
-    pub(super) y: f32,
+pub(crate) struct Pane {
+    pub(crate) x0: f32,
+    pub(crate) oy: f32,
+    pub(crate) y: f32,
 }
 
 impl Pane {
-    pub(super) fn rect(&self, x: f32, dy: f32, w: f32, h: f32) -> Rect {
+    pub(crate) fn rect(&self, x: f32, dy: f32, w: f32, h: f32) -> Rect {
         Rect::from_min_size(Pos2::new(self.x0 + x, self.oy + self.y + dy), Vec2::new(w, h))
     }
-    pub(super) fn col(&self, i: usize, dy: f32) -> Rect {
+    pub(crate) fn col(&self, i: usize, dy: f32) -> Rect {
         self.rect(theme::FIELD_COL_X[i], dy, theme::FIELD_WIDTH_HALF, theme::FIELD_HEIGHT)
     }
-    pub(super) fn full(&self, dy: f32) -> Rect {
+    pub(crate) fn full(&self, dy: f32) -> Rect {
         self.rect(theme::SECTION_CONTENT_X, dy, theme::SECTION_CONTENT_W, theme::FIELD_HEIGHT)
     }
 }
 
-pub(super) fn to_c32(c: Color, opacity: f32) -> Color32 {
+pub(crate) fn to_c32(c: Color, opacity: f32) -> Color32 {
     let f = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgba_unmultiplied(f(c.r), f(c.g), f(c.b), f(c.a * opacity))
 }
@@ -91,7 +91,7 @@ fn from_c32(c: Color32) -> Color {
     Color::rgba(r, g, b, a)
 }
 
-pub(super) fn section_sep(ui: &Ui, pane: &mut Pane, first: bool) {
+pub(crate) fn section_sep(ui: &Ui, pane: &mut Pane, first: bool) {
     if !first {
         widgets::hline(ui.painter(), pane.x0, pane.x0 + theme::RIGHT_PANEL_WIDTH, pane.oy + pane.y, theme::BORDER);
         pane.y += 1.0;
@@ -99,12 +99,12 @@ pub(super) fn section_sep(ui: &Ui, pane: &mut Pane, first: bool) {
 }
 
 /// Section title row; returns true when its action button was clicked.
-pub(super) fn title(ui: &mut Ui, pane: &mut Pane, text: &str, action: Option<Icon>, dim: bool) -> bool {
+pub(crate) fn title(ui: &mut Ui, pane: &mut Pane, text: &str, action: Option<Icon>, dim: bool) -> bool {
     let row = pane.rect(0.0, 0.0, theme::RIGHT_PANEL_WIDTH - 1.0, theme::SECTION_TITLE_HEIGHT);
     ui.painter().text(
         Pos2::new(row.left() + theme::SECTION_CONTENT_X, row.center().y),
         Align2::LEFT_CENTER,
-        text,
+        crate::i18n::tr(text),
         theme::font_body_strong(),
         if dim { theme::TEXT_SECONDARY } else { theme::TEXT },
     );
@@ -119,7 +119,7 @@ pub(super) fn title(ui: &mut Ui, pane: &mut Pane, text: &str, action: Option<Ico
 
 /// Fill / Stroke section header: title, the styles button (4 dots) and "+". Returns true when
 /// "+" was clicked.
-pub(super) fn paint_title(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], text: &str, stroke: bool, dim: bool) -> bool {
+pub(crate) fn paint_title(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], text: &str, stroke: bool, dim: bool) -> bool {
     title(ui, pane, text, None, dim);
     let y = -theme::SECTION_TITLE_HEIGHT + 8.0;
     let plus = pane.rect(theme::SECTION_TRAILING_X, y, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
@@ -156,18 +156,18 @@ pub(super) fn paint_title(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[No
     clicked
 }
 
-pub(super) fn sublabel(ui: &Ui, pane: &mut Pane, text: &str) {
+pub(crate) fn sublabel(ui: &Ui, pane: &mut Pane, text: &str) {
     let r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, theme::SUBLABEL_HEIGHT);
-    ui.painter().text(Pos2::new(r.left(), r.center().y), Align2::LEFT_CENTER, text, theme::font_small_medium(), theme::TEXT_SECONDARY);
+    ui.painter().text(Pos2::new(r.left(), r.center().y), Align2::LEFT_CENTER, crate::i18n::tr(text), theme::font_small_medium(), theme::TEXT_SECONDARY);
     pane.y += theme::SUBLABEL_HEIGHT + 4.0;
 }
 
 /// Row advance after a 24px field row.
-pub(super) fn row_end(pane: &mut Pane) {
+pub(crate) fn row_end(pane: &mut Pane) {
     pane.y += theme::FIELD_HEIGHT + 4.0;
 }
 
-pub(super) fn segmented(ui: &mut Ui, pane: &Pane, x: f32, key: &str, items: &[Icon], selected: Option<usize>) -> Option<usize> {
+pub(crate) fn segmented(ui: &mut Ui, pane: &Pane, x: f32, key: &str, items: &[Icon], selected: Option<usize>) -> Option<usize> {
     let mut out = None;
     let n = items.len();
     for (i, icon) in items.iter().enumerate() {
@@ -200,7 +200,7 @@ pub(super) fn segmented(ui: &mut Ui, pane: &Pane, x: f32, key: &str, items: &[Ic
     out
 }
 
-pub(super) fn checkbox(ui: &mut Ui, pane: &mut Pane, key: &str, label: &str, value: bool) -> Option<bool> {
+pub(crate) fn checkbox(ui: &mut Ui, pane: &mut Pane, key: &str, label: &str, value: bool) -> Option<bool> {
     let r = pane.rect(theme::SECTION_CONTENT_X, 0.0, theme::SECTION_CONTENT_W, theme::FIELD_HEIGHT);
     let resp = ui.interact(r, ui.id().with(("chk", key)), Sense::click());
     let b = Rect::from_min_size(Pos2::new(r.left(), r.center().y - 7.0), Vec2::splat(14.0));
@@ -793,6 +793,8 @@ fn set_sizing(app: &mut App, sel: &[NodeId], horizontal: bool, s: Sizing) {
             } else if t.auto_resize != TextAutoResize::None {
                 t.auto_resize = TextAutoResize::None;
             }
+            // Hug takes effect now, not at the next text edit (#71).
+            n.size = crate::layout::fit_text(t, n.size);
         }
     });
 }
@@ -969,28 +971,44 @@ const PAINT_GROUP_W: f32 = 159.0;
 /// x of the divider between the hex and opacity cells, from the group's left edge.
 const PAINT_DIVIDER_X: f32 = 104.0;
 
-pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], paints: &[Paint], stroke: bool) {
+pub(crate) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[NodeId], paints: &[Paint], stroke: bool) {
     let linked: Option<String> = sel
         .first()
         .and_then(|s| app.doc.get(*s))
         .and_then(|n| n.style_refs.get(if stroke { "stroke" } else { "fill" }))
         .map(|k| app.doc.style_name(k).to_string());
+    // Motion mode: the first solid paint carries the colour keyframe diamond (the animated paint
+    // of FillColor / StrokeColor), so the rows are narrower to make room for it.
+    let anim_prop = if stroke { desigma_doc::motion::AnimProperty::StrokeColor } else { desigma_doc::motion::AnimProperty::FillColor };
+    let motion = app.motion.enabled && linked.is_none();
+    let anim_row = if motion { paints.iter().position(|p| matches!(p.kind, PaintKind::Solid(_))) } else { None };
+    let (group_w, divider_x) = if motion { (134.0, 72.0) } else { (PAINT_GROUP_W, PAINT_DIVIDER_X) };
     if !paints.is_empty() {
         // Figma sits the first row 4px under the title row.
         pane.y += 4.0;
     }
     for (i, p) in paints.iter().enumerate() {
         let key = (stroke, i);
-        let g = pane.rect(theme::SWATCH_ROW_X, 0.0, PAINT_GROUP_W, theme::FIELD_HEIGHT);
+        let animated = anim_row == Some(i);
+        let tracked = animated && sel.iter().any(|id| app.doc.get(*id).is_some_and(|n| n.motion.track(anim_prop).is_some()));
+        // the animated paint shows its colour at the playhead
+        let shown_paint;
+        let p = match crate::motion::inspector::shown(app, sel, anim_prop).first().and_then(|v| v.color()).filter(|_| animated) {
+            Some(c) => {
+                shown_paint = Paint { kind: PaintKind::Solid(c), ..p.clone() };
+                &shown_paint
+            }
+            None => p,
+        };
+        let g = pane.rect(theme::SWATCH_ROW_X, 0.0, group_w, theme::FIELD_HEIGHT);
         let sw = Rect::from_min_size(Pos2::new(g.left() + 4.0, g.center().y - theme::SWATCH_SIZE / 2.0), Vec2::splat(theme::SWATCH_SIZE));
-        let hex_r = Rect::from_min_max(
-            Pos2::new(g.left() + theme::FIELD_PREFIX_X + theme::FIELD_PREFIX_ICON, g.top()),
-            Pos2::new(g.left() + PAINT_DIVIDER_X, g.bottom()),
-        );
-        let op_r = Rect::from_min_max(Pos2::new(g.left() + PAINT_DIVIDER_X + 1.0, g.top()), Pos2::new(g.right() - 16.0, g.bottom()));
+        let hex_r =
+            Rect::from_min_max(Pos2::new(g.left() + theme::FIELD_PREFIX_X + theme::FIELD_PREFIX_ICON, g.top()), Pos2::new(g.left() + divider_x, g.bottom()));
+        let op_r = Rect::from_min_max(Pos2::new(g.left() + divider_x + 1.0, g.top()), Pos2::new(g.right() - 16.0, g.bottom()));
         let eye_r = pane.rect(theme::RIGHT_NAME_ACTION_X[1] - 1.0 + 4.0, 0.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
         let minus_r = pane.rect(theme::SECTION_TRAILING_X, 0.0, theme::PANEL_ACTION_BUTTON, theme::PANEL_ACTION_BUTTON);
         widgets::record(ui, &format!("sw:{stroke}:{i}"), sw);
+        widgets::record(ui, &format!("hex:{stroke}:{i}"), hex_r);
         // Group chrome: one rounded field with a hairline between hex and opacity.
         let hex_id = ui.id().with(("txt", ("hex", key)));
         let op_id = ui.id().with(("num", ("op", key)));
@@ -1009,9 +1027,9 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
         let var_key = format!("{}/{i}", if stroke { "strokes" } else { "fills" });
         let bound = var_bind::pill_field(app, ui, Rect::from_min_max(hex_r.min, Pos2::new(g.right(), hex_r.bottom())), sel, &[var_key.as_str()]);
         if !bound {
-            widgets::vline(ui.painter(), g.left() + PAINT_DIVIDER_X, g.top(), g.bottom(), theme::BG);
+            widgets::vline(ui.painter(), g.left() + divider_x, g.top(), g.bottom(), theme::BG);
         }
-        if swr.clicked() && !bound {
+        if swr.clicked() && !bound && !tracked {
             let target = if stroke { PickTarget::Stroke(i) } else { PickTarget::Fill(i) };
             open_picker(app, target, paint_preview(p), sw, sel.to_vec());
         }
@@ -1024,11 +1042,17 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
             PaintKind::Solid(c) => {
                 if let Some(s) = field::edit_text(ui, hex_r, hex_id, &c.to_hex(), font.clone(), theme::TEXT, 0.0) {
                     if let Some(nc) = Color::from_hex(&s) {
-                        edit_paint_list(app, sel, stroke, |ps| {
-                            if let Some(p) = ps.get_mut(i) {
-                                p.kind = PaintKind::Solid(Color { a: c.a, ..nc });
-                            }
-                        });
+                        if animated {
+                            crate::motion::inspector::edit_prop(app, sel, anim_prop, |cur| {
+                                desigma_doc::motion::AnimValue::Color(Color { a: cur.color().map_or(c.a, |o| o.a), ..nc })
+                            });
+                        } else {
+                            edit_paint_list(app, sel, stroke, |ps| {
+                                if let Some(p) = ps.get_mut(i) {
+                                    p.kind = PaintKind::Solid(Color { a: c.a, ..nc });
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -1036,7 +1060,7 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
                 widgets::field_text(ui.painter(), hex_r, 0.0, 4.0, &paint_label(p), font.clone(), theme::TEXT);
             }
         }
-        if !bound && matches!(p.kind, PaintKind::Solid(_)) {
+        if !bound && !motion && matches!(p.kind, PaintKind::Solid(_)) {
             var_bind::hover_button(app, ui, hex_r, sel, &[var_key.as_str()], VariableKind::Color);
         }
         if !bound {
@@ -1068,6 +1092,10 @@ pub(super) fn paint_rows(app: &mut App, ui: &mut Ui, pane: &mut Pane, sel: &[Nod
                     ps.remove(i);
                 }
             });
+        }
+        if animated {
+            let d_r = pane.rect(theme::SWATCH_ROW_X + 138.0, 0.0, 24.0, 24.0);
+            crate::motion::inspector::diamond_for(app, ui, sel, anim_prop, d_r);
         }
         pane.y += theme::FIELD_HEIGHT + 8.0;
     }
@@ -1102,7 +1130,7 @@ fn swatch_sources(app: &App) -> Vec<(String, Vec<Color32>)> {
     out
 }
 
-pub(super) fn open_picker(app: &mut App, target: PickTarget, color: Color32, anchor: Rect, ids: Vec<NodeId>) {
+pub(crate) fn open_picker(app: &mut App, target: PickTarget, color: Color32, anchor: Rect, ids: Vec<NodeId>) {
     let paint = node_paint(app, target, &ids).unwrap_or_else(|| {
         let [r, g, b, a] = color.to_srgba_unmultiplied();
         Paint { opacity: a as f32 / 255.0, ..Paint::solid(Color::rgba(r, g, b, 255)) }
@@ -1185,18 +1213,15 @@ fn sample_canvas(app: &App, pos: Pos2) -> Option<[u8; 3]> {
 /// Creates a colour style from the picker's paint and links it to the edited layers.
 fn create_style(app: &mut App, pk: &mut Picker) {
     let stroke = matches!(pk.target, PickTarget::Stroke(_));
-    let mut n = 1;
-    while app.doc.styles.contains_key(&format!("Color style {n}")) {
-        n += 1;
-    }
-    let key = format!("Color style {n}");
+    let (key, n) = app.doc.fresh_style_key("Color style");
+    let name = format!("Color style {n}");
     // Creating the style and linking it to the layers is one undo step (the picker's transaction).
     let mut styles = app.doc.styles.clone();
     let mut style_meta = app.doc.style_meta.clone();
     styles.insert(key.clone(), Style::Fill(vec![Paint { visible: true, ..pk.paint.clone() }]));
     style_meta.insert(
         key.clone(),
-        StyleMeta { name: key.clone(), key: None, description: String::new(), property: if stroke { StyleProperty::Stroke } else { StyleProperty::Fill } },
+        StyleMeta { name, key: None, description: String::new(), property: if stroke { StyleProperty::Stroke } else { StyleProperty::Fill } },
     );
     if let Err(e) = pk.tx.cmd(&mut app.doc, Command::SetStyles { styles, style_meta }) {
         app.show_toast(format!("Edit failed: {e}"), true);
@@ -1210,7 +1235,7 @@ fn create_style(app: &mut App, pk: &mut Picker) {
     app.show_toast(format!("Created \"{key}\""), false);
 }
 
-pub(super) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
+pub(crate) fn picker_popup(app: &mut App, ui: &mut Ui, region: Rect) {
     use widgets::picker;
     let Some(mut pk) = app.props.picker.take() else { return };
     let ctx = ui.ctx().clone();
@@ -1547,5 +1572,31 @@ mod tests {
         n.kind = NodeKind::Frame(FrameProps { auto_layout: Some(AutoLayout { primary_sizing: Sizing::Hug, ..Default::default() }), ..Default::default() });
         assert_eq!(sizing_of(&n, true), Sizing::Hug);
         assert_eq!(sizing_of(&n, false), Sizing::Fixed);
+    }
+
+    /// Switching a text's height to Hug fits the box to its wrapped lines at once (#71).
+    #[test]
+    fn hug_height_fits_a_text_box_to_its_lines() {
+        let mut d = Document::new("t");
+        let page = d.add_page("P");
+        let id = d.alloc_id();
+        let mut t = Node::text(
+            id,
+            desigma_doc::Rect::new(0.0, 0.0, 120.0, 20.0),
+            "one two three four five six seven eight nine ten eleven twelve",
+            TextStyle::default(),
+        );
+        if let NodeKind::Text(p) = &mut t.kind {
+            p.auto_resize = TextAutoResize::None;
+        }
+        let id = d.insert(page, t).unwrap();
+        let mut app = App::new(d);
+        set_sizing(&mut app, &[id], false, Sizing::Hug);
+        let n = app.doc.get(id).unwrap();
+        assert_eq!(n.size.x, 120.0, "width stays fixed");
+        assert!(n.size.y > 40.0, "height grows to the wrapped lines: {}", n.size.y);
+        let hugged = n.size.y;
+        set_sizing(&mut app, &[id], false, Sizing::Fixed);
+        assert_eq!(app.doc.get(id).unwrap().size.y, hugged, "back to fixed keeps the size");
     }
 }

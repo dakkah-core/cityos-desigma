@@ -233,6 +233,7 @@ impl App {
                     Err(e) => self.show_toast(format!("Could not create the sample project: {e}"), true),
                 }
                 self.lib = Some(lib);
+                self.load_ai_settings();
             }
             Err(e) => self.show_toast(format!("Cannot open the library at {}: {e}", root.display()), true),
         }
@@ -240,6 +241,9 @@ impl App {
 
     /// Shows the home screen ("Back to files"), saving pending edits first.
     pub fn go_home(&mut self) {
+        if !self.leave_ok(|app| app.go_home()) {
+            return;
+        }
         let Some(lib) = self.lib.clone() else {
             self.show_toast("The projects library is unavailable", true);
             return;
@@ -249,6 +253,7 @@ impl App {
             return;
         }
         self.save_close_version();
+        self.end_collab();
         self.stop_plugin();
         self.canvas.reset_interaction();
         let mut home = Home::new();
@@ -260,6 +265,10 @@ impl App {
 
     /// Opens a library file in the editor.
     pub fn open_library_file(&mut self, id: &str) {
+        let again = id.to_string();
+        if !self.leave_ok(move |app| app.open_library_file(&again)) {
+            return;
+        }
         let Some(lib) = self.lib.clone() else { return };
         // Observe our own pending save before loading its successor checkpoint.
         if self.lib_file.as_ref().is_some_and(|file| file.id == id) {
@@ -329,6 +338,10 @@ impl App {
     }
 
     fn new_library_file_of(&mut self, target: Option<(String, Option<String>)>, kind: DocumentKind) {
+        let again = (target.clone(), kind);
+        if !self.leave_ok(move |app| app.new_library_file_of(again.0, again.1)) {
+            return;
+        }
         if !self.flush_autosave() {
             return;
         }
@@ -381,16 +394,28 @@ impl App {
 
     /// Writes the open library file (no toast); also refreshes its thumbnail.
     pub fn save_library_file(&mut self) -> Result<(), String> {
+        self.write_library_file(false).map(|_| ())
+    }
+
+    /// [`Self::save_library_file`]; with `only_changes` a document identical to the saved one is
+    /// not rewritten. The document is serialized once, for both the comparison and the write.
+    /// Returns whether the file was written.
+    fn write_library_file(&mut self, only_changes: bool) -> Result<bool, String> {
         crate::decks::ui::flush_notes(self);
         let (Some(lib), Some(lf)) = (self.lib.clone(), self.lib_file.clone()) else { return Err("This file is not in the library".into()) };
         if self.history.viewing.is_some() {
             // an old version is on screen: the file on disk must keep the live document
             return Err("Go back to the current version before saving".into());
         }
-        // Prepare the comparison before writing; only install it after persistence.
+        if only_changes && !self.autosave_target_changed()? {
+            self.autosave.changed_at = None;
+            return Ok(false);
+        }
+        // Persist the document and its history as one checkpoint, with the observed generation
+        // as a compare-and-swap guard. Install the new baseline only after persistence succeeds.
         self.autosave = self.persist_library_checkpoint(&self.doc, &self.hist)?;
         thumb::refresh_in_background(lib, lf.id, self.export_doc().into_owned());
-        Ok(())
+        Ok(true)
     }
 
     /// Ctrl+S on a library file.
@@ -419,6 +444,8 @@ impl App {
             }
         }
         self.autosave.changed_at = None;
+        self.autosave.failures = 0;
+        self.autosave.retry_at = None;
         true
     }
 
@@ -568,5 +595,76 @@ impl App {
             Section::Project(p, f) => Some((p.clone(), f.clone())),
             _ => None,
         }
+    }
+
+    /// Copies a design opened from outside the library into `shared/`, which is inside the folder
+    /// assistants are allowed to read. Nothing is copied unless the agent bridge is on, and a file
+    /// that already lives in the library is not copied.
+    pub fn publish_shared_copy(&mut self, source: &std::path::Path) {
+        if self.bridge.bridge.is_none() || self.lib_file.is_some() {
+            return;
+        }
+        let Some(lib) = self.lib.clone() else { return };
+        if !path_outside_library(lib.root(), source) {
+            return;
+        }
+        if let Err(e) = write_shared(lib.root(), &self.doc, source) {
+            self.show_toast(format!("Could not share the file with assistants: {e}"), true);
+        }
+    }
+}
+
+fn path_outside_library(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(path) = path.canonicalize() else { return true };
+    let Ok(root) = root.canonicalize() else { return true };
+    !path.starts_with(root)
+}
+
+/// File name safe on Windows. Letters from any language stay; only characters Windows
+/// forbids are removed. A short hash of the source path keeps two files of the same name apart.
+fn shared_file_name(name: &str, source: &std::path::Path) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            continue;
+        }
+        out.push(c);
+    }
+    let stem = out.trim().trim_end_matches(['.', ' ']);
+    let stem: String = stem.chars().take(80).collect();
+    let stem = if stem.is_empty() { "Imported".to_string() } else { stem };
+    format!("{stem}-{}", short_hash(source))
+}
+
+fn short_hash(source: &std::path::Path) -> String {
+    let key = source.canonicalize().unwrap_or_else(|_| source.to_path_buf());
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in key.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:08x}", (hash & 0xffff_ffff) as u32)
+}
+
+fn write_shared(root: &std::path::Path, doc: &Document, source: &std::path::Path) -> Result<(), String> {
+    let dir = root.join(desigma_library::SHARED_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.desigma", shared_file_name(&doc.name, source)));
+    let json = doc.to_json().map_err(|e| e.to_string())?;
+    desigma_library::write_atomic(&path, json.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod shared_name_tests {
+    use super::*;
+
+    #[test]
+    fn shared_names_keep_unicode_and_do_not_collide() {
+        let poster = shared_file_name("海报", std::path::Path::new("D:/one/海报.desigma"));
+        let other = shared_file_name("海报", std::path::Path::new("D:/two/海报.desigma"));
+        assert!(poster.starts_with("海报-"), "{poster}");
+        assert_ne!(poster, other);
+        let stripped = shared_file_name("Hello:World", std::path::Path::new("x"));
+        assert!(stripped.starts_with("HelloWorld-"), "{stripped}");
     }
 }

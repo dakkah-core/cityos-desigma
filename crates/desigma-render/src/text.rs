@@ -141,6 +141,28 @@ pub fn load_font_data(data: Vec<u8>) {
     register_font(data)
 }
 
+/// The file of the installed font that has exactly `family` (never a fallback), at the face
+/// nearest `weight` / `italic`, to hand to a collaborator who lacks it. `None` when the family is
+/// not installed, and for the faces embedded in the binary (every desktop has those).
+pub fn font_file(family: &str, weight: u16, italic: bool) -> Option<Vec<u8>> {
+    with_fonts(|f| {
+        if !f.families.contains(&family.to_lowercase()) {
+            return None;
+        }
+        let q = fontdb::Query {
+            families: &[fontdb::Family::Name(family)],
+            weight: fontdb::Weight(weight),
+            stretch: fontdb::Stretch::Normal,
+            style: if italic { fontdb::Style::Italic } else { fontdb::Style::Normal },
+        };
+        let id = f.fs.db().query(&q)?;
+        if f.bundled.contains(&id) {
+            return None;
+        }
+        f.fs.db().with_face_data(id, |data, _| data.to_vec())
+    })
+}
+
 /// Which font a text style will be shaped with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFont {

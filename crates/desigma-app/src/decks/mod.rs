@@ -60,6 +60,9 @@ impl App {
     }
 
     pub fn new_deck_document(&mut self) {
+        if !self.leave_ok(|app| app.new_deck_document()) {
+            return;
+        }
         if !self.replace_document(new_document("Untitled deck"), None) {
             return;
         }

@@ -44,16 +44,33 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
         app.start_present();
     }
 
+    // Session controls (Share, people), left of Present.
+    let row = Rect::from_min_max(Pos2::new(left + theme::RIGHT_TABS_X, pb.top()), Pos2::new(pb.left() - 8.0, pb.bottom()));
+    crate::collab::ui::topbar(app, ui, row);
+
     // Tabs.
     let mut x = left + theme::RIGHT_TABS_X;
     let ty = rect.top() + theme::RIGHT_TABS_Y;
     let active = app.ui.right_tab.unwrap_or(RightTab::Design);
-    for (tab, label) in [(RightTab::Design, "Design"), (RightTab::Prototype, "Prototype")] {
+    let tabs: &[(RightTab, &str)] = if app.motion.enabled { &[] } else { &[(RightTab::Design, "Design"), (RightTab::Prototype, "Prototype")] };
+    if app.motion.enabled {
+        // Motion mode: a "Motion  Beta" title replaces the Design / Prototype tabs.
+        let font = theme::font_body_strong();
+        let motion = crate::i18n::tr("Motion");
+        let tw = widgets::text_width(&p, motion, &font);
+        p.text(Pos2::new(x + theme::RIGHT_TAB_PAD_X, ty + theme::RIGHT_TABS_H / 2.0), Align2::LEFT_CENTER, motion, font, theme::TEXT);
+        let pill = Rect::from_min_size(Pos2::new(x + theme::RIGHT_TAB_PAD_X + tw + 6.0, ty + 5.0), Vec2::new(30.0, 14.0));
+        p.rect_filled(pill, theme::cr(7), theme::BG_SECONDARY);
+        p.text(pill.center(), Align2::CENTER_CENTER, crate::i18n::tr("Beta"), theme::font_small_medium(), theme::TEXT_SECONDARY);
+        crate::widgets::record(ui, "motion-beta-pill", pill);
+    }
+    for &(tab, key) in tabs {
+        let label = crate::i18n::tr(key);
         let sel = tab == active;
         let font = if sel { theme::font_body_strong() } else { theme::font_body() };
         let w = widgets::text_width(&p, label, &font) + theme::RIGHT_TAB_PAD_X * 2.0;
         let r = Rect::from_min_size(Pos2::new(x, ty), Vec2::new(w, theme::RIGHT_TABS_H));
-        let resp = ui.interact(r, ui.id().with(("tab", label)), Sense::click());
+        let resp = ui.interact(r, ui.id().with(("tab", key)), Sense::click());
         if sel {
             p.rect_filled(r, theme::cr(theme::RADIUS_MEDIUM), theme::BG_SECONDARY);
         } else if resp.hovered() {
@@ -81,7 +98,9 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect) {
     let content_top = rect.top() + theme::RIGHT_CONTENT_TOP - 1.0;
     widgets::hline(&p, rect.left() + 1.0, right, content_top, theme::BORDER);
     let region = Rect::from_min_max(Pos2::new(rect.left() + 1.0, content_top + 1.0), rect.max);
-    if active == RightTab::Prototype {
+    if app.motion.enabled {
+        crate::motion::inspector::show(app, ui, region);
+    } else if active == RightTab::Prototype {
         super::prototype::show(app, ui, region);
     } else if app.ui.dev_mode {
         super::inspect::show(app, ui, region);

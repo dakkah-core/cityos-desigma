@@ -617,13 +617,16 @@ fn action_json(doc: &Document, a: &Action, tr: Option<&Transition>) -> Value {
         }
         Action::Conditional { branches, otherwise } => {
             m.insert("type".into(), "CONDITIONAL".into());
-            let list = |acts: &[Action]| Value::Array(acts.iter().map(|x| action_json(doc, x, tr)).collect());
+            let list =
+                |acts: &[Action]| Value::Array(acts.iter().filter(|x| !matches!(x, Action::Animation { .. })).map(|x| action_json(doc, x, tr)).collect());
             let mut blocks: Vec<Value> = branches.iter().map(|(c, acts)| json!({"condition": expression_json(doc, c), "actions": list(acts)})).collect();
             if !otherwise.is_empty() {
                 blocks.push(json!({"actions": list(otherwise)}));
             }
             m.insert("conditionalBlocks".into(), Value::Array(blocks));
         }
+        // Motion timelines have no Figma action; the call sites skip these.
+        Action::Animation { .. } => {}
         Action::MediaControl { dest, op } => {
             m.insert("type".into(), "UPDATE_MEDIA_RUNTIME".into());
             m.insert("destinationId".into(), id(dest).into());
@@ -755,7 +758,8 @@ fn walk(doc: &Document, by_fig: &BTreeMap<String, NodeId>, overlay: &BTreeMap<St
                 .reactions
                 .iter()
                 .map(|r| {
-                    let actions: Vec<Value> = r.actions.iter().map(|a| action_json(doc, a, r.transition.as_ref())).collect();
+                    let actions: Vec<Value> =
+                        r.actions.iter().filter(|a| !matches!(a, Action::Animation { .. })).map(|a| action_json(doc, a, r.transition.as_ref())).collect();
                     json!({"trigger": trigger_json(&r.trigger), "actions": actions})
                 })
                 .collect();

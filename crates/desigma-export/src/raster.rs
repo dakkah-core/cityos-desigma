@@ -78,6 +78,26 @@ impl std::fmt::Display for ExportScale {
     }
 }
 
+/// Pixel dimensions `render_export` would allocate for `node` at `scale`,
+/// without rendering anything. Lets callers reject runaway exports (huge
+/// layers, extreme scale, variable-resolved sizes, effect overflow) before
+/// paying for the allocation. `None` if `node` doesn't exist.
+pub fn render_size(doc: &Document, node: NodeId, scale: f32) -> Option<(u32, u32)> {
+    let n = doc.get(node)?;
+    let scale = scale.clamp(0.01, 32.0);
+    let is_page = matches!(n.kind, NodeKind::Page { .. });
+    let b = render_bounds(doc, node);
+    let nominal = Rect::new(0.0, 0.0, n.size.x, n.size.y);
+    if !is_page && b == nominal {
+        let w = (n.size.x * scale).ceil().max(1.0) as u32;
+        let h = (n.size.y * scale).ceil().max(1.0) as u32;
+        return Some((w, h));
+    }
+    let w = (b.w * scale).ceil().clamp(1.0, 16_384.0) as u32;
+    let h = (b.h * scale).ceil().clamp(1.0, 16_384.0) as u32;
+    Some((w, h))
+}
+
 /// Renders `node` at `scale`, including effect overflow. Transparent background.
 pub fn render_export(doc: &Document, node: NodeId, scale: f32) -> Option<Pixmap> {
     let n = doc.get(node)?;
@@ -88,8 +108,7 @@ pub fn render_export(doc: &Document, node: NodeId, scale: f32) -> Option<Pixmap>
     if !is_page && b == nominal {
         return render_node(doc, node, scale);
     }
-    let w = (b.w * scale).ceil().clamp(1.0, 16_384.0) as u32;
-    let h = (b.h * scale).ceil().clamp(1.0, 16_384.0) as u32;
+    let (w, h) = render_size(doc, node, scale)?;
     let mut pm = Pixmap::new(w, h)?;
     let vp = Viewport { offset: Vec2::new(0.0, 0.0), zoom: scale, dpr: 1.0 };
     if is_page {

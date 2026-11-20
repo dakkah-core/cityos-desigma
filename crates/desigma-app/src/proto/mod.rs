@@ -185,6 +185,7 @@ pub const ACTIONS: &[&str] = &[
     "Set variable mode",
     "Conditional",
     "Control video",
+    "Control animation",
 ];
 
 pub fn action_index(a: &Action) -> usize {
@@ -201,6 +202,7 @@ pub fn action_index(a: &Action) -> usize {
         Action::SetVariableMode { .. } => 9,
         Action::Conditional { .. } => 10,
         Action::MediaControl { .. } => 11,
+        Action::Animation { .. } => 12,
     }
 }
 
@@ -238,8 +240,45 @@ pub fn action_of_index(doc: &Document, i: usize, prev: &Action, fallback_dest: N
             }
         }
         10 => Action::Conditional { branches: vec![(Expression::boolean(true), vec![Action::Back])], otherwise: Vec::new() },
-        _ => Action::MediaControl { dest: video_layers(doc).first().copied().unwrap_or(dest), op: MediaOp::TogglePlay },
+        11 => Action::MediaControl { dest: video_layers(doc).first().copied().unwrap_or(dest), op: MediaOp::TogglePlay },
+        _ => Action::Animation { dest: None, op: AnimationOp::RESUME },
     }
+}
+
+pub const ANIMATION_OPS: &[&str] = &["Play", "Play from start", "Pause", "Restart", "Toggle play/pause"];
+
+pub fn animation_op_index(op: &AnimationOp) -> usize {
+    match op {
+        AnimationOp::Play { from_start: false } => 0,
+        AnimationOp::Play { from_start: true } => 1,
+        AnimationOp::Pause => 2,
+        AnimationOp::Restart => 3,
+        AnimationOp::TogglePlay => 4,
+    }
+}
+
+pub fn animation_op_of_index(i: usize) -> AnimationOp {
+    match i {
+        0 => AnimationOp::Play { from_start: false },
+        1 => AnimationOp::Play { from_start: true },
+        2 => AnimationOp::Pause,
+        3 => AnimationOp::Restart,
+        _ => AnimationOp::TogglePlay,
+    }
+}
+
+/// Frames (top-level, with their names) that have a Motion timeline worth controlling: any
+/// layer inside animates.
+pub fn animated_frames(doc: &Document, frames: &[NodeId]) -> Vec<NodeId> {
+    frames
+        .iter()
+        .copied()
+        .filter(|f| {
+            let mut any = false;
+            doc.walk(*f, |n, _| any |= !n.motion.is_empty());
+            any
+        })
+        .collect()
 }
 
 /// "Set variable" on the first variable, with a value that suits its type.
@@ -313,7 +352,8 @@ pub fn action_animates(a: &Action) -> bool {
         | Action::OpenUrl { .. }
         | Action::SetVariable { .. }
         | Action::SetVariableMode { .. }
-        | Action::MediaControl { .. } => false,
+        | Action::MediaControl { .. }
+        | Action::Animation { .. } => false,
         _ => true,
     }
 }
@@ -354,6 +394,10 @@ pub fn action_label(doc: &Document, a: &Action) -> String {
             format!("If {first}{tail}")
         }
         Action::MediaControl { dest, op } => format!("{} {}", MEDIA_OPS[media_op_index(op)], name(dest)),
+        Action::Animation { dest, op } => {
+            let target = dest.map(|d| name(&d)).unwrap_or_else(|| "this frame".into());
+            format!("{} animation of {target}", ANIMATION_OPS[animation_op_index(op)])
+        }
     }
 }
 

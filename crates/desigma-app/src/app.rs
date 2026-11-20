@@ -135,6 +135,11 @@ pub struct App {
     /// Shared libraries (publishing, enabled libraries, updates).
     pub libs: crate::libraries::LibrariesState,
     pub plugins: crate::plugins::PluginsState,
+    pub bridge: crate::bridge::BridgeState,
+    /// Preferences / home → Claude… connection dialog.
+    pub mcp_dialog: bool,
+    /// Why the last Claude connection attempt failed, shown in the dialog.
+    pub mcp_error: Option<String>,
     pub proto: crate::proto::ProtoState,
     /// Find and replace panel state (Ctrl+F).
     pub find: crate::find::FindState,
@@ -173,6 +178,20 @@ pub struct App {
     pub decks: crate::decks::DecksState,
     /// Update notifications (banner, dialog, background checks).
     pub updater: crate::updater::UpdaterState,
+    /// Motion (Beta) mode state shared by the inspector, timeline and playback.
+    pub motion: crate::motion::MotionUi,
+    /// Motion inspector: easing editor, animation library and clip popovers.
+    pub motion_ins: crate::motion::inspector::InspectorState,
+    /// Live collaboration: sharing, joining, other people's presence.
+    pub collab: crate::collab::CollabState,
+    /// Hash of the document as opened or last saved to a file; `None` until then (see `unsaved.rs`).
+    pub file_hash: Option<u64>,
+    /// An open waiting for the answer to "Discard unsaved changes?".
+    pub pending_open: Option<crate::instance::Open>,
+    /// AI images: the OpenRouter settings, the open dialog and running requests (see `aiimg`).
+    pub ai: crate::aiimg::AiState,
+    /// Watching the open file for changes made by other programs (see `extwatch.rs`).
+    pub ext_watch: Option<crate::extwatch::Watch>,
 }
 
 impl App {
@@ -196,6 +215,9 @@ impl App {
             assets: Default::default(),
             libs: Default::default(),
             plugins: Default::default(),
+            bridge: Default::default(),
+            mcp_dialog: false,
+            mcp_error: None,
             proto: Default::default(),
             find: Default::default(),
             ui: UiState { pixel_grid: true, ..UiState::default() },
@@ -221,6 +243,13 @@ impl App {
             board: Default::default(),
             decks: Default::default(),
             updater: Default::default(),
+            motion: Default::default(),
+            motion_ins: Default::default(),
+            collab: Default::default(),
+            file_hash: None,
+            pending_open: None,
+            ai: Default::default(),
+            ext_watch: None,
         }
     }
 
@@ -230,8 +259,17 @@ impl App {
         if done.loaded > 0 {
             self.changed();
         }
-        if let Some(first) = done.failed.first() {
-            let more = done.failed.len() - 1;
+        // A guest first asks the host for the fonts the shared file uses.
+        let pairs: Vec<_> = done.failed.into_iter().zip(done.failed_requests).collect();
+        let rest = self.ask_host_for_fonts(pairs.iter().map(|(_, r)| r.clone()).collect());
+        let failed: Vec<String> = pairs.into_iter().filter(|(_, r)| rest.contains(r)).map(|(msg, _)| msg).collect();
+        self.toast_fonts_unavailable(&failed);
+    }
+
+    /// "Font unavailable: Family 400: reason (+2 more)".
+    pub fn toast_fonts_unavailable(&mut self, failed: &[String]) {
+        if let Some(first) = failed.first() {
+            let more = failed.len() - 1;
             let suffix = if more > 0 { format!(" (+{more} more)") } else { String::new() };
             self.show_toast(format!("Font unavailable: {first}{suffix}"), true);
         }
@@ -241,7 +279,9 @@ impl App {
         self.toast = Some(Toast { text: text.into(), until: self.now + theme::TOAST_SECONDS, error });
     }
 
-    /// Marks the document as modified so the canvas texture is re-rendered.
+    /// Marks the document as modified so the canvas texture is re-rendered. Not for view
+    /// changes (pan, zoom): the renderers follow the viewport by themselves, and a revision bump
+    /// re-indexes the page and makes autosave hash the whole document.
     pub fn changed(&mut self) {
         self.canvas.dirty = true;
         // A bound draft can change while the native canvas is hidden. Autosave
@@ -255,6 +295,13 @@ impl App {
 
     pub fn cityos_submission_frozen(&self) -> bool {
         self.doc.cityos.as_ref().is_some_and(|binding| self.ui.cityos_frozen_draft.as_deref() == Some(binding.draft_id.as_str()))
+    }
+
+    /// The document as drawn: in Motion mode the page evaluated at the playhead (animated
+    /// positions, sizes and rotations), else the stored document. Selection boxes, handles and the
+    /// motion gizmo are placed with it so they sit on what is on screen.
+    pub fn shown_doc(&self) -> &desigma_doc::Document {
+        self.canvas.motion.document(self.motion.enabled, &self.doc)
     }
 
     pub fn is_selected(&self, id: NodeId) -> bool {
@@ -284,7 +331,7 @@ impl App {
 
     pub fn title(&self) -> String {
         let name = if self.doc.name.is_empty() { "Untitled" } else { &self.doc.name };
-        format!("{name} - {}", theme::APP_TITLE)
+        format!("{name} - {}", theme::display_title())
     }
 }
 

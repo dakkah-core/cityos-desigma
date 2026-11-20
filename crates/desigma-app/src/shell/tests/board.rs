@@ -1024,8 +1024,9 @@ fn voting_session_counts_votes_and_lists_results() {
     assert_eq!(s.app().board.votes_each, desigma_doc::VOTES_DEFAULT + 1);
     let go = s.rect_of("board-vote-go");
     s.click(go.center());
+    let me = crate::board::session::voter_id(&mut s.shell.app);
     let v = session(&s).vote.unwrap();
-    assert_eq!((v.votes_per_person, v.ended, v.used()), (4, false, 0));
+    assert_eq!((v.votes_per_person, v.ended, v.used(&me)), (4, false, 0));
     assert!(session(&s).voting());
     // clicking items votes instead of selecting
     let (pa, pb, pc) = (node_center(&s, a), node_center(&s, b), node_center(&s, c));
@@ -1034,7 +1035,7 @@ fn voting_session_counts_votes_and_lists_results() {
     s.click(pb);
     assert!(s.app().selection.is_empty(), "votes do not select");
     let v = session(&s).vote.unwrap();
-    assert_eq!((v.count(a), v.count(b), v.left()), (2, 1, 1));
+    assert_eq!((v.count(a), v.count(b), v.left(&me)), (2, 1, 1));
     // Alt takes a vote back
     s.mods = Modifiers::ALT;
     s.click(pa);
@@ -1045,7 +1046,7 @@ fn voting_session_counts_votes_and_lists_results() {
     s.click(pc);
     s.click(pc);
     let v = session(&s).vote.unwrap();
-    assert_eq!((v.count(c), v.left()), (2, 0), "the third click found no votes left");
+    assert_eq!((v.count(c), v.left(&me)), (2, 0), "the third click found no votes left");
     s.click(pb);
     assert_eq!(session(&s).vote.unwrap().count(b), 1, "no votes left");
     // each vote is one undo step
@@ -1079,4 +1080,73 @@ fn voting_session_counts_votes_and_lists_results() {
     assert!(session(&s).vote.is_none());
     s.cmd_key(Key::Z);
     assert!(session(&s).vote.is_some());
+}
+
+#[test]
+fn the_vote_limit_counts_only_my_votes_and_totals_are_sums() {
+    let mut s = board_sim();
+    let a = add_sticky(&mut s, 100.0, 200.0, "Alpha");
+    let b = add_sticky(&mut s, 400.0, 200.0, "Beta");
+    let go_vote = |s: &mut Sim| {
+        let start = s.rect_of("board-vote-start");
+        s.click(start.center());
+        let go = s.rect_of("board-vote-go");
+        s.click(go.center());
+    };
+    go_vote(&mut s);
+    let me = crate::board::session::voter_id(&mut s.shell.app);
+    assert_eq!(crate::board::session::voter_id(&mut s.shell.app), me, "the id is stable");
+    // someone else spent all their votes, and used up more than the limit in total
+    let mut sess = session(&s);
+    let v = sess.vote.as_mut().unwrap();
+    for _ in 0..desigma_doc::VOTES_DEFAULT {
+        assert!(v.add(a, "other"));
+    }
+    s.shell.app.doc.board_session = sess;
+    s.frame(vec![]);
+    let (pa, pb) = (node_center(&s, a), node_center(&s, b));
+    // my own votes still work: three of mine, then the fourth is refused
+    for _ in 0..4 {
+        s.click(pa);
+    }
+    let v = session(&s).vote.unwrap();
+    assert_eq!((v.count_by(a, &me), v.count_by(a, "other"), v.count(a)), (3, 3, 6));
+    assert_eq!((v.left(&me), v.left("other")), (0, 0));
+    s.click(pb);
+    assert_eq!(session(&s).vote.unwrap().count(b), 0, "I have none left");
+    // Alt takes back only mine
+    s.mods = Modifiers::ALT;
+    s.click(pb);
+    s.click(pa);
+    s.mods = Modifiers::NONE;
+    let v = session(&s).vote.unwrap();
+    assert_eq!((v.count_by(a, &me), v.count_by(a, "other"), v.left(&me)), (2, 3, 1));
+    // the results show the sum of everyone
+    s.click(pb);
+    let end = s.rect_of("board-vote-end");
+    s.click(end.center());
+    let v = session(&s).vote.unwrap();
+    assert_eq!(v.results(&s.app().doc), vec![(a, 5), (b, 1)]);
+    assert_eq!(v.total(), 6);
+    let _ = s.rect_of("board-vote-row-1");
+}
+
+#[test]
+fn votes_of_an_old_file_count_as_one_legacy_voter() {
+    let mut s = board_sim();
+    let a = add_sticky(&mut s, 100.0, 200.0, "Alpha");
+    let mut sess = session(&s);
+    let old = format!(r#"{{"votes_per_person":3,"ended":false,"votes":{{"{}":2}}}}"#, a.0);
+    sess.vote = Some(serde_json::from_str(&old).unwrap());
+    s.shell.app.doc.board_session = sess;
+    s.frame(vec![]);
+    let v = session(&s).vote.unwrap();
+    assert_eq!(v.count(a), 2);
+    // this install is a new voter with its full budget, on top of the old votes
+    let me = crate::board::session::voter_id(&mut s.shell.app);
+    assert_eq!(v.left(&me), 3);
+    let pa = node_center(&s, a);
+    s.click(pa);
+    let v = session(&s).vote.unwrap();
+    assert_eq!((v.count(a), v.count_by(a, desigma_doc::LEGACY_VOTER)), (3, 2));
 }

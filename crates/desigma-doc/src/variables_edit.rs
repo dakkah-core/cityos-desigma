@@ -10,6 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct VariableStore {
     pub variables: BTreeMap<String, Variable>,
     pub collections: BTreeMap<String, VariableCollection>,
+    /// Collaboration peer of the document the store was read from. New ids carry it
+    /// (`prefix:d{peer}-{n}`), so two people adding at once never pick the same id.
+    pub peer: Option<u32>,
 }
 
 /// Default value for a new variable of `kind`.
@@ -43,7 +46,7 @@ pub fn split_name(name: &str) -> (&str, &str) {
 
 impl VariableStore {
     pub fn from_doc(doc: &Document) -> Self {
-        Self { variables: doc.variables.clone(), collections: doc.variable_collections.clone() }
+        Self { variables: doc.variables.clone(), collections: doc.variable_collections.clone(), peer: doc.id_peer() }
     }
 
     /// The undoable command that installs this state.
@@ -62,7 +65,10 @@ impl VariableStore {
     fn fresh_id_avoiding(&self, prefix: &str, avoid: &BTreeSet<String>) -> String {
         let mut n = 1u64;
         loop {
-            let id = format!("{prefix}:d{n}");
+            let id = match self.peer {
+                Some(peer) => format!("{prefix}:d{peer}-{n}"),
+                None => format!("{prefix}:d{n}"),
+            };
             let taken = avoid.contains(&id)
                 || self.variables.contains_key(&id)
                 || self.collections.contains_key(&id)

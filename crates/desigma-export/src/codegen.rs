@@ -18,6 +18,10 @@ impl Out {
         self.lines.push(format!("{}{}", self.unit.repeat(depth), s.as_ref()));
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
     pub fn finish(self) -> String {
         self.lines.join("\n")
     }

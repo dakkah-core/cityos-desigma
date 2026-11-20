@@ -40,7 +40,11 @@ impl Sim {
         // like the real window: Tab presses of a text session are taken out before egui sees them
         let mut raw = raw;
         eframe::App::raw_input_hook(shell, &ctx, &mut raw);
-        let out = ctx.run_ui(raw, |ui| shell.draw(ui));
+        // like eframe: `logic` runs before every UI pass
+        let out = ctx.run_ui(raw, |ui| {
+            eframe::App::logic(shell, ui.ctx(), &mut eframe::Frame::_new_kittest());
+            shell.draw(ui)
+        });
         self.cursor = out.platform_output.cursor_icon;
         self.shapes = out.shapes;
     }
@@ -930,6 +934,7 @@ fn layout_guide_section_edits_the_grids_of_a_frame() {
     }
 }
 
+mod aiimg;
 mod board;
 mod board_blocks;
 mod board_home;
@@ -942,7 +947,12 @@ mod find;
 mod history;
 mod home;
 mod menus;
+mod motion;
+mod motion_gaps;
+mod motion_inspector;
+mod motion_timeline;
 mod proto;
+mod proto_motion;
 mod proto_vars;
 mod svg;
 mod typography;
@@ -950,7 +960,55 @@ mod variables;
 mod vector;
 
 mod assets_thumbs;
+mod bridge;
+mod collab;
+mod extwatch;
 mod libraries;
 mod lint;
 mod plugins;
+mod unsaved;
 mod updater;
+
+fn ime(s: &mut Sim, ev: egui::ImeEvent) {
+    s.frame(vec![Event::Ime(ev)]);
+}
+
+#[test]
+fn empty_ime_preedit_keeps_selected_text() {
+    // Linux input methods send an empty preedit after Ctrl+A or entering a text (#19, #20).
+    let mut s = Sim::new();
+    s.key(Key::T);
+    let p = s.screen(300.0, 820.0);
+    s.click(p);
+    s.type_text("hello world");
+    let id = s.app().selection[0];
+    s.cmd_key(Key::A);
+    ime(&mut s, egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None });
+    ime(&mut s, egui::ImeEvent::Commit(String::new()));
+    assert_eq!(text_of(&s, id).content, "hello world");
+    assert_eq!(s.app().canvas.text.as_ref().unwrap().range(), 0..11, "the text stays selected");
+
+    // Back in after Escape: still intact.
+    s.key(Key::Escape);
+    s.click(p);
+    s.click(p);
+    ime(&mut s, egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None });
+    assert_eq!(text_of(&s, id).content, "hello world");
+
+    // A real composition still replaces the selection.
+    s.cmd_key(Key::A);
+    ime(&mut s, egui::ImeEvent::Preedit { text: "ni".into(), active_range_chars: None });
+    ime(&mut s, egui::ImeEvent::Commit("你".into()));
+    assert_eq!(text_of(&s, id).content, "你");
+}
+
+#[test]
+fn projects_next_to_the_library_are_reported() {
+    let base = std::env::temp_dir().join(format!("desigma-stray-{}", std::process::id()));
+    let lib = base.join("library");
+    std::fs::create_dir_all(lib.join("projects")).unwrap();
+    assert_eq!(crate::shell::stray_projects_dir(&lib), None, "only the library's own projects");
+    std::fs::create_dir_all(base.join("projects")).unwrap();
+    assert_eq!(crate::shell::stray_projects_dir(&lib), Some(base.join("projects")));
+    let _ = std::fs::remove_dir_all(&base);
+}

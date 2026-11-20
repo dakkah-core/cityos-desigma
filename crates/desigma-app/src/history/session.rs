@@ -33,6 +33,10 @@ impl App {
 
     /// Shows version `n` read-only on the canvas.
     pub fn view_version(&mut self, n: u32) {
+        if self.collab.hosting() {
+            self.show_toast("Stop sharing to look at old versions", true);
+            return;
+        }
         let (Some(lib), Some(lf)) = (self.lib.clone(), self.lib_file.clone()) else { return };
         let mut doc = match lib.load_version(&lf.id, n) {
             Ok(d) => d,
@@ -69,6 +73,10 @@ impl App {
     /// "Restore this version": the current state becomes an automatic version first, then
     /// version `n` becomes the current document. One undo brings the old state back.
     pub fn restore_version(&mut self, n: u32) {
+        if self.collab.hosting() {
+            self.show_toast("Stop sharing to restore an old version", true);
+            return;
+        }
         let (Some(lib), Some(lf)) = (self.lib.clone(), self.lib_file.clone()) else { return };
         let mut old = match lib.load_version(&lf.id, n) {
             Ok(d) => d,

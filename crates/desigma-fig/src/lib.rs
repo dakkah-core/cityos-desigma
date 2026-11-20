@@ -16,6 +16,7 @@ mod dev;
 mod export;
 mod fig;
 pub mod kiwi;
+mod motion;
 mod proto;
 #[cfg(feature = "net")]
 pub mod rest;

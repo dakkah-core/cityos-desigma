@@ -34,8 +34,8 @@ pub use outline::{
 };
 use paint::{blend_mode, fill_paths, stroke_paths, PaintEnv};
 pub use text::{
-    available_families, font_features, font_generation, load_font_data, register_font, resolve_font, text_geometry, text_runs, GlyphRun, GlyphSpan, LineGeom,
-    ResolvedFont, RunLine, TextGeometry, TextRuns,
+    available_families, font_features, font_file, font_generation, load_font_data, register_font, resolve_font, text_geometry, text_runs, GlyphRun, GlyphSpan,
+    LineGeom, ResolvedFont, RunLine, TextGeometry, TextRuns,
 };
 pub use tiles::{Tile, TileBudget, TileCache, TileFrame, TileKey, TILE_SIZE};
 pub use tiny_skia;

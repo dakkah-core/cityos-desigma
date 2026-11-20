@@ -130,6 +130,8 @@ pub struct CanvasState {
     pub tiles: tiles::TileView,
     /// GPU canvas renderer state (preference, availability, caches).
     pub gpu: gpu::GpuView,
+    /// Motion mode: the evaluated page and the playback clock.
+    pub motion: crate::motion::playback::Playback,
     pub inter: Interaction,
     pub guides: Vec<snap::Guide>,
     pub measures: Vec<snap::Measure>,
@@ -242,17 +244,20 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: ERect) {
     // While the colour picker waits for an eyedropper click the canvas must not react.
     let eyedropping = app.props.picker.as_ref().is_some_and(|p| p.eyedrop);
     // An old version shown from the version history is read-only.
-    let read_only = app.history.viewing.is_some();
+    let read_only = app.read_only();
     if !eyedropping && !read_only && !proto::process(app, ui, rect, &resp) {
         interact::process(app, ui, rect, &resp);
     }
     crate::comments::pins::process(app, rect, &resp);
     grids::paint(app, ui, rect);
     draw::overlays(app, ui, rect);
+    crate::collab::draw::overlays(app, ui, rect);
+    crate::motion::inspector::paint_overlay(app, ui, rect);
     vector::toolbar(app, ui, rect);
     rulers::overlay(app, ui, rect);
     proto::overlays(app, ui, rect);
     crate::panels::inspect::measure_overlay(app, ui, rect);
+    crate::aiimg::ui::canvas_overlay(app, ui, rect);
     crate::dev::annot::overlay(app, ui, rect);
     if resp.hovered() || !matches!(app.canvas.inter, Interaction::None) {
         if let Some(c) = app.canvas.cursor {

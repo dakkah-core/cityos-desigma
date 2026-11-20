@@ -166,6 +166,43 @@ pub enum Action {
         dest: NodeId,
         op: MediaOp,
     },
+    /// Control the Motion timeline of a frame (Present only). `dest` is the frame to animate,
+    /// or any layer in it; `None` means the frame of the layer that triggers the action. A frame
+    /// that is the target of any such action waits (shows the timeline's start) until it is
+    /// played; other animated frames play when they appear.
+    Animation {
+        #[serde(default)]
+        dest: Option<NodeId>,
+        #[serde(default)]
+        op: AnimationOp,
+    },
+}
+
+/// What an [`Action::Animation`] does to a frame's timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnimationOp {
+    /// Play; `from_start` rewinds first, otherwise it resumes (a finished one-shot starts over).
+    Play {
+        #[serde(default)]
+        from_start: bool,
+    },
+    /// Hold the timeline where it is.
+    Pause,
+    /// Rewind to the start and play.
+    Restart,
+    /// Pause when playing, resume otherwise.
+    TogglePlay,
+}
+
+impl Default for AnimationOp {
+    fn default() -> Self {
+        Self::RESUME
+    }
+}
+
+impl AnimationOp {
+    /// `Play { from_start: false }`, the default.
+    pub const RESUME: AnimationOp = AnimationOp::Play { from_start: false };
 }
 
 /// Playback control of a video layer (Figma's media actions plus loop).
@@ -266,5 +303,31 @@ pub struct PrototypeProps {
 impl PrototypeProps {
     pub fn is_empty(&self) -> bool {
         self.reactions.is_empty() && self.overflow == Overflow::None && self.fixed_children.is_empty() && self.videos.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod animation_tests {
+    use super::*;
+
+    #[test]
+    fn animation_actions_round_trip_and_default() {
+        let r = Reaction {
+            trigger: Trigger::WhileHovering,
+            actions: vec![
+                Action::Animation { dest: None, op: AnimationOp::Pause },
+                Action::Animation { dest: Some(NodeId(7)), op: AnimationOp::Play { from_start: true } },
+                Action::Animation { dest: None, op: AnimationOp::Restart },
+                Action::Animation { dest: None, op: AnimationOp::TogglePlay },
+            ],
+            transition: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Reaction>(&json).unwrap(), r);
+        // fields can be left out: resume the frame's own animation
+        let a: Action = serde_json::from_str(r#"{"Animation":{}}"#).unwrap();
+        assert_eq!(a, Action::Animation { dest: None, op: AnimationOp::RESUME });
+        let a: Action = serde_json::from_str(r#"{"Animation":{"op":{"Play":{}}}}"#).unwrap();
+        assert_eq!(a, Action::Animation { dest: None, op: AnimationOp::RESUME });
     }
 }

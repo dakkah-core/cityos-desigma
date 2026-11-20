@@ -7,7 +7,7 @@
 
 pub mod dialog;
 mod main_view;
-mod session;
+pub(crate) mod session;
 mod sidebar;
 pub mod thumb;
 pub mod time;
@@ -219,6 +219,10 @@ pub enum Act {
     NewFile,
     NewBoard,
     Import,
+    /// Opens the Join session dialog.
+    JoinSession,
+    /// Opens the Claude connection dialog.
+    Mcp,
     NewProject,
     RenameProject(String),
     DeleteProject(String),
@@ -412,10 +416,17 @@ pub fn apply(app: &mut App, act: Act) {
             };
             app.new_library_board(target);
         }
+        Act::JoinSession => app.open_join(None),
+        Act::Mcp => {
+            app.mcp_error = None;
+            app.mcp_dialog = true;
+            changed = false;
+        }
         Act::Import => {
             let paths = rfd::FileDialog::new()
-                .add_filter("Design files", &["fig", "json", "svg", "desigma"])
+                .add_filter("Design files", &["fig", "pen", "json", "svg", "desigma"])
                 .add_filter("Figma file", &["fig"])
+                .add_filter("Pencil file", &["pen"])
                 .add_filter("SVG", &["svg"])
                 .add_filter("JSON", &["json"])
                 .add_filter("desigma", &["desigma"])

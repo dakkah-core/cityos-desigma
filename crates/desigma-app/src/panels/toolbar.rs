@@ -148,7 +148,8 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         if resp.clicked() {
             app.set_tool(tool);
         }
-        let tip = if tool.shortcut().is_empty() { tool.label().to_string() } else { format!("{}   {}", tool.label(), tool.shortcut()) };
+        let name = crate::i18n::tr(tool.label());
+        let tip = if tool.shortcut().is_empty() { name.to_string() } else { format!("{name}   {}", tool.shortcut()) };
         resp.on_hover_text(tip);
         x += theme::TOOL_BUTTON;
         if has_chev {
@@ -187,21 +188,30 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
     widgets::vline(&p, x, bar.top() + 1.0, bar.bottom() - 1.0, theme::BORDER);
     x += theme::BORDER_WIDTH + theme::TOOLBAR_DIVIDER_GAP_AFTER;
 
-    // Mode switcher: draw, design, prototype, dev (design / dev are the working modes).
+    // Mode switcher: draw, design, motion, prototype, dev (design / motion / dev are the working modes).
     let sw = Rect::from_min_size(Pos2::new(x, y), Vec2::new(mode_switch_width(), theme::TOOL_BUTTON));
     p.rect_filled(sw, theme::cr(theme::RADIUS_MEDIUM), theme::BG_TOOLBAR_MODE_SWITCHER);
-    let modes = [(Icon::Pencil, "Draw"), (Icon::Design, "Design"), (Icon::Component, "Prototype"), (Icon::Dev, "Dev mode")];
-    for (i, (icon, label)) in modes.into_iter().enumerate() {
+    let modes = [
+        (Icon::Pencil, "Draw", "mode-draw"),
+        (Icon::Design, "Design", "mode-design"),
+        (Icon::Motion, "Motion (Beta)", "mode-motion"),
+        (Icon::Component, "Prototype", "mode-prototype"),
+        (Icon::Dev, "Dev mode", "mode-dev"),
+    ];
+    for (i, (icon, label, rec)) in modes.into_iter().enumerate() {
         let r = Rect::from_min_size(
             Pos2::new(x + theme::MODE_SWITCH_PAD + i as f32 * theme::MODE_SWITCH_W, y + theme::MODE_SWITCH_PAD),
             Vec2::new(theme::MODE_SWITCH_W, theme::TOOL_BUTTON - theme::MODE_SWITCH_PAD * 2.0),
         );
+        widgets::record(ui, rec, r);
         let resp = ui.interact(r, ui.id().with(("mode", i)), Sense::click());
         let proto_mode = app.ui.right_tab == Some(crate::app::RightTab::Prototype);
         let sel = if app.ui.dev_mode {
-            i == 3
-        } else if proto_mode {
+            i == 4
+        } else if app.motion.enabled {
             i == 2
+        } else if proto_mode {
+            i == 3
         } else {
             i == 1
         };
@@ -213,6 +223,10 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
         }
         icons::paint(&p, icon, r.center(), 16.0, if sel { theme::ICON_SELECTED } else { theme::ICON_SECONDARY });
         if resp.on_hover_text(label).clicked() {
+            if matches!(i, 1 | 3 | 4) {
+                app.motion.enabled = false;
+                app.motion.playing = false;
+            }
             match i {
                 1 => {
                     app.ui.dev_mode = false;
@@ -220,9 +234,14 @@ pub fn show(app: &mut App, ui: &mut Ui, screen: Rect) {
                 }
                 2 => {
                     app.ui.dev_mode = false;
-                    app.ui.right_tab = Some(crate::app::RightTab::Prototype);
+                    app.ui.right_tab = Some(crate::app::RightTab::Design);
+                    app.motion.enabled = true;
                 }
                 3 => {
+                    app.ui.dev_mode = false;
+                    app.ui.right_tab = Some(crate::app::RightTab::Prototype);
+                }
+                4 => {
                     app.ui.dev_mode = true;
                     app.ui.right_tab = Some(crate::app::RightTab::Design);
                 }
@@ -246,12 +265,12 @@ mod tests {
     }
 
     #[test]
-    fn toolbelt_is_512_wide_like_figma() {
-        assert_eq!(toolbar_width(), 512.0);
-        assert_eq!(mode_switch_width(), 122.0);
+    fn toolbelt_is_541_wide_with_the_motion_mode() {
+        assert_eq!(toolbar_width(), 541.5);
+        assert_eq!(mode_switch_width(), 151.5);
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
         let r = toolbar_rect(screen);
-        assert_eq!((r.left(), r.right()), (144.0, 656.0));
+        assert_eq!((r.left(), r.right()), (129.25, 670.75));
     }
 
     #[test]
