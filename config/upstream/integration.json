@@ -184,10 +184,24 @@
       ]
     },
     {
-      "id": "maintenance",
-      "purpose": "Preserve fork toolchain, platform integration, documentation and source-boundary qualification.",
-      "invariant": "The pinned Rust toolchain and maintained native extension are preserved across ordinary upstream merges.",
+      "id": "cityos-exchange-contract",
+      "purpose": "Define the versioned CityOS design-exchange binding model consumed by the document layer.",
+      "invariant": "Bindings accept only supported v1-v3 schemas, pin canonical Git or authorized native-owner revisions, keep exchange identity and base data consistent, and require typed semantic contracts and command receipts for v3.",
       "paths": [
+        "crates/desigma-cityos-contract/Cargo.toml",
+        "crates/desigma-cityos-contract/src/lib.rs",
+        "crates/desigma-doc/Cargo.toml"
+      ],
+      "tests": [
+        "crates/desigma-cityos-contract/src/lib.rs"
+      ]
+    },
+    {
+      "id": "maintenance",
+      "purpose": "Preserve fork toolchain, platform integration, repository instructions, documentation and source-boundary qualification.",
+      "invariant": "The pinned Rust toolchain and maintained native extension remain intact, and fork-specific agent instructions stay scoped to this checkout.",
+      "paths": [
+        "AGENTS.md",
         ".github/workflows/ci.yml",
         ".gitignore",
         ".impeccable.md",
